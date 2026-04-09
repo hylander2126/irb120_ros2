@@ -27,6 +27,11 @@
   <depend>joint_trajectory_controller</depend>
   <depend>control_msgs</depend>
   <depend>trajectory_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>moveit_configs_utils</depend>
+  <depend>moveit_ros_move_group</depend>
+  <depend>shape_msgs</depend>
+  <depend>tf2_ros</depend>
   <depend>abb_rapid_sm_addin_msgs</depend>
   <depend>abb_robot_msgs</depend>
   <depend>ros2_control</depend>

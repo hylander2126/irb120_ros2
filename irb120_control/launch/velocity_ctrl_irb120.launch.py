@@ -24,10 +24,7 @@ def generate_launch_description():
         parameters=[
             {"rws_service_prefix": "/rws_client"},
             {"task": "T_ROB1"},
-            {"stop_egm_after_startup": True},
-            {"one_shot": True},
             {"startup_service_timeout_sec": 30.0},
-            {"shutdown_on_exit": False},
         ],
     )
 

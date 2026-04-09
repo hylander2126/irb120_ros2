@@ -15,10 +15,7 @@ class EGMHandler(Node):
 
         self.declare_parameter("rws_service_prefix", "/rws_client")
         self.declare_parameter("task", "T_ROB1")
-        self.declare_parameter("stop_egm_after_startup", True)
-        self.declare_parameter("one_shot", True)
         self.declare_parameter("startup_service_timeout_sec", 30.0)
-        self.declare_parameter("shutdown_on_exit", False)
 
         self.declare_parameter("max_speed_dev_rad", 1.5)
         self.declare_parameter("comm_timeout", 5.0)
@@ -28,10 +25,7 @@ class EGMHandler(Node):
 
         self.rws_prefix = self.get_parameter("rws_service_prefix").value.rstrip("/")
         self.task = self.get_parameter("task").value
-        self.stop_egm_after_startup = bool(self.get_parameter("stop_egm_after_startup").value)
-        self.one_shot = bool(self.get_parameter("one_shot").value)
         self.startup_service_timeout_sec = float(self.get_parameter("startup_service_timeout_sec").value)
-        self.shutdown_on_exit = bool(self.get_parameter("shutdown_on_exit").value)
 
         self.rapid_stop_srv = f"{self.rws_prefix}/stop_rapid"
         self.pp_to_main_srv = f"{self.rws_prefix}/pp_to_main"
@@ -154,10 +148,10 @@ class EGMHandler(Node):
 
         code, msg = self._call_trigger(self.egm_start_srv, sleep_after=0.5)
         self.get_logger().info(f"start_egm_joint -> code={code}, msg='{msg}'")
+        time.sleep(1.0)
 
-        if self.stop_egm_after_startup:
-            code, msg = self._call_trigger(self.egm_stop_srv, sleep_after=0.25)
-            self.get_logger().info(f"post_startup stop_egm -> code={code}, msg='{msg}'")
+        self.get_logger().info("EGM remains active until shutdown_sequence() or a manual stop request.")
+
 
 
 def main(args=None):
@@ -166,16 +160,12 @@ def main(args=None):
 
     try:
         node.startup_sequence()
-        if node.one_shot:
-            node.get_logger().info("EGM handler one-shot completed. Exiting.")
-        else:
-            node.get_logger().info("EGM handler completed startup sequence and is now idle.")
-            rclpy.spin(node)
+        node.get_logger().info("EGM handler startup completed. Waiting for Ctrl+C to shutdown cleanly.")
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        if node.shutdown_on_exit:
-            node.shutdown_sequence()
+        node.shutdown_sequence()
         node.destroy_node()
         rclpy.shutdown()
 

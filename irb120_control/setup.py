@@ -34,6 +34,7 @@ setup(
         'console_scripts': [
             'egm_handler = irb120_control.egm_handler:main',
             'test_motion = irb120_control.test_motion:main',
+            'pose_goal_moveit = irb120_control.pose_goal_moveit:main',
         ],
     },
 )
