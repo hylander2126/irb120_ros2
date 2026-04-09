@@ -1,0 +1,36 @@
+<?xml version="1.0" ?>
+
+<robot name="abb_irb120_3_58" xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  <xacro:arg name="fake_sensor_commands" default="false"/>
+  <xacro:arg name="rws_ip" default="None"/>
+  <xacro:arg name="rws_port" default="80"/>
+  <xacro:arg name="rws_username" default="ROS"/>
+  <xacro:arg name="rws_password" default="robotics"/>
+  <xacro:arg name="egm_port" default="6511"/>
+  <xacro:arg name="configure_via_rws" default="true"/>
+  <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
+  <xacro:property name="fake_sensor_commands" value="$(arg fake_sensor_commands)"/>
+  <xacro:property name="rws_ip" value="$(arg rws_ip)"/>
+  <xacro:property name="rws_port" value="$(arg rws_port)"/>
+  <xacro:property name="rws_username" value="$(arg rws_username)"/>
+  <xacro:property name="rws_password" value="$(arg rws_password)"/>
+  <xacro:property name="egm_port" value="$(arg egm_port)"/>
+  <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
+
+  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58_macro.xacro"/>
+  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58.ros2_control.xacro"/>
+  <xacro:abb_irb120_3_58 prefix=""/>
+
+  <xacro:abb_irb120_3_58_ros2_control
+    name="ABBSystemHardware"
+    prefix=""
+    use_fake_hardware="${use_fake_hardware}"
+    fake_sensor_commands="${fake_sensor_commands}"
+    rws_ip="${rws_ip}"
+    rws_port="${rws_port}"
+    rws_username="${rws_username}"
+    rws_password="${rws_password}"
+    egm_port="${egm_port}"
+    configure_via_rws="${configure_via_rws}"/>
+</robot>

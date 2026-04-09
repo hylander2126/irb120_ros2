@@ -1,0 +1,143 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="abb_irb120_3_58">
+
+  <xacro:arg name="prefix" default=""/>
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  <xacro:arg name="fake_sensor_commands" default="false"/>
+  <xacro:arg name="rws_ip" default="None"/>
+  <xacro:arg name="rws_port" default="80"/>
+  <xacro:arg name="rws_username" default="ROS"/>
+  <xacro:arg name="rws_password" default="robotics"/>
+  <xacro:arg name="egm_port" default="6511"/>
+  <xacro:arg name="configure_via_rws" default="true"/>
+
+  <xacro:property name="prefix" value="$(arg prefix)"/>
+  <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
+  <xacro:property name="fake_sensor_commands" value="$(arg fake_sensor_commands)"/>
+  <xacro:property name="rws_ip" value="$(arg rws_ip)"/>
+  <xacro:property name="rws_port" value="$(arg rws_port)"/>
+  <xacro:property name="rws_username" value="$(arg rws_username)"/>
+  <xacro:property name="rws_password" value="$(arg rws_password)"/>
+  <xacro:property name="egm_port" value="$(arg egm_port)"/>
+  <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
+
+  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58_macro.xacro"/>
+  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58.ros2_control.xacro"/>
+  <xacro:abb_irb120_3_58 prefix="${prefix}"/>
+
+  <xacro:abb_irb120_3_58_ros2_control
+    name="ABBSystemHardware"
+    prefix="${prefix}"
+    use_fake_hardware="${use_fake_hardware}"
+    fake_sensor_commands="${fake_sensor_commands}"
+    rws_ip="${rws_ip}"
+    rws_port="${rws_port}"
+    rws_username="${rws_username}"
+    rws_password="${rws_password}"
+    egm_port="${egm_port}"
+    configure_via_rws="${configure_via_rws}"/>
+
+  <!-- ====== Params to tweak ====== -->
+  <xacro:property name="ft_mass" value="0.255"/>          <!-- kg (sensor) (from spec sheet) -->
+  <xacro:property name="ft_cog_z" value="0.063"/>         <!-- meters in tool frame (from spec sheet)-->
+  <xacro:property name="ft_length" value="0.08225"/>         <!-- FT sensor length -->
+  <xacro:property name="finger_mass" value="0.066"/>      <!-- kg (finger) (from onshape) -->
+  <xacro:property name="finger_length" value="0.110"/>   <!-- finger length (from onshape)-->
+  <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
+
+  <!-- Calibrated so that when finger_tip touches the table, FK reports z=-0.01199 in base_link -->
+  <xacro:property name="table_to_base_z" value="0.035"/>  <!-- was 0.01199 meters -->
+
+  <!-- ====== FT sensor link mounted to link_6 ====== -->
+  <link name="ft_link">
+    <inertial>
+      <origin xyz="0 0 ${ft_cog_z}" rpy="0 0 0"/>
+      <mass value="${ft_mass}"/>
+      <inertia ixx="5e-4" iyy="5e-4" izz="5e-4" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="${ft_length}"/>
+      </geometry>
+      <material name="Grey">
+        <color rgba="0.6 0.6 0.6 1.0"/>
+      </material>
+    </visual>
+    <!-- Basic cylinder collision geom -->
+    <collision>
+        <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
+        <geometry>
+            <cylinder radius="0.025" length="${ft_length / 2.5}"/>
+        </geometry>
+    </collision>
+  </link>
+
+  <joint name="link_6_to_ft" type="fixed">
+    <parent link="link_6"/>
+    <!-- Adjust xyz/rpy to match your real mounting orientation -->
+    <origin xyz="0 0 0" rpy="0 1.5708 0"/> <!-- Was 0.0001 0 0-->
+    <child link="ft_link"/>
+  </joint>
+
+  <!-- ====== Finger link ====== -->
+  <link name="finger_link">
+
+    <!-- Inertial properties -->
+    <inertial>
+        <origin xyz="0 0 0.026" rpy="0 0 0"/>   <!-- adjust CoG -->
+        <mass value="${finger_mass}"/>                   <!-- kg -->
+        <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/> <!-- kg mm^2-->
+    </inertial>
+    <!-- Visual geometry -->
+    <visual>
+      <origin xyz="0 0 ${finger_length / 2}" rpy="0 0 0"/>
+        <geometry>
+        <cylinder radius="0.008" length="${finger_length}"/>
+        </geometry>
+        <material name="white">
+            <color rgba="1.0 1.0 1.0 1.0"/>
+        </material>
+    </visual>
+    <!-- Simple cylinder geom -->
+    <collision>
+        <origin xyz="0 0 ${finger_length / 4}" rpy="0 0 0"/>      <!-- adjust offset/orientation if needed -->
+        <geometry>
+            <cylinder radius=".008" length="${finger_length / 2}"/>
+        </geometry>
+    </collision>
+  </link>
+
+  <joint name="ft_to_finger" type="fixed">
+    <parent link="ft_link"/>
+    <origin xyz="0 0 ${ft_length}" rpy="0 0 0"/> <!-- adjust as needed -->
+    <child link="finger_link"/>
+  </joint>
+
+  <!-- ====== Convenience EE frames ====== -->
+  <!-- tool0 at end of adapter (beginning of finger) -->
+  <!-- <link name="tool0"/>
+  <joint name="finger_adapter_to_tool0" type="fixed">
+    <parent link="finger_adapter"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="tool0"/>
+  </joint> -->
+
+  <!-- finger_tip at the very end of the finger -->
+  <link name="finger_tip"/>
+  <joint name="finger_to_tip" type="fixed">
+    <parent link="finger_link"/>
+    <origin xyz="0 0 ${finger_length}" rpy="0 0 0"/>
+    <child link="finger_tip"/>
+  </joint>
+
+  <link name='table'/>
+
+  <!-- Table is the parent (world-ish), base_link is lifted above it by table_to_base_z -->
+  <joint name="table_to_base_link" type="fixed">
+    <parent link="table"/>
+    <origin xyz="0 0 ${table_to_base_z}" rpy="0 0 0"/>
+    <child link="base_link"/>
+  </joint>
+
+</robot>

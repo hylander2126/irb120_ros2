@@ -1,0 +1,97 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="abb_irb120_3_58_ros2_control" params="name prefix use_fake_hardware:=true fake_sensor_commands:=false rws_ip rws_port rws_username:=ROS rws_password:=robotics configure_via_rws:=true egm_port:=6511">
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <xacro:if value="${use_fake_hardware}">
+          <plugin>mock_components/GenericSystem</plugin>
+          <param name="fake_sensor_commands">${fake_sensor_commands}</param>
+          <param name="state_following_offset">0.0</param>
+        </xacro:if>
+        <xacro:unless value="${use_fake_hardware}">
+          <plugin>irb120_abb_hardware_interface/ABBSystemHardware</plugin>
+          <param name="configure_via_rws">${configure_via_rws}</param>
+          <param name="rws_port">${rws_port}</param>
+          <param name="rws_ip">${rws_ip}</param>
+          <param name="rws_username">${rws_username}</param>
+          <param name="rws_password">${rws_password}</param>
+          <param name="egm_port">${egm_port}</param>
+        </xacro:unless>
+      </hardware>
+
+      <joint name="${prefix}joint_1">
+        <command_interface name="position">
+          <param name="min">-2.87979</param>
+          <param name="max">2.87979</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="${prefix}joint_2">
+        <command_interface name="position">
+          <param name="min">-1.91986</param>
+          <param name="max">1.91986</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="${prefix}joint_3">
+        <command_interface name="position">
+          <param name="min">-1.91986</param>
+          <param name="max">1.22173</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="${prefix}joint_4">
+        <command_interface name="position">
+          <param name="min">-2.79253</param>
+          <param name="max">2.79253</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="${prefix}joint_5">
+        <command_interface name="position">
+          <param name="min">-2.094395</param>
+          <param name="max">2.094395</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+
+      <joint name="${prefix}joint_6">
+        <command_interface name="position">
+          <param name="min">-6.98132</param>
+          <param name="max">6.98132</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+    </ros2_control>
+  </xacro:macro>
+
+</robot>
