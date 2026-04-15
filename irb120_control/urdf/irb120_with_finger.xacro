@@ -73,8 +73,8 @@
       <geometry>
         <box size="2.0 0.8 ${table_thickness}"/>
       </geometry>
-      <material name="Brown">
-        <color rgba="0.992 0.984 0.831 1.0"/>
+      <material name="TableLight">
+        <color rgba="0.965 0.965 0.945 1.0"/>
       </material>
     </visual>
     <collision>

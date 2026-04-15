@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 192
+    Tree Height: 214
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -269,7 +269,7 @@ Visualization Manager:
       Far Plane Distance: 100
       Image Rendering: overlay
       Name: Camera
-      Overlay Alpha: 1
+      Overlay Alpha: 0.5
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -280,7 +280,9 @@ Visualization Manager:
       Visibility:
         Axes: true
         Grid: true
+        MarkerArray: true
         MotionPlanning: true
+        PointCloud2: true
         Value: true
       Zoom Factor: 1
     - Class: rviz_default_plugins/Axes
@@ -290,6 +292,53 @@ Visualization Manager:
       Radius: 0.009999999776482582
       Reference Frame: realsense_link
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        axes: true
+        centroid: true
+        hull: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /object_detector/markers
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.009999999776482582
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /realsense/depth/color/points
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -308,25 +357,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.164639949798584
+      Distance: 1.278719186782837
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.4970424473285675
-        Y: 0.19550351798534393
-        Z: 0.25176382064819336
+        X: 0.6422011256217957
+        Y: 0.09465593099594116
+        Z: 0.15805953741073608
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.43039852380752563
+      Pitch: 0.5103979706764221
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 5.143588066101074
+      Yaw: 4.228618621826172
     Saved: ~
 Window Geometry:
   Camera:
@@ -340,7 +389,7 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001ee0000040dfc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000100000000cc00fffffffb0000000c00430061006d0065007200610100000145000000e80000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000233000002190000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000054a0000040d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001ee0000040dfc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000116000000cc00fffffffb0000000c00430061006d006500720061010000015b000000da0000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000023b000002110000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000054a0000040d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1854

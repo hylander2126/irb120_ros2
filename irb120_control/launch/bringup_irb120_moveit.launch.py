@@ -4,13 +4,18 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
 
 
 def generate_launch_description():
+    perception_method_arg = DeclareLaunchArgument(
+        'perception_method',
+        default_value='dbscan',
+        description="Perception segmentation backend: 'dbscan' or 'sam'",
+    )
 
     # Bringup launch here
     bringup_launch = IncludeLaunchDescription(
@@ -92,12 +97,23 @@ def generate_launch_description():
         )
     )
 
+    perception_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [get_package_share_directory("irb120_perception"), "launch", "perception.launch.py"]
+            )
+        ),
+        launch_arguments={'method': LaunchConfiguration('perception_method')}.items(),
+    )
+
     return LaunchDescription(
         [
+            perception_method_arg,
             bringup_launch,
             move_group_node,
             rviz_node,
             realsense_launch,
             handeye_to_realsense_tf,
+            perception_launch,
         ]
     )
