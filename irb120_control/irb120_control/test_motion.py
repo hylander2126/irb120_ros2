@@ -30,7 +30,7 @@ JOINT_NAMES: List[str] = [
     "joint_6",
 ]
 BASE_FRAME = "base_link"
-EE_FRAME = "tool0"
+EE_FRAME = "finger_ball_center"
 
 
 def call_trigger(node: Node, client, name: str, timeout: float = 8.0) -> bool:

@@ -5,6 +5,10 @@ find_package(ament_cmake REQUIRED)
 
 ament_package()
 
+install(FILES .setup_assistant
+  DESTINATION share/${PROJECT_NAME}
+)
+
 install(DIRECTORY config rviz
   DESTINATION share/${PROJECT_NAME}
 )

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <robot xmlns:xacro="http://wiki.ros.org/xacro">
-  <xacro:macro name="irb120_srdf">
+  <xacro:macro name="irb120_handeye_srdf">
     <group name="manipulator">
-      <chain base_link="base_link" tip_link="finger_ball_center"/>
+      <chain base_link="base_link" tip_link="tool0"/>
     </group>
 
     <group_state name="all_zero" group="manipulator">

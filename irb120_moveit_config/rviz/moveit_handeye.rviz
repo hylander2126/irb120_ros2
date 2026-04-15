@@ -3,9 +3,10 @@ Panels:
     Help Height: 0
     Name: Displays
     Property Tree Widget:
-      Expanded: ~
+      Expanded:
+        - /Image1
       Splitter Ratio: 0.5
-    Tree Height: 192
+    Tree Height: 281
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -275,20 +276,142 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /realsense/color/image_raw
+        Value: /handeye_calibration/target_detection
       Value: true
       Visibility:
-        Axes: true
         Grid: true
+        HandEyeCalibration: true
+        Image: true
         MotionPlanning: true
+        TF: true
         Value: true
       Zoom Factor: 1
-    - Class: rviz_default_plugins/Axes
+    - ArUco dictionary: DICT_5X5_250
+      Camera FOV Marker:
+        Marker Alpha: 0.30000001192092896
+        Marker Size: 1.5
+        Value: true
+      Class: moveit_rviz_plugin/HandEyeCalibration
       Enabled: true
-      Length: 0.10000000149011612
-      Name: Axes
-      Radius: 0.009999999776482582
-      Reference Frame: realsense_link
+      Move Group Namespace: ""
+      Name: HandEyeCalibration
+      Planning Scene Topic: /monitored_planning_scene
+      Rx: 0
+      Ry: 0
+      Rz: 0
+      Tx: 0
+      Ty: 0
+      Tz: 0
+      Value: true
+      base: "base_link"
+      eef: "tool0"
+      group: manipulator
+      image_topic: /realsense/color/image_raw
+      marker border (bits): 1
+      marker separation (px): 20
+      marker size (px): 200
+      markers, X: 3
+      markers, Y: 4
+      measured marker size (m): 0.034000
+      measured separation (m): 0.003400
+      object: "handeye_target"
+      sensor: "realsense_color_optical_frame"
+      sensor_mount_type: 0
+      solver: OpenCV/Daniilidis1998
+      target_type: HandEyeTarget/Aruco
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base:
+          Value: false
+        base_link:
+          Value: false
+        bracket:
+          Value: false
+        finger_ball_center:
+          Value: false
+        finger_link:
+          Value: false
+        flange:
+          Value: false
+        ft_link:
+          Value: false
+        handeye_target:
+          Value: true
+        link_1:
+          Value: false
+        link_2:
+          Value: false
+        link_3:
+          Value: false
+        link_4:
+          Value: false
+        link_5:
+          Value: false
+        link_6:
+          Value: false
+        realsense_color_frame:
+          Value: false
+        realsense_color_optical_frame:
+          Value: true
+        realsense_depth_frame:
+          Value: false
+        realsense_depth_optical_frame:
+          Value: false
+        realsense_link:
+          Value: false
+        table:
+          Value: false
+        tool0:
+          Value: true
+        world:
+          Value: false
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+      Tree:
+        world:
+          base_link:
+            base:
+              {}
+            link_1:
+              link_2:
+                link_3:
+                  link_4:
+                    link_5:
+                      link_6:
+                        flange:
+                          tool0:
+                            {}
+                        ft_link:
+                          finger_link:
+                            finger_ball_center:
+                              {}
+          bracket:
+            {}
+          table:
+            {}
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /handeye_calibration/target_detection
       Value: true
   Enabled: true
   Global Options:
@@ -308,7 +431,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.164639949798584
+      Distance: 1.6654789447784424
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -323,24 +446,28 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.43039852380752563
+      Pitch: 0.5303983092308044
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 5.143588066101074
+      Yaw: 4.138579845428467
     Saved: ~
 Window Geometry:
   Camera:
     collapsed: false
   Displays:
     collapsed: false
+  HandEye Calibration:
+    collapsed: false
   Height: 1131
   Hide Left Dock: false
   Hide Right Dock: false
+  Image:
+    collapsed: false
   MotionPlanning:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001ee0000040dfc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000100000000cc00fffffffb0000000c00430061006d0065007200610100000145000000e80000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000233000002190000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000054a0000040d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000002b70000040dfc0200000007fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000159000000cc00fffffffb0000000c00430061006d006500720061030000013e000000eb000002240000026ffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000019e000002ae0000019600fffffffb0000000a005600690065007700730000000371000000db000000a900fffffffb0000002600480061006e0064004500790065002000430061006c006900620072006100740069006f006e030000036c000000ec000002b90000027bfb0000000a0049006d006100670065030000013d000000ea0000022600000265000004810000040d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1854

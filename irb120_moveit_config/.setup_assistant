@@ -1,0 +1,6 @@
+moveit_setup_assistant_config:
+  URDF:
+    package: irb120_control
+    relative_path: urdf/irb120_with_finger.xacro
+  SRDF:
+    relative_path: config/irb120.srdf.xacro

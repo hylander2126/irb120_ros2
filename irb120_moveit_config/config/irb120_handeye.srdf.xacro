@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="abb_irb120_3_58">
+  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_handeye_macro.srdf.xacro"/>
+  <xacro:irb120_handeye_srdf/>
+</robot>

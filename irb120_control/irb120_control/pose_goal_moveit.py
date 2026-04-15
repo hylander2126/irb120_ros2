@@ -33,8 +33,8 @@ class PoseGoalMoveIt(Node):
         super().__init__("pose_goal_moveit")
 
         self.declare_parameter("group_name", "manipulator")
-        self.declare_parameter("ee_link", "tool0")
-        self.declare_parameter("target_frame", "base_link")
+        self.declare_parameter("ee_link", "finger_ball_center")
+        self.declare_parameter("target_frame", "world") # Was base_link
         self.declare_parameter("use_relative_goal", True)
 
         self.declare_parameter("target_x", 0.35)

@@ -16,6 +16,7 @@ class EGMHandler(Node):
         self.declare_parameter("rws_service_prefix", "/rws_client")
         self.declare_parameter("task", "T_ROB1")
         self.declare_parameter("startup_service_timeout_sec", 30.0)
+        self.declare_parameter("shutdown_service_timeout_sec", 5.0)
 
         self.declare_parameter("max_speed_dev_rad", 1.5)
         self.declare_parameter("comm_timeout", 5.0)
@@ -26,6 +27,8 @@ class EGMHandler(Node):
         self.rws_prefix = self.get_parameter("rws_service_prefix").value.rstrip("/")
         self.task = self.get_parameter("task").value
         self.startup_service_timeout_sec = float(self.get_parameter("startup_service_timeout_sec").value)
+        self.shutdown_service_timeout_sec = float(self.get_parameter("shutdown_service_timeout_sec").value)
+        self._shutdown_done = False
 
         self.rapid_stop_srv = f"{self.rws_prefix}/stop_rapid"
         self.pp_to_main_srv = f"{self.rws_prefix}/pp_to_main"
@@ -60,6 +63,19 @@ class EGMHandler(Node):
         if sleep_after > 0.0:
             time.sleep(sleep_after)
         return response.result_code, response.message
+
+    def _call_trigger_retry(self, service_name, attempts=3, timeout_sec=5.0, sleep_after=0.25):
+        last_code, last_msg = None, "not called"
+        for attempt in range(1, attempts + 1):
+            code, msg = self._call_trigger(service_name, timeout_sec=timeout_sec, sleep_after=sleep_after)
+            last_code, last_msg = code, msg
+            if code == 1:
+                return code, msg
+            self.get_logger().warn(
+                f"{service_name} attempt {attempt}/{attempts} failed: code={code}, msg='{msg}'"
+            )
+            time.sleep(0.2)
+        return last_code, last_msg
 
     def _wait_for_startup_services(self):
         required = [
@@ -117,13 +133,38 @@ class EGMHandler(Node):
         return response.result_code, response.message
 
     def shutdown_sequence(self):
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
         self.get_logger().info("Shutdown requested. Stopping EGM and RAPID.")
 
-        code, msg = self._call_trigger(self.egm_stop_srv, timeout_sec=2.0, sleep_after=0.25)
+        # Stop RAPID first to return the pendant state to idle more reliably.
+        code, msg = self._call_trigger_retry(
+            self.rapid_stop_srv,
+            attempts=4,
+            timeout_sec=self.shutdown_service_timeout_sec,
+            sleep_after=0.2,
+        )
+        self.get_logger().info(f"stop_rapid -> code={code}, msg='{msg}'")
+
+        # Then stop EGM; retry because launch teardown can race service availability.
+        code, msg = self._call_trigger_retry(
+            self.egm_stop_srv,
+            attempts=4,
+            timeout_sec=self.shutdown_service_timeout_sec,
+            sleep_after=0.2,
+        )
         self.get_logger().info(f"stop_egm -> code={code}, msg='{msg}'")
 
-        code, msg = self._call_trigger(self.rapid_stop_srv, timeout_sec=2.0, sleep_after=0.25)
-        self.get_logger().info(f"stop_rapid -> code={code}, msg='{msg}'")
+        # Final RAPID stop as a safety confirmation.
+        code, msg = self._call_trigger_retry(
+            self.rapid_stop_srv,
+            attempts=2,
+            timeout_sec=self.shutdown_service_timeout_sec,
+            sleep_after=0.2,
+        )
+        self.get_logger().info(f"final stop_rapid -> code={code}, msg='{msg}'")
 
     def startup_sequence(self):
         if not self._wait_for_startup_services():
