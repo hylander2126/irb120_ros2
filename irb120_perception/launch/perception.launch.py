@@ -32,43 +32,45 @@ def generate_launch_description() -> LaunchDescription:
         description="Segmentation backend: 'dbscan' or 'sam'",
     )
 
-    # ---- Shared parameters (both methods) -----------------------------------
-    common_params = {
-        'input_cloud':  '/realsense/depth/color/points',
-        'input_image':  '/realsense/color/image_raw',
-        'base_frame':   'base_link',
-
-        # Workspace ROI (metres, base_link frame)
+    # ---- DBSCAN parameters (uses pointcloud) ------------------------------------
+    dbscan_params = {
+        'input_cloud_pc':      '/realsense/depth/color/points',
+        'input_image':         '/realsense/color/image_raw',
+        'base_frame':          'base_link',
+        'segmentation_method': 'dbscan',
         'roi_x_min':  0.15,
         'roi_x_max':  0.80,
         'roi_y_min': -0.25,
         'roi_y_max':  0.25,
-        'roi_z_min': -0.02,   # table surface ≈ Z=0 in base_link
+        'roi_z_min': -0.02,
         'roi_z_max':  0.50,
-
-        'voxel_size': 0.005,  # 5 mm downsample
+        'voxel_size':      0.005,
+        'dbscan_eps':      0.02,
+        'dbscan_min_pts':  20,
+        'min_cluster_pts': 30,
+        'max_cluster_pts': 50000,
     }
 
-    # ---- DBSCAN-specific parameters -----------------------------------------
-    dbscan_params = {
-        **common_params,
-        'segmentation_method': 'dbscan',
-        'dbscan_eps':          0.02,    # 2 cm neighbourhood radius
-        'dbscan_min_pts':      20,
-        'min_cluster_pts':     30,
-        'max_cluster_pts':     50000,
-    }
-
-    # ---- SAM-specific parameters --------------------------------------------
+    # ---- SAM parameters (uses aligned depth image) ---------------------------
     sam_params = {
-        **common_params,
-        'segmentation_method':  'sam',
-        'sam_weights':          SAM_WEIGHTS,
-        'sam_config':           'configs/sam2.1/sam2.1_hiera_t.yaml',
-        'sam_points_per_side':  16,     # lower = faster, fewer small masks
-        'sam_iou_thresh':       0.80,
-        'sam_min_mask_area':    500,    # pixels — ignore tiny masks
-        'sam_min_cluster_pts':  30,     # 3D points per mask to keep
+        'input_cloud':    '/realsense/aligned_depth_to_color/image_raw',
+        'input_image':    '/realsense/color/image_raw',
+        'camera_info':    '/realsense/color/camera_info',
+        'base_frame':     'base_link',
+        'segmentation_method': 'sam',
+        'roi_x_min':  0.15,
+        'roi_x_max':  0.80,
+        'roi_y_min': -0.25,
+        'roi_y_max':  0.25,
+        'roi_z_min': -0.02,
+        'roi_z_max':  0.50,
+        'voxel_size':          0.005,
+        'sam_weights':         SAM_WEIGHTS,
+        'sam_config':          'configs/sam2.1/sam2.1_hiera_t.yaml',
+        'sam_points_per_side': 16,
+        'sam_iou_thresh':      0.80,
+        'sam_min_mask_area':   500,
+        'sam_min_cluster_pts': 30,
     }
 
     # ---- DBSCAN node (system python) ----------------------------------------

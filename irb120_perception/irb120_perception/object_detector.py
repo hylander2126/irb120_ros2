@@ -43,7 +43,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from geometry_msgs.msg import Point
-from sensor_msgs.msg import PointCloud2, Image
+from sensor_msgs.msg import PointCloud2, Image, CameraInfo
 from std_msgs.msg import ColorRGBA
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
@@ -134,7 +134,11 @@ def convex_hull_scipy(pts: np.ndarray):
     """Scipy convex hull → (vertices Nx3, triangles Mx3) or (None, None)."""
     try:
         hull = ConvexHull(pts.astype(np.float64))
-        return pts[hull.vertices], hull.simplices
+        # simplices index into all pts; remap to hull.vertices subset
+        verts = pts[hull.vertices]
+        idx_map = {old: new for new, old in enumerate(hull.vertices)}
+        tris = np.array([[idx_map[i] for i in tri] for tri in hull.simplices])
+        return verts, tris
     except Exception:
         return None, None
 
@@ -158,8 +162,10 @@ class ObjectDetector(Node):
         super().__init__('object_detector')
 
         # ---- Parameters -------------------------------------------------------
-        self.declare_parameter('input_cloud',        '/realsense/depth/color/points')
+        # self.declare_parameter('input_cloud',        '/realsense/depth/color/points')
+        self.declare_parameter('input_cloud',        '/realsense/aligned_depth_to_color/image_raw') # Depth image over pointcloud (align to rgb)
         self.declare_parameter('input_image',        '/realsense/color/image_raw')
+        self.declare_parameter('camera_info',        '/realsense/color/camera_info')
         self.declare_parameter('base_frame',         'base_link')
         self.declare_parameter('segmentation_method', 'dbscan')   # 'dbscan' | 'sam'
         self.declare_parameter('roi_x_min',   0.15)
@@ -215,17 +221,21 @@ class ObjectDetector(Node):
         # ---- Backend setup ----------------------------------------------------
         if self.method == 'sam':
             self._init_sam(p)
-            # Need both cloud and image — sync via latest-stamp cache
-            self._latest_image = None
+            self._latest_image    = None
+            self._latest_depth    = None
+            self._latest_cam_info = None
             self._bridge = CvBridge()
+            self.create_subscription(
+                CameraInfo, p('camera_info').value, self._cam_info_cb, sensor_qos)
             self.create_subscription(
                 Image, p('input_image').value, self._image_cb, sensor_qos)
             self.create_subscription(
-                PointCloud2, p('input_cloud').value, self._cloud_cb, sensor_qos)
+                Image, p('input_cloud').value, self._depth_cb, sensor_qos)
             self.get_logger().info('object_detector ready [SAM 2]')
         else:
+            self.declare_parameter('input_cloud_pc', '/realsense/depth/color/points')
             self.create_subscription(
-                PointCloud2, p('input_cloud').value, self._cloud_cb, sensor_qos)
+                PointCloud2, p('input_cloud_pc').value, self._cloud_cb, sensor_qos)
             self.get_logger().info('object_detector ready [DBSCAN]')
 
     # -------------------------------------------------------------------------
@@ -258,13 +268,19 @@ class ObjectDetector(Node):
     # -------------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
-        """Cache the latest RGB image for SAM."""
         self._latest_image = msg
 
+    def _depth_cb(self, msg: Image):
+        self._latest_depth = msg
+        self._depth_cloud_cb(msg)
+
+    def _cam_info_cb(self, msg: CameraInfo):
+        self._latest_cam_info = msg
+
     def _cloud_cb(self, msg: PointCloud2):
+        """DBSCAN path: receives a PointCloud2, transforms to base_link, segments."""
         t0 = time.monotonic()
 
-        # 1. Parse + transform to base_link
         pts_cam = pointcloud2_to_xyz(msg)
         if pts_cam.shape[0] == 0:
             return
@@ -275,13 +291,11 @@ class ObjectDetector(Node):
                 rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=0.1))
         except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}',
-                                   throttle_duration_sec=5.0)
+            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)
             return
 
         pts_base = apply_tf(pts_cam, tf)
 
-        # 2. ROI crop
         m = self.roi
         mask = (
             (pts_base[:,0] >= m['x'][0]) & (pts_base[:,0] <= m['x'][1]) &
@@ -289,30 +303,50 @@ class ObjectDetector(Node):
             (pts_base[:,2] >= m['z'][0]) & (pts_base[:,2] <= m['z'][1])
         )
         pts_roi = pts_base[mask]
-        # Keep camera-frame ROI indices for SAM back-projection
-        idx_roi = np.where(mask)[0]
 
         if pts_roi.shape[0] < self.min_pts:
             self._publish_empty(msg.header)
             return
 
-        # 3. Segment
-        if self.method == 'sam':
-            clusters = self._segment_sam(msg, pts_cam, pts_roi, idx_roi)
-        else:
-            clusters = self._segment_dbscan(pts_roi)
+        clusters = self._segment_dbscan(pts_roi)
 
         if not clusters:
             self._publish_empty(msg.header)
             return
 
-        # 4. Per-cluster: hull + pose + publish
         self._publish_results(msg.header, clusters)
-
         dt = (time.monotonic() - t0) * 1000
-        self.get_logger().info(
-            f'{len(clusters)} object(s) [{self.method}] in {dt:.1f} ms',
-            throttle_duration_sec=2.0)
+        self.get_logger().info(f'{len(clusters)} object(s) [dbscan] in {dt:.1f} ms',
+                               throttle_duration_sec=2.0)
+
+    def _depth_cloud_cb(self, msg: Image):
+        """SAM path: receives aligned depth image, runs SAM+back-projection."""
+        t0 = time.monotonic()
+
+        if self._latest_image is None or self._latest_cam_info is None:
+            self.get_logger().warn('Waiting for RGB image and camera_info',
+                                   throttle_duration_sec=5.0)
+            return
+
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.base_frame, msg.header.frame_id,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1))
+        except Exception as e:
+            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)
+            return
+
+        clusters = self._segment_sam_depth(msg, tf)
+
+        if not clusters:
+            self._publish_empty(msg.header)
+            return
+
+        self._publish_results(msg.header, clusters)
+        dt = (time.monotonic() - t0) * 1000
+        self.get_logger().info(f'{len(clusters)} object(s) [sam] in {dt:.1f} ms',
+                               throttle_duration_sec=2.0)
 
     # -------------------------------------------------------------------------
     # Segmentation backends
@@ -340,13 +374,15 @@ class ObjectDetector(Node):
                 clusters.append(c)
         return clusters
 
-    def _segment_sam(self, cloud_msg: PointCloud2,
+    def _segment_sam_points(self, cloud_msg: PointCloud2,
                      pts_cam: np.ndarray,
                      pts_roi: np.ndarray,
                      idx_roi: np.ndarray):
         """
         SAM 2 on the latest RGB image.
         Each mask → select matching 3D points from ROI → cluster.
+
+        ROI is "Region of Interest"
 
         The pointcloud and image share the same pixel grid:
           point index i  ↔  pixel (row = i // width, col = i % width)
@@ -361,28 +397,97 @@ class ObjectDetector(Node):
 
         # Run SAM
         masks_data = self._sam.generate(rgb)
+        self.get_logger().info(f'SAM generated {len(masks_data)} masks, ROI pts: {len(pts_roi)}',
+                               throttle_duration_sec=2.0)
         if not masks_data:
             return []
 
         w = cloud_msg.width
-        clusters = []
+        # Map ROI point indices → pixel coords (computed once, reused per mask)
+        rows = idx_roi // w
+        cols = idx_roi % w
 
+        clusters = []
         for md in masks_data:
             mask_2d = md['segmentation']  # H×W bool array
-
-            # Map ROI point indices → pixel coords → check mask
-            rows = idx_roi // w
-            cols = idx_roi % w
-
-            # Bounds check (image and cloud should match but be safe)
             h_img, w_img = mask_2d.shape
+
+            # Bounds check then index
             valid = (rows < h_img) & (cols < w_img)
-            in_mask = valid & mask_2d[rows * valid, cols * valid]
+            in_mask = np.zeros(len(idx_roi), dtype=bool)
+            in_mask[valid] = mask_2d[rows[valid], cols[valid]]
 
             cluster = pts_roi[in_mask]
             if len(cluster) >= self.sam_min_pts:
                 clusters.append(cluster)
 
+        self.get_logger().info(f'SAM clusters passing filter: {len(clusters)}',
+                               throttle_duration_sec=2.0)
+        return clusters
+    
+
+    def _segment_sam_depth(self, depth_msg: Image, tf) -> list:
+        """
+        SAM 2 on the latest RGB image.
+        Each mask → back-project masked depth pixels to 3D using pinhole model
+        → transform to base_link → ROI filter → cluster list.
+        """
+        # Convert RGB → SAM input
+        bgr = self._bridge.imgmsg_to_cv2(self._latest_image, desired_encoding='bgr8')
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+        # Depth image: 16UC1 in mm, passthrough to preserve raw values
+        depth_img = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32)
+
+        # Camera intrinsics (same for every mask)
+        cam_k = self._latest_cam_info.k
+        fx, fy = cam_k[0], cam_k[4]
+        cx, cy = cam_k[2], cam_k[5]
+
+        # Pixel index grids (same for every mask)
+        h_img, w_img = depth_img.shape
+        u, v = np.meshgrid(np.arange(w_img), np.arange(h_img))
+
+        # Run SAM on RGB
+        masks_data = self._sam.generate(rgb)
+        self.get_logger().info(f'SAM generated {len(masks_data)} masks',
+                               throttle_duration_sec=2.0)
+        if not masks_data:
+            return []
+
+        m = self.roi
+        clusters = []
+        for md in masks_data:
+            this_mask = md['segmentation']  # H×W bool
+
+            # Back-project: pixel (u,v) + depth → XYZ in camera frame (metres)
+            Z = depth_img / 1000.0
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
+
+            # Extract only masked pixels with valid depth into (N,3)
+            valid = this_mask & (depth_img > 0)
+            pts_cam = np.stack([X[valid], Y[valid], Z[valid]], axis=1).astype(np.float32)
+
+            if len(pts_cam) < self.sam_min_pts:
+                continue
+
+            # Transform to base_link
+            pts_base = apply_tf(pts_cam, tf)
+
+            # ROI filter
+            roi_mask = (
+                (pts_base[:,0] >= m['x'][0]) & (pts_base[:,0] <= m['x'][1]) &
+                (pts_base[:,1] >= m['y'][0]) & (pts_base[:,1] <= m['y'][1]) &
+                (pts_base[:,2] >= m['z'][0]) & (pts_base[:,2] <= m['z'][1])
+            )
+            pts_roi = pts_base[roi_mask]
+
+            if len(pts_roi) >= self.sam_min_pts:
+                clusters.append(pts_roi)
+
+        self.get_logger().info(f'SAM clusters passing filter: {len(clusters)}',
+                               throttle_duration_sec=2.0)
         return clusters
 
     # -------------------------------------------------------------------------
@@ -483,7 +588,7 @@ class ObjectDetector(Node):
         m.scale.x = 0.002
         m.color = ColorRGBA(r=color.r, g=color.g, b=color.b, a=0.8)
         m.pose.orientation.w = 1.0
-        m.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
+        m.lifetime = rclpy.duration.Duration(seconds=3.0).to_msg()
         for tri in tris:
             for i in range(3):
                 a, b = verts[tri[i]], verts[tri[(i+1)%3]]
@@ -502,7 +607,7 @@ class ObjectDetector(Node):
         m.pose.orientation.w = 1.0
         m.scale.x = m.scale.y = m.scale.z = 0.02
         m.color = ColorRGBA(r=color.r, g=color.g, b=color.b, a=1.0)
-        m.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
+        m.lifetime = rclpy.duration.Duration(seconds=3.0).to_msg()
         return m
 
     def _mk_axis(self, marker_id, stamp, frame, origin, axis, scale, color):
@@ -512,7 +617,7 @@ class ObjectDetector(Node):
         m.type = Marker.ARROW; m.action = Marker.ADD
         m.scale.x = 0.005; m.scale.y = 0.010; m.scale.z = 0.015
         m.color = color
-        m.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
+        m.lifetime = rclpy.duration.Duration(seconds=3.0).to_msg()
         m.points = [
             Point(x=float(origin[0]), y=float(origin[1]), z=float(origin[2])),
             Point(x=float(origin[0]+axis[0]*scale),

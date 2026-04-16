@@ -75,6 +75,7 @@ def generate_launch_description():
         "pointcloud.enable": "true",
         "colorizer.enable": "false",
         "depth_module.depth_profile": "848x480x30",
+        "align_depth.enable": "true", # Align the depth image to the color (same shape)
         "rgb_camera.color_profile": "640x480x30",
         "decimation_filter.enable": "false",
         "spatial_filter.enable": "false",
