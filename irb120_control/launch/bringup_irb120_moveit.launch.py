@@ -4,10 +4,11 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, ExecuteProcess
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_param_builder import ParameterBuilder
 
 
 def generate_launch_description():
@@ -24,6 +25,16 @@ def generate_launch_description():
             'Launch the perception_debugger node and the debug RViz config. '
             'Trigger a snapshot at runtime with: '
             'ros2 topic pub --once /object_detector/debug_snapshot std_msgs/msg/Empty \'{}\''
+        ),
+    )
+
+    keyboard_jog_arg = DeclareLaunchArgument(
+        'keyboard_jog',
+        default_value='false',
+        description=(
+            'Start MoveIt Servo for arrow-key Cartesian jogging. '
+            'Then run keyboard_jog in a second terminal: ros2 run irb120_control keyboard_jog. '
+            'Arrow keys: ↑/↓ = +Z/-Z,  ←/→ = -X/+X.'
         ),
     )
 
@@ -69,25 +80,31 @@ def generate_launch_description():
         parameters=[moveit_config.to_dict()],
     )
 
-    # Normal RViz — launched when debug_perception is false
-    rviz_node = Node(
-        package="rviz2",
-        executable="rviz2",
-        name="rviz2",
-        output="log",
-        arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit.rviz")],
-        parameters=[moveit_config.to_dict()],
+    # Delay RViz by 5s so move_group receives real joint states before RViz
+    # initializes the goal marker — prevents the marker snapping to all-zeros.
+    rviz_node = TimerAction(
+        period=5.0,
+        actions=[Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2",
+            output="log",
+            arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit.rviz")],
+            parameters=[moveit_config.to_dict()],
+        )],
         condition=UnlessCondition(LaunchConfiguration('debug_perception')),
     )
 
-    # Debug RViz — launched when debug_perception is true
-    rviz_debug_node = Node(
-        package="rviz2",
-        executable="rviz2",
-        name="rviz2",
-        output="log",
-        arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit_debug_perception.rviz")],
-        parameters=[moveit_config.to_dict()],
+    rviz_debug_node = TimerAction(
+        period=5.0,
+        actions=[Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2",
+            output="log",
+            arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit_debug_perception.rviz")],
+            parameters=[moveit_config.to_dict()],
+        )],
         condition=IfCondition(LaunchConfiguration('debug_perception')),
     )
 
@@ -99,13 +116,13 @@ def generate_launch_description():
         "colorizer.enable": "false",
         # Match depth and color resolution so aligned depth needs no scaling artefacts
         "depth_module.depth_profile": "640x480x30",
-        "align_depth.enable": "true", # Align the depth image to the color (same shape)
+        "align_depth.enable": "true",  # Align the depth image to the color (same shape)
         "rgb_camera.color_profile": "640x480x30",
         # Decimation averages NxN depth pixels before output — reduces noise, no meaningful lag
         "decimation_filter.enable": "true",
         "decimation_filter.filter_magnitude": "2",  # 2x2 average → 320x240 effective depth
-        "spatial_filter.enable": "false", # lag concern: handled in software with median blur instead
-        "temporal_filter.enable": "false", # lag concern: handled in software with EMA smoothing instead
+        "spatial_filter.enable": "false",  # lag concern: handled in software with median blur instead
+        "temporal_filter.enable": "false",  # lag concern: handled in software with EMA smoothing instead
         "clip_distance": "2.2",
     }
 
@@ -131,15 +148,59 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            'method':            LaunchConfiguration('perception_method'),
+            'perception_method':            LaunchConfiguration('perception_method'),
             'debug_perception':  LaunchConfiguration('debug_perception'),
         }.items(),
+    )
+
+    # ---- MoveIt Servo node — only started when keyboard_jog:=true -----------
+    # ParameterBuilder wraps the flat yaml under the "moveit_servo" namespace,
+    # which is exactly how servo_node expects to find its parameters.
+    servo_params = {
+        "moveit_servo": ParameterBuilder("irb120_moveit_config")
+        .yaml("config/servo.yaml")
+        .to_dict()
+    }
+    acceleration_filter_update_period = {"update_period": 0.02}
+    planning_group_name = {"planning_group_name": "manipulator"}
+
+    servo_node = Node(
+        package='moveit_servo',
+        executable='servo_node',
+        name='servo_node',
+        output='screen',
+        parameters=[
+            moveit_config.to_dict(),
+            servo_params,
+            acceleration_filter_update_period,
+            planning_group_name,
+        ],
+        condition=IfCondition(LaunchConfiguration('keyboard_jog')),
+    )
+
+    # Switch servo to TWIST mode (command_type=1) once servo_node is ready.
+    # 3-second delay is enough for servo_node to finish initializing.
+    servo_set_twist_mode = TimerAction(
+        period=3.0,
+        actions=[
+            ExecuteProcess(
+                cmd=[
+                    'ros2', 'service', 'call',
+                    '/servo_node/switch_command_type',
+                    'moveit_msgs/srv/ServoCommandType',
+                    '{command_type: 1}',
+                ],
+                output='screen',
+            )
+        ],
+        condition=IfCondition(LaunchConfiguration('keyboard_jog')),
     )
 
     return LaunchDescription(
         [
             perception_method_arg,
             debug_perception_arg,
+            keyboard_jog_arg,
             bringup_launch,
             move_group_node,
             rviz_node,
@@ -147,5 +208,7 @@ def generate_launch_description():
             realsense_launch,
             handeye_to_realsense_tf,
             perception_launch,
+            servo_node,
+            servo_set_twist_mode,
         ]
     )

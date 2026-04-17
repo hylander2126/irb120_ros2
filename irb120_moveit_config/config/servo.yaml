@@ -1,0 +1,45 @@
+###############################################################################
+# MoveIt Servo configuration for IRB120
+# Flat format — loaded as a Python dict via parameters=[] in the launch file,
+# NOT as a --params-file (which would require ros__parameters: wrapping).
+###############################################################################
+
+publish_period: 0.02
+max_expected_latency: 0.06     # 3x publish_period — minimum valid value
+
+move_group_name: manipulator
+
+command_in_type: "unitless"
+scale:
+  linear: 0.07      # .12 was too fast, comfortable jogging speed more like 0.07
+  rotational: 0.3
+  joint: 0.4
+
+command_out_type: trajectory_msgs/JointTrajectory
+publish_joint_positions: true
+publish_joint_velocities: false   # avoids "velocity not zero" JTC errors
+publish_joint_accelerations: false
+
+use_smoothing: true
+smoothing_filter_plugin_name: "online_signal_smoothing::ButterworthFilterPlugin"
+
+is_primary_planning_scene_monitor: false
+check_octomap_collisions: false
+
+lower_singularity_threshold: 50.0
+hard_stop_singularity_threshold: 200.0
+leaving_singularity_threshold_multiplier: 2.0
+joint_limit_margins: [0.1]
+
+apply_twist_commands_about_ee_frame: false
+
+cartesian_command_in_topic: ~/delta_twist_cmds
+joint_command_in_topic: ~/delta_joint_cmds
+joint_topic: /joint_states
+status_topic: ~/status
+command_out_topic: /joint_trajectory_controller/joint_trajectory
+
+check_collisions: true
+collision_check_rate: 10.0
+self_collision_proximity_threshold: 0.01
+scene_collision_proximity_threshold: 0.02

@@ -38,6 +38,7 @@ setup(
             'pose_goal_moveit = irb120_control.pose_goal_moveit:main',
             'safe_stop = irb120_control.safe_stop:main',
             'run_handeye_calibration_poses = irb120_control.run_handeye_calibration_poses:main',
+            'keyboard_jog = irb120_control.keyboard_jog:main',
         ],
     },
 )
