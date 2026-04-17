@@ -43,8 +43,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from geometry_msgs.msg import Point
-from sensor_msgs.msg import PointCloud2, Image, CameraInfo
-from std_msgs.msg import ColorRGBA
+from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
+from std_msgs.msg import ColorRGBA, Empty
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -120,14 +120,45 @@ def rotation_to_quaternion(R: np.ndarray):
         return (R[0,2]+R[2,0])/s, (R[1,2]+R[2,1])/s, 0.25*s, (R[1,0]-R[0,1])/s
 
 
-def pca_orientation(pts: np.ndarray):
-    """PCA → (centroid, (qx,qy,qz,qw)) where X aligns with longest axis."""
+def pca_orientation(pts: np.ndarray, prev_axes: np.ndarray | None = None):
+    """PCA → (centroid, (qx,qy,qz,qw), axes_3x3) where X aligns with longest axis.
+
+    If prev_axes (3×3, columns = previous frame's principal axes) is provided,
+    each axis is sign-flipped to be consistent with the previous frame rather
+    than pinned to world directions. This eliminates jitter flips while still
+    tracking genuine object reorientations caused by robot interaction.
+    """
     centroid = pts.mean(axis=0)
     _, _, Vt = np.linalg.svd(pts - centroid, full_matrices=False)
-    R = Vt.T
+    R = Vt.T  # columns are principal axes, descending variance
+
+    if prev_axes is not None:
+        # Flip each axis independently to match the previous frame's direction.
+        # A genuine reorientation (e.g. robot tilts the object) still registers
+        # because the dot product only resolves the 180° sign ambiguity, not the
+        # actual angle between frames.
+        for i in range(3):
+            if np.dot(R[:, i], prev_axes[:, i]) < 0:
+                R[:, i] *= -1
+        # Re-enforce right-handedness after independent per-axis flips
+        R[:, 2] = np.cross(R[:, 0], R[:, 1])
+
     if np.linalg.det(R) < 0:
         R[:, 2] *= -1
-    return centroid, rotation_to_quaternion(R)
+
+    return centroid, rotation_to_quaternion(R), R
+
+
+def slerp_quaternion(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
+    """Spherical linear interpolation between two (x,y,z,w) quaternions."""
+    # Ensure shortest-path interpolation
+    if np.dot(q0, q1) < 0:
+        q1 = -q1
+    dot = float(np.clip(np.dot(q0, q1), -1.0, 1.0))
+    if dot > 0.9995:
+        return (q0 + t * (q1 - q0)) / np.linalg.norm(q0 + t * (q1 - q0))
+    theta = np.arccos(dot)
+    return (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
 
 
 def convex_hull_scipy(pts: np.ndarray):
@@ -141,6 +172,42 @@ def convex_hull_scipy(pts: np.ndarray):
         return verts, tris
     except Exception:
         return None, None
+
+
+def xyz_to_pointcloud2(pts: np.ndarray, frame_id: str, stamp) -> PointCloud2:
+    """Pack an (N,3) float32 array into a PointCloud2 message."""
+    pts = pts.astype(np.float32)
+    msg = PointCloud2()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = stamp
+    msg.height = 1
+    msg.width = len(pts)
+    msg.is_dense = False
+    msg.is_bigendian = False
+    msg.point_step = 12  # 3 × float32
+    msg.row_step = msg.point_step * len(pts)
+    msg.fields = [
+        PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
+    ]
+    msg.data = pts.tobytes()
+    return msg
+
+
+def voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
+    """Reduce point density: keep one point per voxel cell."""
+    idx = np.floor(pts / voxel_size).astype(np.int32)
+    _, unique = np.unique(idx, axis=0, return_index=True)
+    return pts[unique]
+
+
+def remove_outliers(pts: np.ndarray, std_ratio: float) -> np.ndarray:
+    """Remove points further than std_ratio * std from the centroid."""
+    if len(pts) < 4:
+        return pts
+    dists = np.linalg.norm(pts - pts.mean(axis=0), axis=1)
+    return pts[dists < dists.mean() + std_ratio * dists.std()]
 
 
 def label_color(idx: int) -> ColorRGBA:
@@ -187,6 +254,17 @@ class ObjectDetector(Node):
         self.declare_parameter('sam_iou_thresh',       0.80)
         self.declare_parameter('sam_min_mask_area',    500)   # pixels
         self.declare_parameter('sam_min_cluster_pts',  30)
+        self.declare_parameter('sam_prominent_only',   True)
+        # Stability / denoising params
+        self.declare_parameter('depth_median_ksize',   5)     # depth blur kernel (0=off, odd int)
+        self.declare_parameter('outlier_std_ratio',    2.0)   # statistical outlier removal threshold
+        self.declare_parameter('smooth_alpha',         0.3)   # EMA weight for new frame (0=frozen, 1=raw)
+        # Robot self-masking: exclude points near these TF link frames
+        self.declare_parameter('robot_mask_links',  [
+            'link_1', 'link_2', 'link_3', 'link_4', 'link_5', 'link_6',
+            'flange', 'ft_link', 'finger_link', 'finger_ball_center',
+        ])
+        self.declare_parameter('robot_mask_padding', 0.08)    # exclusion sphere radius (m)
 
         p = self.get_parameter
         self.base_frame  = p('base_frame').value
@@ -196,12 +274,26 @@ class ObjectDetector(Node):
             y=(p('roi_y_min').value, p('roi_y_max').value),
             z=(p('roi_z_min').value, p('roi_z_max').value),
         )
-        self.voxel_size     = p('voxel_size').value
-        self.dbscan_eps     = p('dbscan_eps').value
-        self.dbscan_min_pts = p('dbscan_min_pts').value
-        self.min_pts        = p('min_cluster_pts').value
-        self.max_pts        = p('max_cluster_pts').value
-        self.sam_min_pts    = p('sam_min_cluster_pts').value
+        self.voxel_size       = p('voxel_size').value
+        self.dbscan_eps       = p('dbscan_eps').value
+        self.dbscan_min_pts   = p('dbscan_min_pts').value
+        self.min_pts          = p('min_cluster_pts').value
+        self.max_pts          = p('max_cluster_pts').value
+        self.sam_min_pts        = p('sam_min_cluster_pts').value
+        self.sam_prominent_only = p('sam_prominent_only').value
+        self.depth_median_ksize  = p('depth_median_ksize').value
+        self.outlier_std_ratio   = p('outlier_std_ratio').value
+        self.smooth_alpha        = p('smooth_alpha').value
+        self.robot_mask_links    = p('robot_mask_links').value
+        self.robot_mask_padding  = p('robot_mask_padding').value
+        # EMA state for SAM path (centroid shift smoothing)
+        self._smooth_centroid: np.ndarray | None = None
+        self._smooth_verts:    np.ndarray | None = None
+        # EMA state for orientation + centroid smoothing (both backends)
+        # Keyed by obj_id; cleared when detection is absent
+        self._smooth_q:    dict[int, np.ndarray] = {}  # quaternion (x,y,z,w)
+        self._smooth_pos:  dict[int, np.ndarray] = {}  # centroid (3,)
+        self._smooth_axes: dict[int, np.ndarray] = {}  # 3×3 principal axes (cols)
 
         # ---- TF ---------------------------------------------------------------
         self.tf_buffer   = Buffer()
@@ -210,6 +302,15 @@ class ObjectDetector(Node):
         # ---- Publishers -------------------------------------------------------
         self.pub_det = self.create_publisher(Detection3DArray, '~/detections', 10)
         self.pub_mk  = self.create_publisher(MarkerArray,      '~/markers',    10)
+
+        # ---- Debug snapshot (on-demand, consumed by perception_debugger node) --
+        # Trigger: ros2 topic pub --once /object_detector/debug_snapshot std_msgs/Empty '{}'
+        self._debug_requested = False
+        self.create_subscription(Empty, '~/debug_snapshot', self._debug_trigger_cb, 10)
+        self._pub_dbg_mask_img  = self.create_publisher(Image,       '~/debug/mask_overlay',    1)
+        self._pub_dbg_pts_cam   = self.create_publisher(PointCloud2, '~/debug/pts_camera',      1)
+        self._pub_dbg_pts_roi   = self.create_publisher(PointCloud2, '~/debug/pts_after_roi',   1)
+        self._pub_dbg_pts_clean = self.create_publisher(PointCloud2, '~/debug/pts_after_clean', 1)
 
         # ---- QoS --------------------------------------------------------------
         sensor_qos = QoSProfile(
@@ -267,6 +368,10 @@ class ObjectDetector(Node):
     # Subscribers
     # -------------------------------------------------------------------------
 
+    def _debug_trigger_cb(self, _: Empty):
+        self._debug_requested = True
+        self.get_logger().info('Debug snapshot requested — will publish on next SAM frame.')
+
     def _image_cb(self, msg: Image):
         self._latest_image = msg
 
@@ -311,6 +416,9 @@ class ObjectDetector(Node):
         clusters = self._segment_dbscan(pts_roi)
 
         if not clusters:
+            self._smooth_q.clear()
+            self._smooth_pos.clear()
+            self._smooth_axes.clear()
             self._publish_empty(msg.header)
             return
 
@@ -340,9 +448,15 @@ class ObjectDetector(Node):
         clusters = self._segment_sam_depth(msg, tf)
 
         if not clusters:
+            self._smooth_centroid = None
+            self._smooth_verts    = None
+            self._smooth_q.clear()
+            self._smooth_pos.clear()
+            self._smooth_axes.clear()
             self._publish_empty(msg.header)
             return
 
+        clusters = self._smooth_clusters(clusters)
         self._publish_results(msg.header, clusters)
         dt = (time.monotonic() - t0) * 1000
         self.get_logger().info(f'{len(clusters)} object(s) [sam] in {dt:.1f} ms',
@@ -351,6 +465,34 @@ class ObjectDetector(Node):
     # -------------------------------------------------------------------------
     # Segmentation backends
     # -------------------------------------------------------------------------
+
+    def _smooth_clusters(self, clusters: list) -> list:
+        """
+        EMA smooth the prominent cluster's centroid and point cloud across frames.
+        Keeps the hull stable when SAM masks jitter slightly between frames.
+        Only smooths the first (prominent) cluster; others pass through unchanged.
+        """
+        a = self.smooth_alpha
+        pts = clusters[0]
+        new_centroid = pts.mean(axis=0)
+
+        if self._smooth_centroid is None:
+            self._smooth_centroid = new_centroid
+            self._smooth_verts    = pts
+        else:
+            # Smooth centroid position
+            self._smooth_centroid = a * new_centroid + (1 - a) * self._smooth_centroid
+
+            # Smooth the point cloud by shifting it so its centroid matches the EMA centroid.
+            # This damps positional drift without changing the hull shape.
+            shift = self._smooth_centroid - new_centroid
+            smoothed_pts = pts + shift
+
+            # EMA on individual points is ill-defined across frames (different N),
+            # so we store the shifted cloud directly — centroid is already smoothed.
+            self._smooth_verts = smoothed_pts
+
+        return [self._smooth_verts] + clusters[1:]
 
     def _segment_dbscan(self, pts_roi: np.ndarray):
         """DBSCAN on the ROI pointcloud. Returns list of (N,3) arrays."""
@@ -439,6 +581,11 @@ class ObjectDetector(Node):
         # Depth image: 16UC1 in mm, passthrough to preserve raw values
         depth_img = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32)
 
+        # Median blur kills salt-and-pepper depth noise without blurring edges
+        k = self.depth_median_ksize
+        if k > 1:
+            depth_img = cv2.medianBlur(depth_img.astype(np.uint16), k).astype(np.float32)
+
         # Camera intrinsics (same for every mask)
         cam_k = self._latest_cam_info.k
         fx, fy = cam_k[0], cam_k[4]
@@ -448,26 +595,32 @@ class ObjectDetector(Node):
         h_img, w_img = depth_img.shape
         u, v = np.meshgrid(np.arange(w_img), np.arange(h_img))
 
-        # Run SAM on RGB
-        masks_data = self._sam.generate(rgb)
+        # Run SAM on RGB (no_grad avoids storing gradients, ~10-20% faster)
+        with torch.no_grad():
+            masks_data = self._sam.generate(rgb)
         self.get_logger().info(f'SAM generated {len(masks_data)} masks',
                                throttle_duration_sec=2.0)
         if not masks_data:
             return []
+
+        # Pre-compute back-projection arrays once (shared across all masks)
+        Z_full = depth_img / 1000.0
+        X_full = (u - cx) * Z_full / fx
+        Y_full = (v - cy) * Z_full / fy
+        valid_depth = depth_img > 0
+
+        debug = self._debug_requested
+        stamp = depth_msg.header.stamp
+        cam_frame = depth_msg.header.frame_id
 
         m = self.roi
         clusters = []
         for md in masks_data:
             this_mask = md['segmentation']  # H×W bool
 
-            # Back-project: pixel (u,v) + depth → XYZ in camera frame (metres)
-            Z = depth_img / 1000.0
-            X = (u - cx) * Z / fx
-            Y = (v - cy) * Z / fy
-
             # Extract only masked pixels with valid depth into (N,3)
-            valid = this_mask & (depth_img > 0)
-            pts_cam = np.stack([X[valid], Y[valid], Z[valid]], axis=1).astype(np.float32)
+            valid = this_mask & valid_depth
+            pts_cam = np.stack([X_full[valid], Y_full[valid], Z_full[valid]], axis=1).astype(np.float32)
 
             if len(pts_cam) < self.sam_min_pts:
                 continue
@@ -483,12 +636,48 @@ class ObjectDetector(Node):
             )
             pts_roi = pts_base[roi_mask]
 
-            if len(pts_roi) >= self.sam_min_pts:
-                clusters.append(pts_roi)
+            if len(pts_roi) < self.sam_min_pts:
+                continue
+
+            # Voxel downsample → statistical outlier removal → cleaner hull
+            pts_vox  = voxel_downsample(pts_roi, self.voxel_size)
+            pts_clean = remove_outliers(pts_vox, self.outlier_std_ratio)
+
+            if len(pts_clean) >= self.sam_min_pts:
+                clusters.append((pts_clean, md['area'], pts_cam, pts_roi, this_mask))
 
         self.get_logger().info(f'SAM clusters passing filter: {len(clusters)}',
                                throttle_duration_sec=2.0)
-        return clusters
+
+        if not clusters:
+            return []
+
+        # Pick the "prominent" object: highest mean Z in base_link.
+        # Objects sitting on the table have a higher Z centroid than the table surface itself,
+        # making this robust against SAM selecting the table/floor as the largest mask.
+        if self.sam_prominent_only:
+            clusters = [max(clusters, key=lambda c: c[0][:, 2].mean())]
+
+        # Publish debug snapshot for the prominent cluster if requested.
+        # The perception_debugger node subscribes to these topics and handles display/logging.
+        if debug and clusters:
+            self._debug_requested = False
+            pts_clean, _, pts_cam_dbg, pts_roi_dbg, mask_2d = clusters[0]
+            overlay = rgb.copy()
+            overlay[mask_2d] = (
+                overlay[mask_2d] * 0.4 + np.array([255, 80, 0]) * 0.6
+            ).clip(0, 255).astype(np.uint8)
+            self._pub_dbg_mask_img.publish(
+                self._bridge.cv2_to_imgmsg(
+                    cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR), encoding='bgr8'))
+            self._pub_dbg_pts_cam.publish(
+                xyz_to_pointcloud2(pts_cam_dbg, cam_frame, stamp))
+            self._pub_dbg_pts_roi.publish(
+                xyz_to_pointcloud2(pts_roi_dbg, self.base_frame, stamp))
+            self._pub_dbg_pts_clean.publish(
+                xyz_to_pointcloud2(pts_clean, self.base_frame, stamp))
+
+        return [c[0] for c in clusters]
 
     # -------------------------------------------------------------------------
     # Publish
@@ -505,7 +694,22 @@ class ObjectDetector(Node):
         markers.markers.append(clear)
 
         for obj_id, pts in enumerate(clusters):
-            centroid, (qx, qy, qz, qw) = pca_orientation(pts)
+            prev_axes = self._smooth_axes.get(obj_id, None)
+            centroid, (qx, qy, qz, qw), axes = pca_orientation(pts, prev_axes)
+            self._smooth_axes[obj_id] = axes
+
+            # EMA smooth centroid position and orientation (both backends).
+            # Uses SLERP for quaternion so it stays normalized and takes the
+            # shortest arc — prevents the 360° spin that lerp can cause.
+            a = self.smooth_alpha
+            q_raw = np.array([qx, qy, qz, qw], dtype=np.float64)
+            if obj_id in self._smooth_q:
+                centroid = a * centroid + (1 - a) * self._smooth_pos[obj_id]
+                q_raw    = slerp_quaternion(self._smooth_q[obj_id], q_raw, a)
+            self._smooth_pos[obj_id] = centroid
+            self._smooth_q[obj_id]   = q_raw
+            qx, qy, qz, qw = q_raw
+
             mins, maxs = pts.min(axis=0), pts.max(axis=0)
             size = maxs - mins
             verts, tris = convex_hull_scipy(pts)
