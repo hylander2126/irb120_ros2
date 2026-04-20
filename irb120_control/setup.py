@@ -17,6 +17,7 @@ setup(
         ('share/' + package_name + '/handeye_calibrations', glob('handeye_calibrations/*')),
         ('share/' + package_name + '/urdf', glob('urdf/*')),
         ('share/' + package_name + '/rviz', glob('rviz/*')),
+        ('share/' + package_name + '/scripts', glob('scripts/*')),
         ('share/' + package_name + '/meshes/irb120_3_58/collision', glob('meshes/irb120_3_58/collision/*')),
         ('share/' + package_name + '/meshes/irb120_3_58/visual', glob('meshes/irb120_3_58/visual/*')),
     ],
@@ -34,11 +35,11 @@ setup(
     entry_points={
         'console_scripts': [
             'egm_handler = irb120_control.egm_handler:main',
-            'test_motion = irb120_control.test_motion:main',
-            'pose_goal_moveit = irb120_control.pose_goal_moveit:main',
             'safe_stop = irb120_control.safe_stop:main',
             'run_handeye_calibration_poses = irb120_control.run_handeye_calibration_poses:main',
             'keyboard_jog = irb120_control.keyboard_jog:main',
+            'netft_preprocessor = irb120_control.netft_preprocessor:main',
+            'squash_pull = irb120_control.squash_pull:main',
         ],
     },
 )
