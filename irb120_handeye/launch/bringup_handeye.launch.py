@@ -2,10 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -13,14 +11,12 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 
 def generate_launch_description():
-    # Bringup launch here
     bringup_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [get_package_share_directory("irb120_control"), "launch", "bringup_irb120.launch.py"]
+                [get_package_share_directory("irb120_control"), "launch", "test_bringup.launch.py"]
             )
-        ),
-        # launch_arguments={"calibrate": "true"}.items(),
+        )
     )
 
     moveit_cfg_pkg = get_package_share_directory("irb120_moveit_config")
@@ -65,33 +61,27 @@ def generate_launch_description():
         parameters=[moveit_config.to_dict()],
     )
 
-    # Realsense arguments for pointcloud octomap updates
-    realsense_args = {
-        "camera_name": "realsense",
-        "camera_namespace": "",
-        "pointcloud.enable": "true",
-        "colorizer.enable": "false",
-        "depth_module.depth_profile": "848x480x30",
-        "rgb_camera.color_profile": "640x480x30",
-        "decimation_filter.enable": "false",
-        "spatial_filter.enable": "false",
-        "temporal_filter.enable": "false",
-        "clip_distance": "2.2",
-    }
-
     realsense_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare("realsense2_camera"), "launch", "rs_launch.py"])
         ),
-        launch_arguments=realsense_args.items(),
+        launch_arguments={
+            "camera_name": "realsense",
+            "camera_namespace": "",
+            "pointcloud.enable": "true",
+            "colorizer.enable": "false",
+            "depth_module.depth_profile": "848x480x30",
+            "rgb_camera.color_profile": "640x480x30",
+            "decimation_filter.enable": "false",
+            "spatial_filter.enable": "false",
+            "temporal_filter.enable": "false",
+            "clip_distance": "2.2",
+        }.items(),
     )
 
-    return LaunchDescription(
-        [
-            bringup_launch,
-            move_group_node,
-            # rviz_node,
-            handeye_rviz_node,
-            realsense_launch,
-        ]
-    )
+    return LaunchDescription([
+        bringup_launch,
+        move_group_node,
+        handeye_rviz_node,
+        realsense_launch,
+    ])

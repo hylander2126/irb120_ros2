@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import math
+import signal
 import time
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from std_msgs.msg import Bool
 
 from abb_rapid_sm_addin_msgs.srv import GetEGMSettings, SetEGMSettings
 from abb_robot_msgs.srv import TriggerWithResultCode
@@ -32,26 +34,26 @@ class EGMHandler(Node):
         self._shutdown_done = False
         self._executor: SingleThreadedExecutor | None = None
 
-        self.rapid_stop_srv = f"{self.rws_prefix}/stop_rapid"
-        self.pp_to_main_srv = f"{self.rws_prefix}/pp_to_main"
-        self.rapid_start_srv = f"{self.rws_prefix}/start_rapid"
         self.egm_stop_srv = f"{self.rws_prefix}/stop_egm"
         self.egm_start_srv = f"{self.rws_prefix}/start_egm_joint"
         self.get_settings_srv = f"{self.rws_prefix}/get_egm_settings"
         self.set_settings_srv = f"{self.rws_prefix}/set_egm_settings"
 
+        self._ready_pub = self.create_publisher(Bool, "~/ready", 1)
         self.get_logger().info(f"Using RWS service prefix: {self.rws_prefix}")
 
+
+
     def _spin_future(self, future, timeout_sec: float) -> bool:
-        """Spin the node's executor until the future completes or timeout."""
         end = time.monotonic() + timeout_sec
         while not future.done() and time.monotonic() < end:
+            if not rclpy.ok():
+                break
             if self._executor is not None:
                 self._executor.spin_once(timeout_sec=0.05)
             else:
                 rclpy.spin_once(self, timeout_sec=0.05)
         return future.done()
-
     def _wait_for_service(self, client, service_name, timeout_sec):
         end_time = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < end_time:
@@ -94,9 +96,6 @@ class EGMHandler(Node):
     def _wait_for_startup_services(self):
         required = [
             (TriggerWithResultCode, self.egm_stop_srv),
-            (TriggerWithResultCode, self.rapid_stop_srv),
-            (TriggerWithResultCode, self.pp_to_main_srv),
-            (TriggerWithResultCode, self.rapid_start_srv),
             (TriggerWithResultCode, self.egm_start_srv),
             (GetEGMSettings, self.get_settings_srv),
             (SetEGMSettings, self.set_settings_srv),
@@ -106,6 +105,9 @@ class EGMHandler(Node):
             if not self._wait_for_service(client, name, self.startup_service_timeout_sec):
                 return False
         return True
+
+
+
 
     def _set_egm_settings(self):
         get_client = self.create_client(GetEGMSettings, self.get_settings_srv)
@@ -140,104 +142,91 @@ class EGMHandler(Node):
         response = set_future.result()
         return response.result_code, response.message
 
+
+
+
     def shutdown_sequence(self):
         if self._shutdown_done:
             return
         self._shutdown_done = True
 
-        self.get_logger().info("Shutdown requested. Stopping EGM and RAPID.")
+        print("[egm_handler] Shutdown requested. Stopping EGM and RAPID.", flush=True)
 
-        # Use a fresh executor so service calls work even after KeyboardInterrupt
-        # tore down the main spin loop.
+        if not rclpy.ok():
+            print("[egm_handler] rclpy context already shut down — cannot send stop commands.", flush=True)
+            return
+
         shutdown_executor = SingleThreadedExecutor()
         shutdown_executor.add_node(self)
         self._executor = shutdown_executor
         try:
-            # Signal EGM to stop FIRST — this lets RAPID's EGM loop call EGMStop/EGMReset
-            # cleanly before we kill the RAPID task. Stopping RAPID first leaves EGM
-            # connections dangling and causes error 41828 ("too many EGM instances") on
-            # the next launch.
+            # Leave RAPID running — the StateMachine is always-on and must not
+            # be stopped from ROS. Just close the EGM session cleanly.
             code, msg = self._call_trigger_retry(
                 self.egm_stop_srv,
                 attempts=4,
                 timeout_sec=self.shutdown_service_timeout_sec,
-                sleep_after=0.0,
-            )
-            self.get_logger().info(f"stop_egm -> code={code}, msg='{msg}'")
-
-            # Give RAPID time to process EGMStop and run through its cleanup loop
-            # before we kill the task.
-            time.sleep(1.5)
-
-            # Now stop RAPID — EGM connection is already closed.
-            code, msg = self._call_trigger_retry(
-                self.rapid_stop_srv,
-                attempts=4,
-                timeout_sec=self.shutdown_service_timeout_sec,
                 sleep_after=0.5,
             )
-            self.get_logger().info(f"stop_rapid -> code={code}, msg='{msg}'")
+            print(f"[egm_handler] stop_egm -> code={code}, msg='{msg}'", flush=True)
         finally:
             self._executor = None
-            shutdown_executor.shutdown(wait=False)
+            shutdown_executor.shutdown()
 
     def startup_sequence(self):
         if not self._wait_for_startup_services():
             self.get_logger().error("Required startup services unavailable. Skipping EGM startup sequence.")
             return
 
-        # Best-effort stop_egm first: if RAPID is still running from a previous session,
-        # this lets it clean up EGM connections before we kill the task.
-        # If RAPID is already dead (code=3005), this is a no-op — that's fine.
-        code, msg = self._call_trigger(self.egm_stop_srv, sleep_after=1.0)
+        # The StateMachine RAPID program starts automatically when the IRC5
+        # boots and sits idle — we must never stop/restart it. Doing so while
+        # the controller is in auto mode crashes the FlexPendant.
+        # All we need to do is close any stale EGM session then activate a
+        # fresh one on the already-running StateMachine.
+        code, msg = self._call_trigger(self.egm_stop_srv, sleep_after=2.0)
         self.get_logger().info(f"stop_egm (cleanup) -> code={code}, msg='{msg}'")
 
-        # Now kill RAPID unconditionally — ensures we start from a clean slate.
-        code, msg = self._call_trigger(self.rapid_stop_srv, sleep_after=1.0)
-        self.get_logger().info(f"stop_rapid -> code={code}, msg='{msg}'")
-
-        code, msg = self._call_trigger(self.pp_to_main_srv, sleep_after=0.5)
-        self.get_logger().info(f"pp_to_main -> code={code}, msg='{msg}'")
-
-        code, msg = self._call_trigger(self.rapid_start_srv, sleep_after=5.0)
-        self.get_logger().info(f"start_rapid -> code={code}, msg='{msg}'")
-
-
-        ## Disabling EGM settings adjustment to see if that causes FlexPendant crashes and reboots.
-        # for attempt in range(1, 4):
-        #     code, msg = self._set_egm_settings()
-        #     self.get_logger().info(f"set_egm_settings (attempt {attempt}) -> code={code}, msg='{msg}'")
-        #     if code == 1:
-        #         break
-        #     if code == 4003:
-        #         self.get_logger().warn("SM Add-In not ready yet, waiting 2s before retry...")
-        #         time.sleep(2.0)
-        # time.sleep(0.5)
+        code, msg = self._set_egm_settings()
+        self.get_logger().info(f"set_egm_settings -> code={code}, msg='{msg}'")
 
         code, msg = self._call_trigger(self.egm_start_srv, sleep_after=0.5)
         self.get_logger().info(f"start_egm_joint -> code={code}, msg='{msg}'")
         time.sleep(1.0)
 
-        self.get_logger().info("EGM remains active until shutdown_sequence() or a manual stop request.")
+        self._ready_pub.publish(Bool(data=True))
+        self.get_logger().info("EGM handler startup completed. Waiting for Ctrl+C to shutdown cleanly.")
 
 
 def main(args=None):
     rclpy.init(args=args)
+
     executor = SingleThreadedExecutor()
     node = EGMHandler()
     node._executor = executor
     executor.add_node(node)
 
+    # Install our SIGINT handler AFTER rclpy.init() so we override rclpy's
+    # default handler. rclpy's handler calls rclpy.shutdown() immediately,
+    # which would kill the context before shutdown_sequence() can send stop
+    # commands. Our handler instead just sets a flag and lets main() drive
+    # the shutdown in the correct order: stop_egm → stop_rapid → destroy → shutdown.
+    shutdown_requested = [False]
+
+    def _sigint_handler(*_):
+        shutdown_requested[0] = True
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _sigint_handler)
+
     try:
         node.startup_sequence()
-        node.get_logger().info("EGM handler startup completed. Waiting for Ctrl+C to shutdown cleanly.")
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
+        while rclpy.ok() and not shutdown_requested[0]:
+            executor.spin_once(timeout_sec=0.1)
     finally:
         node.shutdown_sequence()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

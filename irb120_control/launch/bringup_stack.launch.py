@@ -19,10 +19,10 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_param_builder import ParameterBuilder
 
 
-def _build_main_stack(context, *args, **kwargs):
-    """Build all nodes that run after preflight completes."""
-
+def generate_launch_description():
     moveit_cfg_pkg = get_package_share_directory("irb120_moveit_config")
+
+
 
     moveit_config = (
         MoveItConfigsBuilder("irb120", package_name="irb120_moveit_config")
@@ -48,12 +48,17 @@ def _build_main_stack(context, *args, **kwargs):
         .to_moveit_configs()
     )
 
-    bringup_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [get_package_share_directory("irb120_control"), "launch", "bringup_irb120.launch.py"]
-            )
-        )
+    egm_handler_node = Node(
+        package="irb120_control",
+        executable="egm_handler",
+        name="egm_handler_startup",
+        output="screen",
+        parameters=[
+            {"rws_service_prefix": "/rws_client"},
+            {"task": "T_ROB1"},
+            {"startup_service_timeout_sec": 30.0},
+            {"comm_timeout": 5.0},
+        ],
     )
 
     move_group_node = Node(
@@ -118,7 +123,7 @@ def _build_main_stack(context, *args, **kwargs):
     handeye_to_realsense_tf = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [get_package_share_directory("irb120_control"), "handeye_calibrations", "cam_tf_12mm.launch.py"]
+                [get_package_share_directory("irb120_handeye"), "launch", "cam_tf_12mm.launch.py"]
             )
         )
     )
@@ -200,23 +205,8 @@ def _build_main_stack(context, *args, **kwargs):
         condition=IfCondition(LaunchConfiguration('start_servo')),
     )
 
-    return [
-        bringup_launch,
-        move_group_node,
-        rviz_node,
-        rviz_debug_node,
-        realsense_launch,
-        handeye_to_realsense_tf,
-        perception_launch,
-        net_ft_launch,
-        netft_preprocessor_node,
-        # vizualize_net_ft,
-        servo_node,
-        servo_set_twist_mode,
-    ]
 
 
-def generate_launch_description():
     perception_method_arg = DeclareLaunchArgument(
         'perception_method',
         default_value='dbscan',
@@ -243,28 +233,22 @@ def generate_launch_description():
         ),
     )
 
-    preflight_script = os.path.join(
-        get_package_share_directory("irb120_control"), "scripts", "preflight_cleanup.sh"
-    )
-
-    preflight = ExecuteProcess(
-        cmd=["bash", preflight_script],
-        output="screen",
-        name="preflight_cleanup",
-    )
-
-    # Everything else starts only after preflight exits.
-    main_stack = RegisterEventHandler(
-        OnProcessExit(
-            target_action=preflight,
-            on_exit=[OpaqueFunction(function=_build_main_stack)],
-        )
-    )
-
     return LaunchDescription([
         perception_method_arg,
         debug_perception_arg,
         start_servo_arg,
-        preflight,
-        main_stack,
+
+        egm_handler_node,
+
+        move_group_node,
+        rviz_node,
+        rviz_debug_node,
+        realsense_launch,
+        handeye_to_realsense_tf,
+        perception_launch,
+        net_ft_launch,
+        netft_preprocessor_node,
+        vizualize_net_ft,
+        servo_node,
+        servo_set_twist_mode,
     ])

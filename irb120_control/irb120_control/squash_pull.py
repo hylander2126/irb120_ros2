@@ -23,26 +23,32 @@ SERVO_TOPIC = "/servo_node/delta_twist_cmds"
 WRENCH_TOPIC = "/netft_data_transformed"
 
 # Hardcoded pre-squash waypoint. Edit these values directly for your test cell.
-PRE_SQUASH_X = 0.576
+PRE_SQUASH_X = 0.534
 PRE_SQUASH_Y = 0.00
-PRE_SQUASH_Z = 0.28
+PRE_SQUASH_Z = 0.226
 
 APPROACH_TOL = 0.010
 APPROACH_MAX_SPEED = 0.030
 
 FORCE_REF_N = 2.0
-FORCE_HARD_LIMIT_N = 5.0
+FORCE_HARD_LIMIT_N = 10.0
 CONTACT_STABLE_SAMPLES = 6
 
-NORMAL_FORCE_SIGN = 1.0   # flip if your force sign is opposite
 PRESS_AXIS_SIGN = -1.0    # negative base_link z presses down
 PULL_AXIS_SIGN = -1.0     # negative base_link x pulls toward the robot
 
-DESCEND_SPEED = 0.15 # Unitless, gets converted by servo yaml (scales down to 0.07)
-PULL_SPEED = 0.008
-RETRACT_SPEED = 0.010
+# MoveIt Servo linear scale factor (servo.yaml: scale.linear).
+# All speeds below are in m/s; they are divided by this before publishing.
+SERVO_LINEAR_SCALE = 0.07
+
+DESCEND_SPEED = 0.005    # m/s
+PULL_SPEED = 0.008       # m/s
+RETRACT_SPEED = 0.010    # m/s
 RETRACT_CLEARANCE = 0.020
 PULL_DISTANCE = 0.030
+
+SQUASH_TIMEOUT_SEC = 8.0
+PULL_TIMEOUT_SEC = 8.0
 
 KP_FORCE = 0.0015
 KI_FORCE = 0.00015
@@ -74,6 +80,7 @@ class SquashPull(Node):
         self._awaiting_confirm = False
         self._last_nonfinite_warn = 0.0
         self._last_tf_warn_time = 0.0
+        self._state_start_time = 0.0
 
         self._target = (PRE_SQUASH_X, PRE_SQUASH_Y, PRE_SQUASH_Z)
         self.get_logger().info(
@@ -82,7 +89,8 @@ class SquashPull(Node):
         )
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
-        force = NORMAL_FORCE_SIGN * msg.wrench.force.z
+        fx, fy, fz = msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z
+        force = math.sqrt(fx * fx + fy * fy + fz * fz)
         if not math.isfinite(force):
             now = self.get_clock().now().nanoseconds * 1e-9
             if now - self._last_nonfinite_warn > 1.0:
@@ -135,9 +143,9 @@ class SquashPull(Node):
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = BASE_FRAME
-        msg.twist.linear.x = vx
-        msg.twist.linear.y = vy
-        msg.twist.linear.z = vz
+        msg.twist.linear.x = vx / SERVO_LINEAR_SCALE
+        msg.twist.linear.y = vy / SERVO_LINEAR_SCALE
+        msg.twist.linear.z = vz / SERVO_LINEAR_SCALE
         self._twist_pub.publish(msg)
 
     def _publish_zero(self) -> None:
@@ -147,6 +155,7 @@ class SquashPull(Node):
         if state != self._state:
             self.get_logger().info(f"{self._state} -> {state}")
             self._state = state
+            self._state_start_time = self.get_clock().now().nanoseconds * 1e-9
 
     def _operator_confirm(self, message: str) -> bool:
         if not REQUIRE_OPERATOR_CONFIRM:
@@ -194,8 +203,8 @@ class SquashPull(Node):
         y = pose.pose.position.y
         z = pose.pose.position.z
 
-        if self._have_force and abs(self._filtered_force) > FORCE_HARD_LIMIT_N:
-            self.get_logger().error(f"Hard force limit exceeded: {self._filtered_force:.2f} N")
+        if self._have_force and abs(self._filtered_force) > FORCE_HARD_LIMIT_N and self._state != "RETRACT":
+            self.get_logger().error(f"Hard force limit exceeded: {self._filtered_force:.2f} N — retracting")
             self._transition("RETRACT")
 
         if self._have_force and not math.isfinite(self._filtered_force):
@@ -224,6 +233,11 @@ class SquashPull(Node):
             return
 
         if self._state == "SQUASH":
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now - self._state_start_time > SQUASH_TIMEOUT_SEC:
+                self.get_logger().error(f"SQUASH timed out after {SQUASH_TIMEOUT_SEC:.0f}s — no contact detected. Retracting.")
+                self._transition("RETRACT")
+                return
             self._publish_twist(0.0, 0.0, PRESS_AXIS_SIGN * DESCEND_SPEED)
             if self._have_force and self._filtered_force >= FORCE_REF_N:
                 self._contact_count += 1
@@ -236,6 +250,11 @@ class SquashPull(Node):
             return
 
         if self._state == "PULL":
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now - self._state_start_time > PULL_TIMEOUT_SEC:
+                self.get_logger().error(f"PULL timed out after {PULL_TIMEOUT_SEC:.0f}s. Retracting.")
+                self._transition("RETRACT")
+                return
             error = FORCE_REF_N - self._filtered_force
             self._integral = self._clamp(self._integral + error * (1.0 / CONTROL_HZ), 2.0)
             normal_cmd = KP_FORCE * error + KI_FORCE * self._integral

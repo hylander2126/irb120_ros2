@@ -2,9 +2,9 @@
 """Run saved hand-eye calibration joint poses with manual sample gating.
 
 Usage examples:
-  ros2 run irb120_control run_handeye_calibration_poses
-  ros2 run irb120_control run_handeye_calibration_poses --pose-file joints_8_32mm.yaml
-  ros2 run irb120_control run_handeye_calibration_poses --move-time 5.0 --settle-time 2.0
+  ros2 run irb120_handeye run_calibration_poses
+  ros2 run irb120_handeye run_calibration_poses --pose-file joints_8_32mm.yaml
+  ros2 run irb120_handeye run_calibration_poses --move-time 5.0 --settle-time 2.0
 """
 
 import argparse
@@ -41,8 +41,8 @@ def _resolve_pose_path(pose_path: Optional[str], pose_file: str) -> str:
     if pose_path:
         return os.path.abspath(pose_path)
     return os.path.join(
-        get_package_share_directory("irb120_control"),
-        "handeye_calibrations",
+        get_package_share_directory("irb120_handeye"),
+        "calibrations",
         pose_file,
     )
 
@@ -145,8 +145,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run saved hand-eye calibration poses with manual sampling.")
     p.add_argument(
         "--pose-file",
-        default="joints_20_14mm.yaml", # 13_22mm.yaml",
-        help="Pose YAML filename under share/irb120_control/handeye_calibrations/",
+        default="joints_20_14mm.yaml",
+        help="Pose YAML filename under share/irb120_handeye/calibrations/",
     )
     p.add_argument(
         "--pose-path",
