@@ -12,7 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 
-INPUT_TOPIC = "/force_torque_sensor_broadcaster/wrench"
+INPUT_TOPIC = "/netft_data"
 OUTPUT_TOPIC = "/netft_data_transformed"
 MONITOR_TOPIC = "/netft_data_monitor"
 BASE_FRAME = "base_link"
@@ -23,7 +23,7 @@ OUTPUT_FRAME = "base_link"
 # +x_s = -y_w, +y_s = -z_w, +z_s = +x_w
 # Therefore v_w = [v_s.z, -v_s.x, -v_s.y]
 
-ENABLE_EMA = True
+ENABLE_EMA = False # Was true, testing latency
 EMA_ALPHA = 0.20
 
 ENABLE_BIAS = True

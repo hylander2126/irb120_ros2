@@ -140,18 +140,12 @@ def generate_launch_description():
         }.items(),
     )
 
-    net_ft_launch = Node(
-        package="net_ft_driver",
-        executable="net_ft_node",
-        name="net_ft_node",
+    net_ft_node = ExecuteProcess(
+        cmd=[
+            "ros2", "run", "netft_utils", "netft_node",
+            "--address", "192.168.126.125"
+        ],
         output="screen",
-        parameters=[{
-            'ip_address': '192.168.126.125',
-            'rdt_sampling_rate': 450,
-            'sensor_type': 'ati',
-            'internal_filter_rate': 0,
-            'use_hardware_biasing': True,
-        }],
     )
 
     netft_preprocessor_node = Node(
@@ -246,7 +240,7 @@ def generate_launch_description():
         realsense_launch,
         handeye_to_realsense_tf,
         perception_launch,
-        net_ft_launch,
+        net_ft_node,
         netft_preprocessor_node,
         vizualize_net_ft,
         servo_node,
