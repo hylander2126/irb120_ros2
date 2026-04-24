@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Filter and re-orient NetFT wrench data in ROS 2.
+"""Preprocess NetFT wrench data in ROS 2.
+
+This node is the single filtering stage for downstream consumers.
+It rotates the sensor axes into the robot/base frame, optionally removes a
+startup bias, and applies an exponential moving average (EMA) to smooth the
+force/torque stream before publishing it.
+
+EMA (Exp. moving avg) is a lightweight low-pass filter that blends each new sample with the
+previous output. A higher alpha follows changes faster but passes more noise;
+a lower alpha smooths more aggressively but adds lag.
 
 Settings are intentionally hardcoded for this workspace.
 """
@@ -19,11 +28,7 @@ BASE_FRAME = "base_link"
 DEFAULT_SENSOR_FRAME = "tool0"
 OUTPUT_FRAME = "base_link"
 
-# Sensor axes expressed in the robot/world frame:
-# +x_s = -y_w, +y_s = -z_w, +z_s = +x_w
-# Therefore v_w = [v_s.z, -v_s.x, -v_s.y]
-
-ENABLE_EMA = False # Was true, testing latency
+ENABLE_EMA = True  # Keep downstream consumers on the pre-filtered wrench stream.
 EMA_ALPHA = 0.20
 
 ENABLE_BIAS = True
@@ -31,7 +36,9 @@ BIAS_SAMPLES = 150
 
 MONITOR_HZ = 25.0
 
-
+# Sensor axes expressed in the robot/world frame:
+# +x_s = -y_w, +y_s = -z_w, +z_s = +x_w
+# Therefore v_w = [v_s.z, -v_s.x, -v_s.y]
 def rotate_sensor_to_world(v):
     return (v[2], -v[0], -v[1])
 
@@ -61,6 +68,7 @@ class NetFTPreprocessor(Node):
 
         self._warn_t_last = 0.0
 
+        # Bias is accumulated only at startup so the published wrench is centered.
         self._biasing = self.enable_bias and self.bias_samples > 0
         self._bias_count = 0
         self._bias_f = [0.0, 0.0, 0.0]
@@ -68,6 +76,7 @@ class NetFTPreprocessor(Node):
         self._acc_f = [0.0, 0.0, 0.0]
         self._acc_t = [0.0, 0.0, 0.0]
 
+        # EMA state starts empty and is initialized from the first bias-corrected sample.
         self._ema_f = None
         self._ema_t = None
         self._last_monitor_pub = 0.0
@@ -103,18 +112,34 @@ class NetFTPreprocessor(Node):
         out.wrench.torque.z = t_out[2]
         self._monitor_pub.publish(out)
 
+    def _publish_output(self, f_out, t_out, stamp):
+        out = WrenchStamped()
+        out.header.stamp = stamp
+        out.header.frame_id = self.output_frame
+        out.wrench.force.x = f_out[0]
+        out.wrench.force.y = f_out[1]
+        out.wrench.force.z = f_out[2]
+        out.wrench.torque.x = t_out[0]
+        out.wrench.torque.y = t_out[1]
+        out.wrench.torque.z = t_out[2]
+        self._pub.publish(out)
+        self._publish_monitor(f_out, t_out, stamp)
+
     def _on_wrench(self, msg: WrenchStamped):
         f_raw = (msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z)
         t_raw = (msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z)
 
+        # Reject corrupt samples before they can contaminate the bias or EMA state.
         if not all(math.isfinite(v) for v in (*f_raw, *t_raw)):
-            self._warn_throttled("Dropped non-finite NetFT sample (NaN/Inf)", period=1.0)
+            self._warn_throttled("Non-finite NetFT sample (NaN/Inf): publishing zero wrench", period=1.0)
+            self._publish_output((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), msg.header.stamp)
             return
 
         f_rot = rotate_sensor_to_world(f_raw)
         t_rot = rotate_sensor_to_world(t_raw)
 
         if self._biasing:
+            # Accumulate the startup bias in the rotated frame so it matches downstream use.
             self._acc_f[0] += f_rot[0]
             self._acc_f[1] += f_rot[1]
             self._acc_f[2] += f_rot[2]
@@ -133,10 +158,12 @@ class NetFTPreprocessor(Node):
                     f"T=({self._bias_t[0]:.3f},{self._bias_t[1]:.3f},{self._bias_t[2]:.3f})"
                 )
 
+        # Subtract the startup bias before optional EMA smoothing.
         f = [f_rot[0] - self._bias_f[0], f_rot[1] - self._bias_f[1], f_rot[2] - self._bias_f[2]]
         t = [t_rot[0] - self._bias_t[0], t_rot[1] - self._bias_t[1], t_rot[2] - self._bias_t[2]]
 
         if self.enable_ema:
+            # EMA acts as the only downstream smoothing stage for consumers.
             a = max(0.0, min(1.0, self.ema_alpha))
             if self._ema_f is None:
                 self._ema_f = f
@@ -150,17 +177,7 @@ class NetFTPreprocessor(Node):
             f_out = f
             t_out = t
 
-        out = WrenchStamped()
-        out.header.stamp = msg.header.stamp
-        out.header.frame_id = self.output_frame
-        out.wrench.force.x = f_out[0]
-        out.wrench.force.y = f_out[1]
-        out.wrench.force.z = f_out[2]
-        out.wrench.torque.x = t_out[0]
-        out.wrench.torque.y = t_out[1]
-        out.wrench.torque.z = t_out[2]
-        self._pub.publish(out)
-        self._publish_monitor(f_out, t_out, msg.header.stamp)
+        self._publish_output(f_out, t_out, msg.header.stamp)
 
 
 def main(args=None):

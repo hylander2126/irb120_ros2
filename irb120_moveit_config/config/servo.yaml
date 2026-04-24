@@ -9,9 +9,12 @@ max_expected_latency: 0.06     # 3x publish_period — minimum valid value
 
 move_group_name: manipulator
 
-command_in_type: "unitless"
+command_in_type: "speed_units"
 scale:
-  linear: 0.07      # .12 was too fast, comfortable jogging speed more like 0.07
+  # In speed_units mode, Twist commands are interpreted directly as m/s and rad/s.
+  # Keep these values for compatibility with unitless publishers (if any), but
+  # they are not applied to speed_units Twist inputs.
+  linear: 0.07
   rotational: 0.3
   joint: 0.4
 
