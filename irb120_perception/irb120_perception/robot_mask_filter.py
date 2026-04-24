@@ -34,6 +34,7 @@ Tune radius live — no rebuild:
 
 import os
 import struct
+import time
 
 import numpy as np
 import rclpy
@@ -104,37 +105,23 @@ def _mesh_inside_mask(pts: np.ndarray,
     R, t: rotation and translation from link frame to the pts frame (base_link).
     padding: outward shift applied to each face plane (metres).
     """
-    # Transform all face vertices to base_link at once
-    flat = verts_local.reshape(-1, 3)            # (N_faces*3, 3)
-    flat_w = _apply_tf_to_points(flat, R, t)
-    verts_w = flat_w.reshape(verts_local.shape)  # (N_faces, 3, 3)
+    flat_w = (verts_local.reshape(-1, 3).astype(np.float32) @ R.T.astype(np.float32)) + t.astype(np.float32)
+    verts_w = flat_w.reshape(verts_local.shape[0], 3, 3)
 
-    # Recompute face normals in world frame (from cross product, not stored normals,
-    # so they're guaranteed consistent with transformed vertices)
-    e1 = verts_w[:, 1] - verts_w[:, 0]   # (N_faces, 3)
+    e1 = verts_w[:, 1] - verts_w[:, 0]   # (F, 3)
     e2 = verts_w[:, 2] - verts_w[:, 0]
-    normals_w = np.cross(e1, e2)          # (N_faces, 3)
+    normals_w = np.cross(e1, e2)          # (F, 3)
     nlen = np.linalg.norm(normals_w, axis=1, keepdims=True)
-    valid_faces = (nlen[:, 0] > 1e-10)
-    normals_w[valid_faces] /= nlen[valid_faces]
+    valid = (nlen[:, 0] > 1e-10)
+    normals_w[valid] /= nlen[valid]
+    normals_w = normals_w[valid].astype(np.float32)   # (F', 3)
+    anchors   = verts_w[valid, 0]                     # (F', 3)
 
-    # Face anchor points (first vertex of each face)
-    anchors = verts_w[:, 0]               # (N_faces, 3)
-
-    # For each face: signed distance = dot(pt - anchor, normal)
-    # Inside convex mesh: all signed distances <= padding
-    p = pts.astype(np.float64)            # (M, 3)
-    inside = np.ones(len(p), dtype=bool)
-
-    for i in range(len(normals_w)):
-        if not valid_faces[i]:
-            continue
-        # signed distance from each point to this face plane
-        sd = (p - anchors[i]) @ normals_w[i]  # (M,)
-        # outside if sd > padding (point is on the outward side beyond padding)
-        inside &= (sd <= padding)
-
-    return inside
+    # sd[i, f] = dot(pts[i] - anchors[f], normals_w[f])
+    # Vectorised: pts @ normals_w.T − (anchors * normals_w).sum(axis=1)
+    p = pts.astype(np.float32)
+    sd = p @ normals_w.T - (anchors * normals_w).sum(axis=1)  # (M, F')
+    return sd.max(axis=1) <= padding
 
 
 def _capsule_inside_mask(pts: np.ndarray,
@@ -171,14 +158,30 @@ def _unpack_pc2(msg: PointCloud2) -> np.ndarray:
     fields = {f.name: f for f in msg.fields}
     ox, oy, oz = fields['x'].offset, fields['y'].offset, fields['z'].offset
     step = msg.point_step
-    data = msg.data
     n = msg.width * msg.height
-    xyz = np.empty((n, 3), dtype=np.float32)
-    for i in range(n):
-        b = i * step
-        xyz[i, 0] = struct.unpack_from('f', data, b + ox)[0]
-        xyz[i, 1] = struct.unpack_from('f', data, b + oy)[0]
-        xyz[i, 2] = struct.unpack_from('f', data, b + oz)[0]
+    endian = '>' if msg.is_bigendian else '<'
+    contiguous = msg.row_step == step * msg.width
+
+    if contiguous and step >= max(ox, oy, oz) + 4:
+        dtype = np.dtype({
+            'names': ['x', 'y', 'z'],
+            'formats': [endian + 'f4', endian + 'f4', endian + 'f4'],
+            'offsets': [ox, oy, oz],
+            'itemsize': step,
+        })
+        view = np.frombuffer(msg.data, dtype=dtype, count=n)
+        xyz = np.empty((n, 3), dtype=np.float32)
+        xyz[:, 0] = view['x']
+        xyz[:, 1] = view['y']
+        xyz[:, 2] = view['z']
+    else:
+        data = msg.data
+        xyz = np.empty((n, 3), dtype=np.float32)
+        for i in range(n):
+            b = i * step
+            xyz[i, 0] = struct.unpack_from('f', data, b + ox)[0]
+            xyz[i, 1] = struct.unpack_from('f', data, b + oy)[0]
+            xyz[i, 2] = struct.unpack_from('f', data, b + oz)[0]
     return xyz
 
 
@@ -289,25 +292,32 @@ class RobotMaskFilter(Node):
 
         # --- Mesh half-space tests ---
         for link, verts in self._meshes.items():
+            candidates = ~mask_out
+            if not candidates.any():
+                break
             tf = _get_tf(self.tf_buffer, self.base_frame, link)
             if tf is None:
                 continue
             R, t = tf
-            inside = _mesh_inside_mask(pts, verts, R, t, self.mesh_padding)
-            mask_out |= inside
+            inside = _mesh_inside_mask(pts[candidates], verts, R, t, self.mesh_padding)
+            mask_out[candidates] |= inside
 
         # --- Capsule tests for end-effector ---
         for parent, child in self.CAPSULE_SEGMENTS:
+            candidates = ~mask_out
+            if not candidates.any():
+                break
             A = _tf_origin(self.tf_buffer, self.base_frame, parent)
             B = _tf_origin(self.tf_buffer, self.base_frame, child)
             if A is None or B is None:
                 continue
-            inside = _capsule_inside_mask(pts, A, B, self.capsule_radius)
-            mask_out |= inside
+            inside = _capsule_inside_mask(pts[candidates], A, B, self.capsule_radius)
+            mask_out[candidates] |= inside
 
         return ~mask_out  # keep = not masked
 
     def _cloud_cb(self, msg: PointCloud2):
+        t0 = time.monotonic()
         xyz = _unpack_pc2(msg)
         finite = np.isfinite(xyz).all(axis=1)
         keep = finite.copy()
@@ -315,10 +325,15 @@ class RobotMaskFilter(Node):
             tf = _get_tf(self.tf_buffer, self.base_frame, msg.header.frame_id)
             if tf is not None:
                 R, t = tf
-                pts_base = _apply_tf_to_points(xyz[finite].astype(np.float64), R, t)
+                pts_base = _apply_tf_to_points(xyz[finite].astype(np.float32), R.astype(np.float32), t.astype(np.float32))
                 keep[finite] = self._build_robot_mask(pts_base)
             # if TF unavailable, keep all finite points (fail-open)
         self._pub_cloud.publish(_pack_pc2(xyz[keep], msg.header.frame_id, msg.header.stamp))
+        dt = (time.monotonic() - t0) * 1000
+        self.get_logger().info(
+            f'points_masked in {dt:.1f} ms (in={len(xyz)}, keep={int(keep.sum())})',
+            throttle_duration_sec=2.0,
+        )
 
     def _depth_cb(self, msg: Image):
         if self._cam_info is None:
@@ -331,7 +346,7 @@ class RobotMaskFilter(Node):
         k = self._cam_info.k
         fx, fy, cx, cy = k[0], k[4], k[2], k[5]
         u, v = np.meshgrid(np.arange(msg.width), np.arange(msg.height))
-        Z = depth.astype(np.float64) / 1000.0
+        Z = depth.astype(np.float32) / 1000.0
         pts_cam = np.stack(
             [(u.ravel() - cx) * Z.ravel() / fx,
              (v.ravel() - cy) * Z.ravel() / fy,
@@ -345,7 +360,7 @@ class RobotMaskFilter(Node):
             self._pub_depth.publish(msg)
             return
         R, t = tf
-        pts_base = _apply_tf_to_points(pts_cam, R, t)
+        pts_base = _apply_tf_to_points(pts_cam, R.astype(np.float32), t.astype(np.float32))
 
         valid = (depth.ravel() > 0)
         keep = np.ones(msg.height * msg.width, dtype=bool)

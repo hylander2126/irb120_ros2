@@ -1,6 +1,6 @@
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -140,11 +140,14 @@ def generate_launch_description():
         }.items(),
     )
 
+    netft_node_exe = os.path.join(
+        get_package_prefix("netft_utils"),
+        "lib",
+        "netft_utils",
+        "netft_node",
+    )
     net_ft_node = ExecuteProcess(
-        cmd=[
-            "ros2", "run", "netft_utils", "netft_node",
-            "--address", "192.168.126.125"
-        ],
+        cmd=[netft_node_exe, "--address", "192.168.126.125"],
         output="screen",
     )
 
@@ -153,6 +156,20 @@ def generate_launch_description():
         executable="netft_preprocessor",
         name="netft_preprocessor",
         output="screen",
+    )
+
+    camera_hull_recorder_node = Node(
+        package="irb120_control",
+        executable="camera_hull_recorder",
+        name="camera_hull_recorder",
+        output="screen",
+        parameters=[
+            {"image_topic": "/realsense/color/image_raw"},
+            {"camera_info_topic": "/realsense/color/camera_info"},
+            {"marker_topic": "/object_detector/markers"},
+            {"recording_service": "/camera_hull_recorder/set_recording"},
+            {"auto_start_recording": False},
+        ],
     )
 
     vizualize_net_ft = Node(
@@ -242,6 +259,7 @@ def generate_launch_description():
         perception_launch,
         net_ft_node,
         netft_preprocessor_node,
+        camera_hull_recorder_node,
         vizualize_net_ft,
         servo_node,
         servo_set_twist_mode,
