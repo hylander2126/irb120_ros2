@@ -28,6 +28,14 @@ class PIForceController:
         """Clear integrator state between phases."""
         self._integral = 0.0
 
+    def set_reference(self, force_ref_n: float) -> None:
+        """Update the force setpoint without disturbing the integrator."""
+        self._force_ref = force_ref_n
+
+    @property
+    def reference(self) -> float:
+        return self._force_ref
+
     def update(self, force_z: float) -> float:
         """Return a Z velocity command (m/s) given the current normal force.
 

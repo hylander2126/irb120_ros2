@@ -11,12 +11,23 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, WrenchStamped
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+def _resolve_workspace_root() -> Path:
+    file_path = Path(__file__).resolve()
+    for parent in file_path.parents:
+        if (parent / "runtime_logs").exists():
+            return parent
+        if (parent / "src").is_dir() and (parent / "build").is_dir() and (parent / "install").is_dir():
+            return parent
+    # Fallback for unusual layouts.
+    return file_path.parents[0]
 
 
 class CameraHullRecorder(Node):
@@ -36,6 +47,8 @@ class CameraHullRecorder(Node):
         self.declare_parameter("line_r", 0)
         self.declare_parameter("object_id_whitelist", [])
         self.declare_parameter("auto_start_recording", False)
+        self.declare_parameter("ft_topic", "/netft_data_monitor")
+        self.declare_parameter("ft_hard_limit_n", 10.0)
 
         self._image_topic = str(self.get_parameter("image_topic").value)
         self._camera_info_topic = str(self.get_parameter("camera_info_topic").value)
@@ -52,6 +65,12 @@ class CameraHullRecorder(Node):
         )
         self._whitelist = {str(x) for x in self.get_parameter("object_id_whitelist").value}
         self._auto_start = bool(self.get_parameter("auto_start_recording").value)
+        self._ft_hard_limit = float(self.get_parameter("ft_hard_limit_n").value)
+
+        self._ft_fx: float = 0.0
+        self._ft_fy: float = 0.0
+        self._ft_fz: float = 0.0
+        self._ft_received: bool = False
 
         self._bridge = CvBridge()
         self._tf_buffer = Buffer()
@@ -73,6 +92,7 @@ class CameraHullRecorder(Node):
         self._image_sub = self.create_subscription(Image, self._image_topic, self._on_image, 10)
         self._camera_info_sub = self.create_subscription(CameraInfo, self._camera_info_topic, self._on_camera_info, 10)
         self._marker_sub = self.create_subscription(MarkerArray, self._marker_topic, self._on_markers, 10)
+        self._ft_sub = self.create_subscription(WrenchStamped, self.get_parameter("ft_topic").value, self._on_wrench, 10)
         self._annotated_pub = self.create_publisher(Image, self._annotated_image_topic, 10)
         self._recording_srv = self.create_service(SetBool, self._recording_service_name, self._on_set_recording)
 
@@ -81,6 +101,12 @@ class CameraHullRecorder(Node):
             f"image={self._image_topic}, camera_info={self._camera_info_topic}, markers={self._marker_topic}, "
             f"service={self._recording_service_name}"
         )
+
+    def _on_wrench(self, msg: WrenchStamped) -> None:
+        self._ft_fx = msg.wrench.force.x
+        self._ft_fy = msg.wrench.force.y
+        self._ft_fz = msg.wrench.force.z
+        self._ft_received = True
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:
@@ -142,6 +168,8 @@ class CameraHullRecorder(Node):
 
         annotated = frame.copy()
         self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
+        if self._ft_received:
+            self._draw_ft_hud(annotated)
 
         try:
             self._annotated_pub.publish(self._bridge.cv2_to_imgmsg(annotated, encoding="bgr8"))
@@ -178,8 +206,67 @@ class CameraHullRecorder(Node):
     def _resolve_output_dir(self) -> Path:
         if self._output_dir_param:
             return Path(self._output_dir_param)
-        workspace_root = Path(__file__).resolve().parents[4]
+        workspace_root = _resolve_workspace_root()
         return workspace_root / "runtime_logs"
+
+    def _draw_ft_hud(self, img: np.ndarray) -> None:
+        """Burn an FT readout into the bottom-left corner of img (in-place)."""
+        fx, fy, fz = self._ft_fx, self._ft_fy, self._ft_fz
+        fmag = math.sqrt(fx * fx + fy * fy + fz * fz)
+        over_limit = fmag > self._ft_hard_limit
+
+        # Layout constants
+        h, _w = img.shape[:2]
+        panel_x, panel_y = 10, h - 112
+        panel_w, panel_h = 230, 102
+        row_h = 26          # pixels per axis row
+        label_w = 26        # width reserved for "Fx" etc.
+        value_w = 68        # width reserved for "+00.00 N"
+        bar_area_x = panel_x + label_w + value_w + 6   # left edge of bar area
+        bar_area_w = panel_w - label_w - value_w - 18  # total bar area width
+        bar_h = 7
+        half_w = bar_area_w // 2   # pixels representing zero on each side
+        axis_scale = self._ft_hard_limit   # force value that fills one half of the bar
+
+        # Semi-transparent dark background panel
+        roi = img[panel_y:panel_y + panel_h, panel_x:panel_x + panel_w]
+        overlay = roi.copy()
+        cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.55, roi, 0.45, 0, roi)
+
+        txt_color = (0, 60, 255) if over_limit else (220, 220, 220)
+        axes = [("Fx", fx, (100, 100, 255)), ("Fy", fy, (100, 255, 100)), ("Fz", fz, (255, 160, 60))]
+
+        for i, (label, val, bar_color) in enumerate(axes):
+            row_y = panel_y + 10 + i * row_h
+
+            # Label
+            cv2.putText(img, label, (panel_x + 4, row_y + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, txt_color, 1, cv2.LINE_AA)
+
+            # Numeric value
+            cv2.putText(img, f"{val:+6.2f} N", (panel_x + label_w + 2, row_y + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, txt_color, 1, cv2.LINE_AA)
+
+            # Centred bar: grey trough, centre tick, coloured fill extending left or right
+            trough_x = bar_area_x
+            trough_y = row_y + 5
+            cv2.rectangle(img, (trough_x, trough_y),
+                          (trough_x + bar_area_w, trough_y + bar_h), (70, 70, 70), -1)
+
+            centre_x = trough_x + half_w
+            fill_px = int(abs(val) / axis_scale * half_w)
+            fill_px = min(fill_px, half_w)
+            if val >= 0:
+                cv2.rectangle(img, (centre_x, trough_y),
+                              (centre_x + fill_px, trough_y + bar_h), bar_color, -1)
+            else:
+                cv2.rectangle(img, (centre_x - fill_px, trough_y),
+                              (centre_x, trough_y + bar_h), bar_color, -1)
+
+            # Centre zero tick
+            cv2.line(img, (centre_x, trough_y - 1), (centre_x, trough_y + bar_h + 1),
+                     (200, 200, 200), 1)
 
     def _draw_marker_hulls(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
         for marker in self._latest_markers:

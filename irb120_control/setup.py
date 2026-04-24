@@ -34,14 +34,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'egm_handler = irb120_control.egm_handler:main',
-            'egm_ready_waiter = irb120_control.egm_ready_waiter:main',
-            'safe_stop = irb120_control.safe_stop:main',
-            'run_handeye_calibration_poses = irb120_control.run_handeye_calibration_poses:main',
+            'egm_handler = irb120_control.util.egm_handler:main',
             'keyboard_jog = irb120_control.keyboard_jog:main',
-            'netft_preprocessor = irb120_control.netft_preprocessor:main',
+            'netft_preprocessor = irb120_control.monitoring.netft_preprocessor:main',
             'squash_pull = irb120_control.squash_pull:main',
-            'camera_hull_recorder = irb120_control.camera_hull_recorder:main',
+            'camera_hull_recorder = irb120_control.monitoring.camera_hull_recorder:main',
         ],
     },
 )

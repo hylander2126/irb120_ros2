@@ -16,9 +16,9 @@ from rclpy.node import Node
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from irb120_control.force_controller import PIForceController
-from irb120_control.moveit_single_shot import plan_and_execute_pose_goal
-from irb120_control.servo_command_publisher import ServoCommandPublisher
+from irb120_control.controllers.force_controller import PIForceController
+from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
+from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 
 
 BASE_FRAME = "base_link"
@@ -53,6 +53,7 @@ LULL_WAIT_SEC = 1.0
 KP_FORCE = 0.0015
 KI_FORCE = 0.00015
 MAX_NORMAL_SPEED = 0.010
+UNPULL_FORCE_BIAS_N = 0.5   # extra normal force added during UNPULL to counter object toppling
 
 CONTROL_HZ = 100.0
 REQUIRE_OPERATOR_CONFIRM = True
@@ -85,6 +86,7 @@ class SquashPull(Node):
         self._last_tf_warn_time = 0.0
         self._state_start_time = 0.0
         self._contact_felt = False
+        self._lull_next: str = "PULL"  # state to enter after the LULL hold expires
 
 
     def move_to_pre_squash(self) -> bool:
@@ -213,9 +215,20 @@ class SquashPull(Node):
             self._publish_zero()
             if self._now_s() - self._state_start_time < LULL_WAIT_SEC:
                 return
-            self._pull_start_x = x
-            self._force_ctrl.reset()
-            self._transition("PULL")
+            if self._lull_next == "PULL":
+                self._force_ctrl.reset()
+                self._force_ctrl.set_reference(FORCE_REF_N)
+                self._pull_start_x = x
+            elif self._lull_next == "UNPULL":
+                # Snap setpoint to whatever force the object settled at during the lull,
+                # then add a bias to pre-load contact and resist toppling during the return stroke.
+                snapped = self._force_z + UNPULL_FORCE_BIAS_N
+                self._force_ctrl.set_reference(snapped)
+                self.get_logger().info(
+                    f"UNPULL setpoint: {snapped:.2f} N "
+                    f"(settled={self._force_z:.2f} N + bias={UNPULL_FORCE_BIAS_N:.2f} N)"
+                )
+            self._transition(self._lull_next)
             return
 
         if self._state == "PULL":
@@ -225,8 +238,8 @@ class SquashPull(Node):
 
             if self._pull_start_x is not None and abs(x - self._pull_start_x) >= PULL_DISTANCE:
                 self._pull_end_x = x
-                self._force_ctrl.reset()
-                self._transition("UNPULL")
+                self._lull_next = "UNPULL"
+                self._transition("LULL")
             return
 
         if self._state == "UNPULL":
@@ -238,6 +251,7 @@ class SquashPull(Node):
 
             # Done when we've returned to the x position where PULL began
             if self._pull_start_x is not None and x >= self._pull_start_x:
+                self._force_ctrl.set_reference(FORCE_REF_N)  # restore default for future phases
                 self._transition("RETRACT")
             return
 

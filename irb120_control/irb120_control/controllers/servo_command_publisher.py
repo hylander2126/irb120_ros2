@@ -10,6 +10,17 @@ from pathlib import Path
 from geometry_msgs.msg import TwistStamped
 
 
+def _resolve_workspace_root() -> Path:
+    file_path = Path(__file__).resolve()
+    for parent in file_path.parents:
+        if (parent / "runtime_logs").exists():
+            return parent
+        if (parent / "src").is_dir() and (parent / "build").is_dir() and (parent / "install").is_dir():
+            return parent
+    # Fallback for unusual layouts.
+    return file_path.parents[0]
+
+
 class ServoCommandPublisher:
     """Publishes validated Twist commands and logs command/force correlation."""
 
@@ -18,7 +29,7 @@ class ServoCommandPublisher:
         self._frame_id = frame_id
         self._pub = node.create_publisher(TwistStamped, topic, 10)
 
-        workspace_root = Path(__file__).resolve().parents[4]
+        workspace_root = _resolve_workspace_root()
         log_dir = workspace_root / "runtime_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
