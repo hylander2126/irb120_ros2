@@ -28,13 +28,13 @@ EE_LINK = "finger_ball_center"
 # Tune quaternion to match your desired squash orientation.
 PRE_SQUASH_X = 0.545
 PRE_SQUASH_Y = 0.00
-PRE_SQUASH_Z = 0.214
+PRE_SQUASH_Z = 0.308 # 0.214 for heart
 PRE_SQUASH_QX = 0.0
 PRE_SQUASH_QY = 0.0
 PRE_SQUASH_QZ = 0.0
 PRE_SQUASH_QW = 1.0
 
-FORCE_REF_N = 2.0
+FORCE_REF_N = 4.0 # 2.0 for heart
 FORCE_HARD_LIMIT_N = 10.0
 CONTACT_STABLE_SAMPLES = 1 # how many consecutive ref_n samples needed to stop squashing?
 
@@ -42,12 +42,12 @@ DESCEND_SPEED = 0.005    # m/s
 PULL_SPEED = 0.008       # m/s
 RETRACT_SPEED = 0.010    # m/s
 RETRACT_CLEARANCE = 0.020
-PULL_DISTANCE = 0.030
+PULL_DISTANCE = 0.06 # 0.030 # m
 
-SQUASH_TIMEOUT_SEC = 8.0
-PULL_TIMEOUT_SEC = 8.0
-UNPULL_TIMEOUT_SEC = 8.0
-RETRACT_TIMEOUT_SEC = 8.0
+SQUASH_TIMEOUT_SEC = 12.0
+PULL_TIMEOUT_SEC = 16.0
+UNPULL_TIMEOUT_SEC = 16.0
+RETRACT_TIMEOUT_SEC = 12.0
 LULL_WAIT_SEC = 1.0
 
 KP_FORCE = 0.0015
@@ -200,9 +200,8 @@ class SquashPull(Node):
             if self._check_timeout(SQUASH_TIMEOUT_SEC, "SQUASH — no contact"): return
             if self._have_force and self._force_z > 0.25 and not self._contact_felt:
                 self._contact_felt = True
-                self.get_logger().info("Contact felt — halving descend speed")
-            descend = (DESCEND_SPEED * 0.5) if self._contact_felt else DESCEND_SPEED
-            self._publish_twist(0.0, 0.0, -descend)
+                self.get_logger().info(f"Contact felt!")
+            self._publish_twist(0.0, 0.0, -DESCEND_SPEED)
             if self._have_force and self._force_z >= FORCE_REF_N:
                 self._contact_count += 1
                 if self._contact_count >= CONTACT_STABLE_SAMPLES:
