@@ -55,7 +55,6 @@ class CameraHullRecorder(Node):
         self._marker_topic = str(self.get_parameter("marker_topic").value)
         self._annotated_image_topic = str(self.get_parameter("annotated_image_topic").value)
         self._recording_service_name = str(self.get_parameter("recording_service").value)
-        self._output_dir_param = str(self.get_parameter("output_dir").value)
         self._output_fps = max(1.0, float(self.get_parameter("output_fps").value))
         self._line_thickness = max(1, int(self.get_parameter("line_thickness").value))
         self._line_color = (
@@ -204,8 +203,9 @@ class CameraHullRecorder(Node):
         self.get_logger().info(f"Recording started: {self._output_path}")
 
     def _resolve_output_dir(self) -> Path:
-        if self._output_dir_param:
-            return Path(self._output_dir_param)
+        current_param = str(self.get_parameter("output_dir").value)
+        if current_param:
+            return Path(current_param)
         workspace_root = _resolve_workspace_root()
         return workspace_root / "runtime_logs"
 

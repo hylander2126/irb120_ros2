@@ -42,7 +42,7 @@ joint_topic: /joint_states
 status_topic: ~/status
 command_out_topic: /joint_trajectory_controller/joint_trajectory
 
-check_collisions: true
+check_collisions: false
 collision_check_rate: 10.0
 self_collision_proximity_threshold: 0.01
 scene_collision_proximity_threshold: 0.02

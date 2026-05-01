@@ -25,7 +25,7 @@ class EGMHandler(Node):
         self.declare_parameter("comm_timeout", 5.0)
         self.declare_parameter("ramp_in_time", 2.0)
         self.declare_parameter("ramp_out_time", 0.25)
-        self.declare_parameter("pos_corr_gain", 0.0)
+        self.declare_parameter("pos_corr_gain", 1.0)
 
         self.rws_prefix = self.get_parameter("rws_service_prefix").value.rstrip("/")
         self.task = self.get_parameter("task").value

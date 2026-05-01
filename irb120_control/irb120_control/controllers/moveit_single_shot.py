@@ -52,17 +52,41 @@ def plan_and_execute_pose_goal(
     target_position: Sequence[float],
     target_orientation: Sequence[float],
     defaults: PoseGoalDefaults | None = None,
+    velocity_scale: float | None = None,
+    acceleration_scale: float | None = None,
     timeout_server_sec: float = 10.0,
     timeout_goal_send_sec: float = 15.0,
     timeout_result_sec: float = 30.0,
 ) -> bool:
     """Plan and execute a constrained pose goal using MoveGroup.
 
-    The helper sends one goal, waits for the plan to be accepted, and then waits
-    for the result before returning.
+    velocity_scale and acceleration_scale override the values in defaults when
+    provided, without requiring a full PoseGoalDefaults instance.
     """
 
     defaults = defaults or PoseGoalDefaults()
+    if velocity_scale is not None:
+        defaults = PoseGoalDefaults(
+            position_tolerance=defaults.position_tolerance,
+            orientation_tolerance=defaults.orientation_tolerance,
+            planning_attempts=defaults.planning_attempts,
+            allowed_planning_time=defaults.allowed_planning_time,
+            velocity_scaling_factor=velocity_scale,
+            acceleration_scaling_factor=acceleration_scale if acceleration_scale is not None else velocity_scale,
+            workspace_min_corner=defaults.workspace_min_corner,
+            workspace_max_corner=defaults.workspace_max_corner,
+        )
+    elif acceleration_scale is not None:
+        defaults = PoseGoalDefaults(
+            position_tolerance=defaults.position_tolerance,
+            orientation_tolerance=defaults.orientation_tolerance,
+            planning_attempts=defaults.planning_attempts,
+            allowed_planning_time=defaults.allowed_planning_time,
+            velocity_scaling_factor=defaults.velocity_scaling_factor,
+            acceleration_scaling_factor=acceleration_scale,
+            workspace_min_corner=defaults.workspace_min_corner,
+            workspace_max_corner=defaults.workspace_max_corner,
+        )
     px, py, pz = target_position
     qx, qy, qz, qw = target_orientation
 

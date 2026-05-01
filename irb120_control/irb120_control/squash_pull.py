@@ -8,17 +8,17 @@ Squash/Pull/Retract: MoveIt Servo twist commands on /servo_node/delta_twist_cmds
 import sys
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
-from geometry_msgs.msg import WrenchStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, WrenchStamped
 from moveit_msgs.action import MoveGroup
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_srvs.srv import SetBool
+from abb_robot_msgs.srv import TriggerWithResultCode
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from irb120_control.controllers.force_controller import PIForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
-from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
+from irb120_control.util.runtime_log_dir import set_recorder_output_dir, save_ft_log, save_ft_pose_log
 
 
 BASE_FRAME = "base_link"
@@ -44,10 +44,10 @@ RETRACT_SPEED = 0.010    # m/s
 RETRACT_CLEARANCE = 0.020
 PULL_DISTANCE = 0.06 # 0.030 # m
 
-SQUASH_TIMEOUT_SEC = 12.0
-PULL_TIMEOUT_SEC = 16.0
-UNPULL_TIMEOUT_SEC = 16.0
-RETRACT_TIMEOUT_SEC = 12.0
+SQUASH_TIMEOUT_SEC = 30.0 # 12.0
+PULL_TIMEOUT_SEC = 30.0 # 16.0
+UNPULL_TIMEOUT_SEC = 30.0 # 16.0
+RETRACT_TIMEOUT_SEC = 30.0 #12.0
 LULL_WAIT_SEC = 1.0
 
 KP_FORCE = 0.0015
@@ -64,7 +64,7 @@ class SquashPull(Node):
         super().__init__("squash_pull")
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
-        self._servo             = ServoCommandPublisher(self, "/servo_node/delta_twist_cmds", BASE_FRAME)
+        self._twist_pub         = self.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", 10)
         self._wrench_sub        = self.create_subscription(WrenchStamped, "/netft_data_transformed", self._on_wrench, 10)
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._timer             = None  # Created in main() after approach completes
@@ -87,6 +87,27 @@ class SquashPull(Node):
         self._state_start_time = 0.0
         self._contact_felt = False
         self._lull_next: str = "PULL"  # state to enter after the LULL hold expires
+        # Logging buffers
+        self._ft_log: list = []    # rows: [time_s, fx, fy, fz, tx, ty, tz]
+        self._pose_log: list = []  # rows: [time_s, x, y, z, qx, qy, qz, qw]
+        self._last_force_log_time = 0.0
+        self._saved_force_ref = FORCE_REF_N
+
+    def _restart_egm(self) -> None:
+        """Call start_egm_joint to ensure EGM hasn't gone dark."""
+        self.get_logger().info("Ensuring EGM is active before entering servo phase...")
+        client = self.create_client(TriggerWithResultCode, "/rws_client/start_egm_joint")
+        if client.wait_for_service(timeout_sec=2.0):
+            future = client.call_async(TriggerWithResultCode.Request())
+            # In a timer callback we wouldn't spin_until_future_complete, but we only call this from main()
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            res = future.result()
+            if res:
+                self.get_logger().info(f"start_egm_joint -> code={res.result_code}, msg='{res.message}'")
+            else:
+                self.get_logger().warn("start_egm_joint returned no result")
+        else:
+            self.get_logger().warn("start_egm_joint service not available, skipping.")
 
 
     def move_to_pre_squash(self) -> bool:
@@ -102,9 +123,22 @@ class SquashPull(Node):
         # Non-finite samples are filtered upstream in netft_preprocessor.
         self._force_z = abs(msg.wrench.force.z)
         self._have_force = True
+        # Append F/T sample (timestamped)
+        t = self._now_s()
+        fx = msg.wrench.force.x
+        fy = msg.wrench.force.y
+        fz = msg.wrench.force.z
+        tx = msg.wrench.torque.x
+        ty = msg.wrench.torque.y
+        tz = msg.wrench.torque.z
+        self._ft_log.append([t, fx, fy, fz, tx, ty, tz])
 
+        # Light-weight console feedback throttled to 5 Hz
         if self._force_z > 0.25:
-            print(f"\r  z_force: {self._force_z:6.2f} N  state: {self._state:<8}", end="", flush=True)
+            now = t
+            if now - self._last_force_log_time > 0.2:
+                self._last_force_log_time = now
+                self.get_logger().info(f"z_force: {self._force_z:.2f} N  state: {self._state}")
 
     ## This TF buffer lives here for now, but if we use it in other places, we should create a new helper class/node
     def _lookup_pose(self) -> PoseStamped | None:
@@ -141,10 +175,21 @@ class SquashPull(Node):
             self.get_logger().warn(message)
 
     def _publish_twist(self, vx: float, vy: float, vz: float) -> None:
-        self._servo.publish_twist(vx, vy, vz, state=self._state, force_z=self._force_z)
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = BASE_FRAME
+        msg.twist.linear.x = vx
+        msg.twist.linear.y = vy
+        msg.twist.linear.z = vz
+        # Safety: stop sequence if servo dies
+        if self.count_subscribers("/servo_node/delta_twist_cmds") == 0:
+            self.get_logger().error("No servo subscribers — stopping motion")
+            self._done = True
+            return
+        self._twist_pub.publish(msg)
 
     def _publish_zero(self) -> None:
-        self._servo.publish_zero(state=self._state, force_z=self._force_z)
+        self._publish_twist(0.0, 0.0, 0.0)
 
     def _wait_for_servo_ready(self, timeout_sec: float = 5.0) -> bool:
         end_time = self._now_s() + timeout_sec
@@ -189,6 +234,14 @@ class SquashPull(Node):
             self._publish_zero()
             return
 
+        # Log EE pose sample
+        t = self._now_s()
+        px = pose.pose.position.x
+        py = pose.pose.position.y
+        pz = pose.pose.position.z
+        q = pose.pose.orientation
+        self._pose_log.append([t, px, py, pz, q.x, q.y, q.z, q.w])
+
         x = pose.pose.position.x
         z = pose.pose.position.z
 
@@ -211,21 +264,25 @@ class SquashPull(Node):
             return
 
         if self._state == "LULL":
-            self._publish_zero()
+            # Continue maintaining vertical Z force, but don't move in X/Y.
+            normal_z = -self._force_ctrl.update(self._force_z)
+            self._publish_twist(0.0, 0.0, normal_z)
+
             if self._now_s() - self._state_start_time < LULL_WAIT_SEC:
                 return
             if self._lull_next == "PULL":
                 self._force_ctrl.reset()
                 self._force_ctrl.set_reference(FORCE_REF_N)
+                self._saved_force_ref = FORCE_REF_N
                 self._pull_start_x = x
             elif self._lull_next == "UNPULL":
-                # Snap setpoint to whatever force the object settled at during the lull,
-                # then add a bias to pre-load contact and resist toppling during the return stroke.
-                snapped = self._force_z + UNPULL_FORCE_BIAS_N
-                self._force_ctrl.set_reference(snapped)
+                # Restore the pre-PULL squash setpoint so the object remains loaded
+                # during the UNPULL return stroke.
+                restore_ref = self._saved_force_ref + UNPULL_FORCE_BIAS_N
+                self._force_ctrl.set_reference(restore_ref)
                 self.get_logger().info(
-                    f"UNPULL setpoint: {snapped:.2f} N "
-                    f"(settled={self._force_z:.2f} N + bias={UNPULL_FORCE_BIAS_N:.2f} N)"
+                    f"UNPULL setpoint restored: {restore_ref:.2f} N "
+                    f"(saved={self._saved_force_ref:.2f} N + bias={UNPULL_FORCE_BIAS_N:.2f} N)"
                 )
             self._transition(self._lull_next)
             return
@@ -273,6 +330,7 @@ def main(args=None) -> int:
     node = SquashPull()
     recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
+        set_recorder_output_dir(node, "squash_pull")
         if recorder_client.wait_for_service(timeout_sec=5.0):
             future = recorder_client.call_async(SetBool.Request(data=True))
             rclpy.spin_until_future_complete(node, future)
@@ -303,6 +361,9 @@ def main(args=None) -> int:
             return 0
 
         # Phase 2: Servo-based squash/pull/retract
+        # Ensure EGM didn't timeout during the operator confirmation phase
+        node._restart_egm()
+
         # Timer drives the closed-loop state machine at CONTROL_HZ while spin_once
         # services subscriptions, TF updates, and timer callbacks.
         node._state_start_time = node._now_s()
@@ -323,10 +384,13 @@ def main(args=None) -> int:
                     node.get_logger().info("Recording stopped")
             else:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
+        # Save logs (F/T + EE pose) to runtime_logs/squash_pull
+        try:
+            save_ft_pose_log(node._ft_log, node._pose_log, "squash_pull", "squash_pull")
+        except Exception as exc:
+            node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
+
         node._publish_zero()
-        if hasattr(node, '_servo'):
-            node._servo.close()
-            print(f"\nSquash-pull log written to {node._servo.log_path}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

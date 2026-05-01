@@ -172,13 +172,18 @@ def generate_launch_description():
         ],
     )
 
-    vizualize_net_ft = Node(
+    viz_netft_node = Node(
         package="rqt_plot",
         executable="rqt_plot",
         name="net_ft_viz",
         output="screen",
         arguments=["/netft_data_monitor/wrench/force/x", "/netft_data_monitor/wrench/force/y", "/netft_data_monitor/wrench/force/z"],
     )
+    viz_netft_delayed = TimerAction(
+        period=5.0,
+        actions=[viz_netft_node],
+    )
+
 
     servo_params = {
         "moveit_servo": ParameterBuilder("irb120_moveit_config")
@@ -260,7 +265,7 @@ def generate_launch_description():
         net_ft_node,
         netft_preprocessor_node,
         camera_hull_recorder_node,
-        vizualize_net_ft,
+        viz_netft_delayed,
         servo_node,
         servo_set_twist_mode,
     ])

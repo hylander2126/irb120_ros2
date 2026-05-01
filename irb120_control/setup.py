@@ -38,6 +38,7 @@ setup(
             'keyboard_jog = irb120_control.keyboard_jog:main',
             'netft_preprocessor = irb120_control.monitoring.netft_preprocessor:main',
             'squash_pull = irb120_control.squash_pull:main',
+            'push = irb120_control.push:main',
             'camera_hull_recorder = irb120_control.monitoring.camera_hull_recorder:main',
         ],
     },
