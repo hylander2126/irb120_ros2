@@ -15,6 +15,7 @@ from rclpy.node import Node
 from std_srvs.srv import SetBool
 from abb_robot_msgs.srv import TriggerWithResultCode
 from tf2_ros import Buffer, TransformException, TransformListener
+from vision_msgs.msg import Detection3DArray
 
 from irb120_control.controllers.force_controller import PIForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
@@ -65,7 +66,9 @@ class SquashPull(Node):
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
         self._twist_pub         = self.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", 10)
-        self._wrench_sub        = self.create_subscription(WrenchStamped, "/netft_data_transformed", self._on_wrench, 10)
+        self._wrench_sub        = self.create_subscription(WrenchStamped, "/netft_data", self._on_wrench, 10)
+        self._wrench_ctrl_sub   = self.create_subscription(WrenchStamped, "/netft_data_transformed", self._on_wrench_ctrl, 10)
+        self._det_sub           = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._timer             = None  # Created in main() after approach completes
 
@@ -87,19 +90,20 @@ class SquashPull(Node):
         self._state_start_time = 0.0
         self._contact_felt = False
         self._lull_next: str = "PULL"  # state to enter after the LULL hold expires
+        self._egm_future = None         # pending start_egm_joint future during LULL
+        self._egm_client = self.create_client(TriggerWithResultCode, "/rws_client/start_egm_joint")
         # Logging buffers
-        self._ft_log: list = []    # rows: [time_s, fx, fy, fz, tx, ty, tz]
-        self._pose_log: list = []  # rows: [time_s, x, y, z, qx, qy, qz, qw]
+        self._ft_log: list = []       # rows: [time_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw]
+        self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw]
+        self._obj_pose_log: list = [] # rows: [time_s, x, y, z, qx, qy, qz, qw]
         self._last_force_log_time = 0.0
         self._saved_force_ref = FORCE_REF_N
 
     def _restart_egm(self) -> None:
-        """Call start_egm_joint to ensure EGM hasn't gone dark."""
+        """Blocking EGM restart — only call from outside the timer (e.g. main())."""
         self.get_logger().info("Ensuring EGM is active before entering servo phase...")
-        client = self.create_client(TriggerWithResultCode, "/rws_client/start_egm_joint")
-        if client.wait_for_service(timeout_sec=2.0):
-            future = client.call_async(TriggerWithResultCode.Request())
-            # In a timer callback we wouldn't spin_until_future_complete, but we only call this from main()
+        if self._egm_client.wait_for_service(timeout_sec=2.0):
+            future = self._egm_client.call_async(TriggerWithResultCode.Request())
             rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
             res = future.result()
             if res:
@@ -108,6 +112,29 @@ class SquashPull(Node):
                 self.get_logger().warn("start_egm_joint returned no result")
         else:
             self.get_logger().warn("start_egm_joint service not available, skipping.")
+
+    def _fire_egm_async(self) -> None:
+        """Non-blocking EGM restart — fire and store future; check with _egm_ready()."""
+        self.get_logger().info("LULL: firing start_egm_joint async...")
+        if self._egm_client.service_is_ready():
+            self._egm_future = self._egm_client.call_async(TriggerWithResultCode.Request())
+        else:
+            self.get_logger().warn("start_egm_joint not available — proceeding without EGM restart")
+            self._egm_future = None  # treat as done; don't block LULL indefinitely
+
+    def _egm_ready(self) -> bool:
+        """Return True once the pending EGM future has settled (or was never needed)."""
+        if self._egm_future is None:
+            return True
+        if not self._egm_future.done():
+            return False
+        res = self._egm_future.result()
+        if res:
+            self.get_logger().info(f"start_egm_joint -> code={res.result_code}, msg='{res.message}'")
+        else:
+            self.get_logger().warn("start_egm_joint returned no result")
+        self._egm_future = None  # consume so we don't log twice
+        return True
 
 
     def move_to_pre_squash(self) -> bool:
@@ -119,11 +146,17 @@ class SquashPull(Node):
             target_orientation=(PRE_SQUASH_QX, PRE_SQUASH_QY, PRE_SQUASH_QZ, PRE_SQUASH_QW),
         )
 
-    def _on_wrench(self, msg: WrenchStamped) -> None:
-        # Non-finite samples are filtered upstream in netft_preprocessor.
+    def _on_wrench_ctrl(self, msg: WrenchStamped) -> None:
+        """World-frame wrench (transformed) used only for force controller and contact detection."""
         self._force_z = abs(msg.wrench.force.z)
         self._have_force = True
-        # Append F/T sample (timestamped)
+        t = self._now_s()
+        if self._force_z > 0.25 and t - self._last_force_log_time > 0.2:
+            self._last_force_log_time = t
+            self.get_logger().info(f"z_force: {self._force_z:.2f} N  state: {self._state}")
+
+    def _on_wrench(self, msg: WrenchStamped) -> None:
+        """Raw sensor-frame wrench — logged with ft_link pose for post-processing."""
         t = self._now_s()
         fx = msg.wrench.force.x
         fy = msg.wrench.force.y
@@ -131,14 +164,32 @@ class SquashPull(Node):
         tx = msg.wrench.torque.x
         ty = msg.wrench.torque.y
         tz = msg.wrench.torque.z
-        self._ft_log.append([t, fx, fy, fz, tx, ty, tz])
 
-        # Light-weight console feedback throttled to 5 Hz
-        if self._force_z > 0.25:
-            now = t
-            if now - self._last_force_log_time > 0.2:
-                self._last_force_log_time = now
-                self.get_logger().info(f"z_force: {self._force_z:.2f} N  state: {self._state}")
+        # Look up ft_link pose in base frame at this sample
+        try:
+            tf = self._tf_buffer.lookup_transform(BASE_FRAME, "ft_link", rclpy.time.Time())
+            tr = tf.transform.translation
+            ro = tf.transform.rotation
+            ft_px, ft_py, ft_pz = tr.x, tr.y, tr.z
+            ft_qx, ft_qy, ft_qz, ft_qw = ro.x, ro.y, ro.z, ro.w
+        except TransformException:
+            ft_px = ft_py = ft_pz = 0.0
+            ft_qx = ft_qy = ft_qz = 0.0
+            ft_qw = 1.0
+
+        self._ft_log.append([t, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw])
+
+    def _on_detection(self, msg: Detection3DArray) -> None:
+        if not msg.detections:
+            return
+        # Record the first (best) detection's pose
+        hyp = msg.detections[0].results[0] if msg.detections[0].results else None
+        if hyp is None:
+            return
+        t = self._now_s()
+        p = hyp.pose.pose.position
+        q = hyp.pose.pose.orientation
+        self._obj_pose_log.append([t, p.x, p.y, p.z, q.x, q.y, q.z, q.w])
 
     ## This TF buffer lives here for now, but if we use it in other places, we should create a new helper class/node
     def _lookup_pose(self) -> PoseStamped | None:
@@ -268,8 +319,16 @@ class SquashPull(Node):
             normal_z = -self._force_ctrl.update(self._force_z)
             self._publish_twist(0.0, 0.0, normal_z)
 
+            # Fire EGM restart once at lull entry (first tick in this state).
+            if self._egm_future is None and self._now_s() - self._state_start_time < 0.01:
+                self._fire_egm_async()
+
+            # Wait for both the minimum lull hold AND the EGM call to settle.
             if self._now_s() - self._state_start_time < LULL_WAIT_SEC:
                 return
+            if not self._egm_ready():
+                return
+
             if self._lull_next == "PULL":
                 self._force_ctrl.reset()
                 self._force_ctrl.set_reference(FORCE_REF_N)
@@ -386,7 +445,7 @@ def main(args=None) -> int:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
         # Save logs (F/T + EE pose) to runtime_logs/squash_pull
         try:
-            save_ft_pose_log(node._ft_log, node._pose_log, "squash_pull", "squash_pull")
+            save_ft_pose_log(node._ft_log, node._pose_log, "squash_pull", "squash_pull", node._obj_pose_log)
         except Exception as exc:
             node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
 
