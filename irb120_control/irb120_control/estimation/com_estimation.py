@@ -1,20 +1,6 @@
 import numpy as np
 from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv
 
-# def get_AdT_sensor_O(T_B_sensor: np.ndarray, T_B_obj: np.ndarray) -> np.ndarray:
-#     """
-#     Compute the batched adjoint Ad(T_O_S) that maps a wrench from sensor frame {S}
-#     to object frame {O}.
-
-#     T_B_sensor: (N,4,4) homogeneous transforms of the sensor in world frame
-#     T_B_obj:    (N,4,4) homogeneous transforms of the object in world frame
-
-#     Returns: (N,6,6) adjoint matrices  Ad(T_O_S)
-#     """
-#     T_O_S = TransInv(T_B_obj) @ T_B_sensor   # (N,4,4) sensor pose in object frame
-#     return Adjoint(T_O_S)                     # (N,6,6)
-
-
 def model_bkwd_wrench(
     w_meas_S: np.ndarray,
     T_B_sensor: np.ndarray,
@@ -55,12 +41,16 @@ def model_fwd_wrench(
     {O}, {B}, {S} are object, robot base/table/world, and sensor frames, respectively.
 
     rot_vecs: (N,3) array of axis-angle rotation vectors (angle in radians)
+
     w_O_app: (N,6) array of applied wrenches in object frame (F_x, F_y, F_z, tau_x, tau_y, tau_z)
 
-    p_c_O: (3,) position of object CoM in object frame
+    p_c_O: (N,3) position(s) of object CoM in object frame. N samples for liquid-filled containers.
+
     mass: scalar mass of the object
+
     mu_table: scalar friction coefficient of the table
-    N_table: scalar normal force magnitude from the table
+
+    Returns: (w_O_grav, w_O_ground) where each is a (N,6) array of wrenches in object frame.
     """
     rot_vecs_B = np.asarray(rot_vecs_B, dtype=float)
     R_B = rotvec_to_rot(rot_vecs_B)  # (N,3,3) object rotation in world frame

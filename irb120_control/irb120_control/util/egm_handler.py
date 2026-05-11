@@ -4,12 +4,19 @@ import signal
 import time
 
 import rclpy
+from builtin_interfaces.msg import Duration
+from control_msgs.action import FollowJointTrajectory
+from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from abb_rapid_sm_addin_msgs.srv import GetEGMSettings, SetEGMSettings
 from abb_robot_msgs.srv import TriggerWithResultCode
+
+_JTC_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 
 class EGMHandler(Node):
@@ -40,6 +47,10 @@ class EGMHandler(Node):
         self.set_settings_srv = f"{self.rws_prefix}/set_egm_settings"
 
         self._ready_pub = self.create_publisher(Bool, "~/ready", 1)
+        self._jtc_client = ActionClient(
+            self, FollowJointTrajectory,
+            "/joint_trajectory_controller/follow_joint_trajectory"
+        )
         self.get_logger().info(f"Using RWS service prefix: {self.rws_prefix}")
 
 
@@ -173,6 +184,84 @@ class EGMHandler(Node):
             self._executor = None
             shutdown_executor.shutdown()
 
+    def _drain_jtc_commands(self, drain_sec: float = 0.35) -> None:
+        """Wait for the JTC command stream to go silent before activating EGM.
+
+        cmd_timeout in irb120_controllers.yaml is 0.1 s — this must exceed it
+        so the hardware interface wakes up with no commands in-flight.
+        """
+        self.get_logger().info(f"Draining JTC command stream ({drain_sec:.2f}s)...")
+        time.sleep(drain_sec)
+
+    def _wait_for_jtc(self, timeout_sec: float = 30.0) -> bool:
+        """Block until the JTC action server is live.
+
+        The JTC spawner races against egm_handler.  We must wait for the JTC
+        to finish activating before we send any hold trajectory.
+        """
+        self.get_logger().info(f"Waiting for JTC action server (up to {timeout_sec:.0f}s)...")
+        end = time.monotonic() + timeout_sec
+        while time.monotonic() < end:
+            if self._jtc_client.wait_for_server(timeout_sec=1.0):
+                self.get_logger().info("JTC action server is ready")
+                return True
+            if not rclpy.ok():
+                return False
+        self.get_logger().error("JTC action server never became available")
+        return False
+
+    def _send_hold_trajectory(self, timeout_sec: float = 5.0) -> None:
+        """Send a zero-displacement trajectory to seed the JTC from actual state.
+
+        On first activation the JTC may not have a commanded position yet.
+        Sending a hold-in-place goal forces it to read actual joint positions
+        from hardware state and lock onto them, preventing any phantom move.
+        """
+        # Grab one JointState message to read actual positions
+        js: JointState | None = None
+        deadline = time.monotonic() + timeout_sec
+
+        def _js_cb(msg: JointState) -> None:
+            nonlocal js
+            js = msg
+
+        sub = self.create_subscription(JointState, "/joint_states", _js_cb, 1)
+        while js is None and time.monotonic() < deadline:
+            if self._executor is not None:
+                self._executor.spin_once(timeout_sec=0.05)
+            else:
+                rclpy.spin_once(self, timeout_sec=0.05)
+        self.destroy_subscription(sub)
+
+        if js is None:
+            self.get_logger().warn("Could not read /joint_states — skipping hold trajectory")
+            return
+
+        # Build a position map from the JointState message
+        pos_map = dict(zip(js.name, js.position))
+        positions = [pos_map.get(j, 0.0) for j in _JTC_JOINTS]
+
+        traj = JointTrajectory()
+        traj.joint_names = _JTC_JOINTS
+        pt = JointTrajectoryPoint()
+        pt.positions = positions
+        pt.velocities = [0.0] * len(_JTC_JOINTS)
+        pt.accelerations = [0.0] * len(_JTC_JOINTS)
+        # 0.5 s gives the JTC time to accept the goal and latch the command
+        pt.time_from_start = Duration(sec=0, nanosec=500_000_000)
+        traj.points = [pt]
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+
+        self.get_logger().info("Sending hold-in-place trajectory to seed JTC command state...")
+        send_future = self._jtc_client.send_goal_async(goal)
+        self._spin_future(send_future, timeout_sec)
+        if send_future.done() and send_future.result() is not None:
+            self.get_logger().info("Hold trajectory accepted — JTC command state seeded from hardware")
+        else:
+            self.get_logger().warn("Hold trajectory send failed — proceeding anyway")
+
     def startup_sequence(self):
         if not self._wait_for_startup_services():
             self.get_logger().error("Required startup services unavailable. Skipping EGM startup sequence.")
@@ -189,9 +278,22 @@ class EGMHandler(Node):
         code, msg = self._set_egm_settings()
         self.get_logger().info(f"set_egm_settings -> code={code}, msg='{msg}'")
 
-        code, msg = self._call_trigger(self.egm_start_srv, sleep_after=0.5)
+        # Start EGM — the hardware interface connects to the robot here.
+        # The JTC spawner (in abb_control launch) cannot activate until EGM
+        # is live, so this ordering is correct: EGM first, then JTC activates.
+        code, msg = self._call_trigger(self.egm_start_srv, sleep_after=1.0)
         self.get_logger().info(f"start_egm_joint -> code={code}, msg='{msg}'")
-        time.sleep(1.0)
+
+        # Wait for the JTC to finish activating on the now-live hardware interface,
+        # then immediately send a hold-in-place trajectory.  This seeds the JTC's
+        # internal command state from actual joint positions before any motion
+        # script runs, preventing a phantom move to an uninitialized target.
+        if self._wait_for_jtc(timeout_sec=self.startup_service_timeout_sec):
+            self._send_hold_trajectory()
+        else:
+            self.get_logger().error(
+                "JTC never became ready after EGM start — robot may move unexpectedly on first command"
+            )
 
         self._ready_pub.publish(Bool(data=True))
         self.get_logger().info("EGM handler startup completed. Waiting for Ctrl+C to shutdown cleanly.")

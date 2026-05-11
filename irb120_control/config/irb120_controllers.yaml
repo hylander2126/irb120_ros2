@@ -26,6 +26,14 @@ joint_trajectory_controller:
     state_publish_rate: 100.0
     action_monitor_rate: 20.0
     allow_partial_joints_goal: false
+    # Safety: when a goal completes or is cancelled, hold position by
+    # re-seeding the command from actual joint states rather than integrating
+    # from the last commanded position. Prevents snap-to-goal on EGM reconnect.
+    open_loop_control: false
+    allow_integration_in_goal_trajectories: false
+    # If no new trajectory arrives within this window the JTC stops sending
+    # position commands, so a stale goal cannot replay after EGM restarts.
+    cmd_timeout: 0.1
     constraints:
       stopped_velocity_tolerance: 0.0
       goal_time: 0.0

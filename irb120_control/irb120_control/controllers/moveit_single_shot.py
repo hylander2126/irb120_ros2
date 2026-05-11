@@ -9,6 +9,7 @@ from typing import Sequence
 import rclpy
 from geometry_msgs.msg import Pose as GeometryPose
 from moveit_msgs.action import MoveGroup
+from sensor_msgs.msg import JointState
 from moveit_msgs.msg import (
     BoundingVolume,
     Constraints,
@@ -40,6 +41,30 @@ class PoseGoalDefaults:
     acceleration_scaling_factor: float = 0.1
     workspace_min_corner: Sequence[float] = (-1.5, -1.5, -0.5)
     workspace_max_corner: Sequence[float] = (1.5, 1.5, 2.0)
+
+
+def _wait_for_joint_states(node, timeout_sec: float = 10.0) -> bool:
+    """Block until /joint_states publishes at least one message.
+
+    move_group returns INVALID_MOTION_PLAN if it hasn't received a robot state
+    yet. This happens in the window right after EGM connects and the joint state
+    broadcaster starts flowing. Returns True once a message is received.
+    """
+    received = [False]
+
+    def _cb(_msg: JointState) -> None:
+        received[0] = True
+
+    sub = node.create_subscription(JointState, "/joint_states", _cb, 1)
+    end = node.get_clock().now().nanoseconds * 1e-9 + timeout_sec
+    while not received[0] and node.get_clock().now().nanoseconds * 1e-9 < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.destroy_subscription(sub)
+
+    if not received[0]:
+        node.get_logger().warn("Timed out waiting for /joint_states — planning may fail")
+        return False
+    return True
 
 
 def plan_and_execute_pose_goal(
@@ -95,6 +120,12 @@ def plan_and_execute_pose_goal(
     if not move_group_client.wait_for_server(timeout_sec=timeout_server_sec):
         node.get_logger().error("MoveGroup action server not available")
         return False
+
+    # Wait for at least one valid joint state before planning. move_group will
+    # return INVALID_MOTION_PLAN (-10) if it has no current robot state yet,
+    # which happens in the ~1-2s window after EGM connects and /joint_states
+    # starts flowing.
+    _wait_for_joint_states(node, timeout_sec=10.0)
 
     pos_constraint = PositionConstraint()
     pos_constraint.header.frame_id = base_frame

@@ -80,6 +80,12 @@ class NetFTPreprocessor(Node):
         self._ema_f = None
         self._ema_t = None
         self._last_monitor_pub = 0.0
+        self._first_sample_received = False
+
+        # Watchdog: if no data arrives within 10 s the sensor is not connected.
+        # Kill the process so the launch system sees a failure rather than
+        # silently running with no F/T data.
+        self._watchdog_timer = self.create_timer(10.0, self._watchdog_cb)
 
         self.get_logger().info(
             f"NetFT preprocessor: {self.input_topic} -> {self.output_topic} + {self.monitor_topic}, "
@@ -125,7 +131,20 @@ class NetFTPreprocessor(Node):
         self._pub.publish(out)
         self._publish_monitor(f_out, t_out, stamp)
 
+    def _watchdog_cb(self) -> None:
+        if not self._first_sample_received:
+            self.get_logger().fatal(
+                f"No data received on {self.input_topic} after 10s — "
+                "NetFT sensor is not connected or netft_node failed to start. "
+                "Shutting down to prevent silent F/T failure."
+            )
+            raise SystemExit(1)
+        # Disarm after first successful sample.
+        self._watchdog_timer.cancel()
+
     def _on_wrench(self, msg: WrenchStamped):
+        if not self._first_sample_received:
+            self._first_sample_received = True
         f_raw = (msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z)
         t_raw = (msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z)
 
@@ -183,11 +202,15 @@ class NetFTPreprocessor(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = NetFTPreprocessor()
+    exit_code = 0
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except SystemExit as e:
+        exit_code = int(e.code) if e.code is not None else 1
     finally:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    return exit_code

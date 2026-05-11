@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,24 @@ import numpy as np
 import rclpy
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
+
+
+_OBJECT_PARAMS_PATH = Path(__file__).resolve().parents[1] / "object_params.json"
+VALID_OBJECTS = {"box", "heart", "flashlight", "monitor", "soda"}
+
+
+def load_object_params(object_name: str) -> dict:
+    """Load and return the params dict for a named object from object_params.json.
+
+    Raises ValueError for unknown objects, FileNotFoundError if JSON is missing.
+    """
+    if object_name not in VALID_OBJECTS:
+        raise ValueError(
+            f"Unknown object '{object_name}'. Must be one of {sorted(VALID_OBJECTS)}."
+        )
+    with open(_OBJECT_PARAMS_PATH) as f:
+        data = json.load(f)
+    return data["objects"][object_name]
 
 
 def resolve_workspace_root() -> Path:

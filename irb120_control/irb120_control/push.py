@@ -26,20 +26,13 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
-from irb120_control.util.runtime_log_dir import save_ft_pose_log, set_recorder_output_dir
+from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.runtime_log_dir import load_object_params, save_ft_pose_log, set_recorder_output_dir, VALID_OBJECTS
 
 
 BASE_FRAME = "base_link"
 EE_LINK    = "finger_ball_center"
 GROUP_NAME = "manipulator"
-
-PRE_PUSH_X  = 0.488
-PRE_PUSH_Y  = 0.00
-PRE_PUSH_Z  = 0.141
-PRE_PUSH_QX = 0.0
-PRE_PUSH_QY = 0.0
-PRE_PUSH_QZ = 0.0
-PRE_PUSH_QW = 1.0
 
 PUSH_DISTANCE            = 0.080   # m
 PUSH_VELOCITY_SCALE      = 0.01    # fraction of joint limits (~5 mm/s at this pose)
@@ -57,6 +50,19 @@ DEBUG = True
 class Push(Node):
     def __init__(self) -> None:
         super().__init__("push")
+        self.declare_parameter("object", "")
+        obj = self.get_parameter("object").get_parameter_value().string_value
+        if obj not in VALID_OBJECTS:
+            raise ValueError(
+                f"Required parameter 'object' must be one of {sorted(VALID_OBJECTS)}, "
+                f"got: '{obj}'. Pass it with: --ros-args -p object:=box"
+            )
+        self._object = obj
+        self._log_subdir = f"{obj}/push"
+        params = load_object_params(obj)
+        pp = params["pre_push"]
+        self._pre_push_pos = (pp["x"], pp["y"], pp["z"])
+        self._pre_push_ori = (pp["qx"], pp["qy"], pp["qz"], pp["qw"])
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
         self._wrench_sub        = self.create_subscription(
@@ -104,7 +110,21 @@ class Push(Node):
             now_s = self.get_clock().now().nanoseconds * 1e-9
             if self._log_start_s is None:
                 self._log_start_s = now_s
-            self._ft_log.append([now_s - self._log_start_s, f.x, f.y, f.z, t.x, t.y, t.z])
+            try:
+                tf = self._tf_buffer.lookup_transform(BASE_FRAME, "ft_link", rclpy.time.Time())
+                tr = tf.transform.translation
+                ro = tf.transform.rotation
+                ft_px, ft_py, ft_pz = tr.x, tr.y, tr.z
+                ft_qx, ft_qy, ft_qz, ft_qw = ro.x, ro.y, ro.z, ro.w
+            except TransformException:
+                ft_px = ft_py = ft_pz = 0.0
+                ft_qx = ft_qy = ft_qz = 0.0
+                ft_qw = 1.0
+            self._ft_log.append([
+                now_s - self._log_start_s,
+                f.x, f.y, f.z, t.x, t.y, t.z,
+                ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw,
+            ])
 
     # ------------------------------------------------------------------ debug
 
@@ -161,25 +181,28 @@ class Push(Node):
         return plan_and_execute_pose_goal(
             self,
             self._move_group_client,
-            target_position=(PRE_PUSH_X, PRE_PUSH_Y, PRE_PUSH_Z),
-            target_orientation=(PRE_PUSH_QX, PRE_PUSH_QY, PRE_PUSH_QZ, PRE_PUSH_QW),
+            target_position=self._pre_push_pos,
+            target_orientation=self._pre_push_ori,
             velocity_scale=velocity_scale,
         )
 
-    def _cartesian_push(self) -> bool:
+    def _cartesian_move(self, x_distance: float, velocity_scale: float) -> bool:
+        """Move the EE straight in X by x_distance (signed) at the given velocity scale."""
         start_pose = self._lookup_ee_pose()
         if start_pose is None:
-            self.get_logger().error("Cannot look up EE pose — aborting push")
+            self.get_logger().error("Cannot look up EE pose — aborting move")
             return False
 
         target = Pose()
-        target.position.x  = start_pose.position.x + PUSH_DISTANCE
+        target.position.x  = start_pose.position.x + x_distance
         target.position.y  = start_pose.position.y
         target.position.z  = start_pose.position.z
         target.orientation = start_pose.orientation
 
+        direction = "+X" if x_distance >= 0 else "-X"
         self.get_logger().info(
-            f"Cartesian push: x {start_pose.position.x:.4f} -> {target.position.x:.4f}  "
+            f"Cartesian {direction} {abs(x_distance)*1000:.1f}mm: "
+            f"x {start_pose.position.x:.4f} -> {target.position.x:.4f}  "
             f"z stays at {start_pose.position.z:.4f}"
         )
 
@@ -189,11 +212,11 @@ class Push(Node):
             self._cartesian_client,
             self._execute_client,
             waypoints=[target],
-            velocity_scale=PUSH_VELOCITY_SCALE,
+            velocity_scale=velocity_scale,
             max_cartesian_speed=PUSH_MAX_CARTESIAN_SPEED,
             max_step=CARTESIAN_MAX_STEP,
             jump_threshold=CARTESIAN_JUMP_THRESH,
-            execute_timeout_sec=PUSH_DISTANCE / PUSH_MAX_CARTESIAN_SPEED + 30.0,
+            execute_timeout_sec=abs(x_distance) / PUSH_MAX_CARTESIAN_SPEED + 30.0,
         )
         self._stop_debug_timer()
         return ok
@@ -205,7 +228,10 @@ def main(args=None) -> int:
     node = Push()
     recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
-        set_recorder_output_dir(node, "push")
+        if not ensure_egm_active(node):
+            return 1
+
+        set_recorder_output_dir(node, node._log_subdir)
         if recorder_client.wait_for_service(timeout_sec=5.0):
             future = recorder_client.call_async(SetBool.Request(data=True))
             rclpy.spin_until_future_complete(node, future)
@@ -238,16 +264,19 @@ def main(args=None) -> int:
             f"velocity_scale={PUSH_VELOCITY_SCALE}  "
             f"cartesian_ceiling={PUSH_MAX_CARTESIAN_SPEED*1000:.1f}mm/s"
         )
-        push_ok = node._cartesian_push()
+        push_ok = node._cartesian_move(+PUSH_DISTANCE, PUSH_VELOCITY_SCALE)
         node._recording_ft = False
 
         if not push_ok:
             node.get_logger().error("Push failed.")
 
-        # Phase 3: return to pre-push pose
-        node.get_logger().info("Returning to pre-push pose...")
-        if not node.move_to_pre_push(velocity_scale=RETURN_VELOCITY_SCALE):
-            node.get_logger().error("Return to pre-push pose failed.")
+        # Phase 3: Cartesian return — retrace in -X to stay in the same IK
+        # solution branch (joint-space return can rotate joint 6 by 360°).
+        node.get_logger().info("Returning via Cartesian path...")
+        return_ok = node._cartesian_move(-PUSH_DISTANCE, RETURN_VELOCITY_SCALE)
+        if not return_ok:
+            node.get_logger().error("Cartesian return failed — attempting joint-space fallback.")
+            node.move_to_pre_push(velocity_scale=RETURN_VELOCITY_SCALE)
 
     except KeyboardInterrupt:
         pass
@@ -265,8 +294,9 @@ def main(args=None) -> int:
                     node.get_logger().info("Recording stopped")
             else:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
+        deactivate_egm(node)
         if node._push_started:
-            save_ft_pose_log(node._ft_log, node._pose_log, subdir="push", prefix="push_ft_pose")
+            save_ft_pose_log(node._ft_log, node._pose_log, subdir=node._log_subdir, prefix="push_ft_pose")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

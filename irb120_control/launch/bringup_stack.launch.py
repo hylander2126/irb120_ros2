@@ -57,7 +57,7 @@ def generate_launch_description():
             {"rws_service_prefix": "/rws_client"},
             {"task": "T_ROB1"},
             {"startup_service_timeout_sec": 30.0},
-            {"comm_timeout": 5.0},
+            {"comm_timeout": 120.0},
         ],
     )
 
@@ -241,7 +241,7 @@ def generate_launch_description():
 
     start_servo_arg = DeclareLaunchArgument(
         'start_servo',
-        default_value='false',
+        default_value='true',
         description=(
             'Start MoveIt Servo for arrow-key Cartesian jogging. '
             'Then run keyboard_jog in a second terminal: ros2 run irb120_control keyboard_jog. '

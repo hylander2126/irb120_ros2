@@ -12,57 +12,67 @@ from geometry_msgs.msg import PoseStamped, TwistStamped, WrenchStamped
 from moveit_msgs.action import MoveGroup
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_srvs.srv import SetBool
 from abb_robot_msgs.srv import TriggerWithResultCode
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
 
 from irb120_control.controllers.force_controller import PIForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
-from irb120_control.util.runtime_log_dir import set_recorder_output_dir, save_ft_log, save_ft_pose_log
+from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.runtime_log_dir import load_object_params, set_recorder_output_dir, save_ft_log, save_ft_pose_log, VALID_OBJECTS
+
+_EGM_START_SRV = "/rws_client/start_egm_joint"
 
 
 BASE_FRAME = "base_link"
 EE_LINK = "finger_ball_center"
 
-# Pre-squash pose — position and orientation the EE must reach before descending.
-# Tune quaternion to match your desired squash orientation.
-PRE_SQUASH_X = 0.545
-PRE_SQUASH_Y = 0.00
-PRE_SQUASH_Z = 0.308 # 0.214 for heart
-PRE_SQUASH_QX = 0.0
-PRE_SQUASH_QY = 0.0
-PRE_SQUASH_QZ = 0.0
-PRE_SQUASH_QW = 1.0
-
-FORCE_REF_N = 4.0 # 2.0 for heart
+FORCE_REF_N = 4.0  # default — overridden per object from JSON
 FORCE_HARD_LIMIT_N = 10.0
 CONTACT_STABLE_SAMPLES = 1 # how many consecutive ref_n samples needed to stop squashing?
 
 DESCEND_SPEED = 0.005    # m/s
 PULL_SPEED = 0.008       # m/s
-RETRACT_SPEED = 0.010    # m/s
-RETRACT_CLEARANCE = 0.020
 PULL_DISTANCE = 0.06 # 0.030 # m
 
 SQUASH_TIMEOUT_SEC = 30.0 # 12.0
 PULL_TIMEOUT_SEC = 30.0 # 16.0
 UNPULL_TIMEOUT_SEC = 30.0 # 16.0
-RETRACT_TIMEOUT_SEC = 30.0 #12.0
 LULL_WAIT_SEC = 1.0
+RETRACT_SPEED = 0.008    # m/s straight up (+Z)
+RETRACT_DURATION_SEC = 3.0  # blind lift duration before handing off to MoveIt
 
 KP_FORCE = 0.0015
 KI_FORCE = 0.00015
-MAX_NORMAL_SPEED = 0.010
+MAX_NORMAL_SPEED = 0.020    # 0.01 Speed at which 'squash force' is corrected.
 UNPULL_FORCE_BIAS_N = 0.5   # extra normal force added during UNPULL to counter object toppling
 
 CONTROL_HZ = 100.0
 REQUIRE_OPERATOR_CONFIRM = True
 
+LOST_CONTACT_FORCE_THRESH_N = 0.5   # below this = no contact
+LOST_CONTACT_STEPS = 20             # consecutive samples below threshold before aborting (~0.2s at 100 Hz)
+
+
+
 
 class SquashPull(Node):
     def __init__(self) -> None:
         super().__init__("squash_pull")
+        self.declare_parameter("object", "")
+        obj = self.get_parameter("object").get_parameter_value().string_value
+        if obj not in VALID_OBJECTS:
+            raise ValueError(
+                f"Required parameter 'object' must be one of {sorted(VALID_OBJECTS)}, "
+                f"got: '{obj}'. Pass it with: --ros-args -p object:=box"
+            )
+        self._object = obj
+        self._log_subdir = f"{obj}/squash"
+        params = load_object_params(obj)
+        ps = params["pre_squash"]
+        self._pre_squash_pos  = (ps["x"], ps["y"], ps["z"])
+        self._pre_squash_ori  = (ps["qx"], ps["qy"], ps["qz"], ps["qw"])
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
         self._twist_pub         = self.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", 10)
@@ -72,10 +82,12 @@ class SquashPull(Node):
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._timer             = None  # Created in main() after approach completes
 
+        force_ref = float(params.get("force_ref_n", FORCE_REF_N))
+        self.get_logger().info(f"Object: {obj}  force_ref={force_ref:.1f}N  hard_limit={FORCE_HARD_LIMIT_N:.1f}N")
         self._force_ctrl = PIForceController(
             kp                  =KP_FORCE,
             ki                  =KI_FORCE,
-            force_ref_n         =FORCE_REF_N,
+            force_ref_n         =force_ref,
             max_normal_speed    =MAX_NORMAL_SPEED,
             control_hz          =CONTROL_HZ,
         )
@@ -91,7 +103,9 @@ class SquashPull(Node):
         self._contact_felt = False
         self._lull_next: str = "PULL"  # state to enter after the LULL hold expires
         self._egm_future = None         # pending start_egm_joint future during LULL
-        self._egm_client = self.create_client(TriggerWithResultCode, "/rws_client/start_egm_joint")
+        self._lost_contact_count = 0
+        self._egm_keepalive_client = self.create_client(TriggerWithResultCode, _EGM_START_SRV)
+        self._pause_servo_client = self.create_client(SetBool, "/servo_node/pause_servo")
         # Logging buffers
         self._ft_log: list = []       # rows: [time_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw]
         self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw]
@@ -99,27 +113,13 @@ class SquashPull(Node):
         self._last_force_log_time = 0.0
         self._saved_force_ref = FORCE_REF_N
 
-    def _restart_egm(self) -> None:
-        """Blocking EGM restart — only call from outside the timer (e.g. main())."""
-        self.get_logger().info("Ensuring EGM is active before entering servo phase...")
-        if self._egm_client.wait_for_service(timeout_sec=2.0):
-            future = self._egm_client.call_async(TriggerWithResultCode.Request())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-            res = future.result()
-            if res:
-                self.get_logger().info(f"start_egm_joint -> code={res.result_code}, msg='{res.message}'")
-            else:
-                self.get_logger().warn("start_egm_joint returned no result")
-        else:
-            self.get_logger().warn("start_egm_joint service not available, skipping.")
-
     def _fire_egm_async(self) -> None:
-        """Non-blocking EGM restart — fire and store future; check with _egm_ready()."""
+        """Non-blocking EGM keepalive during LULL — fire and store future; check with _egm_ready()."""
         self.get_logger().info("LULL: firing start_egm_joint async...")
-        if self._egm_client.service_is_ready():
-            self._egm_future = self._egm_client.call_async(TriggerWithResultCode.Request())
+        if self._egm_keepalive_client.service_is_ready():
+            self._egm_future = self._egm_keepalive_client.call_async(TriggerWithResultCode.Request())
         else:
-            self.get_logger().warn("start_egm_joint not available — proceeding without EGM restart")
+            self.get_logger().warn("start_egm_joint not available — proceeding without EGM keepalive")
             self._egm_future = None  # treat as done; don't block LULL indefinitely
 
     def _egm_ready(self) -> bool:
@@ -137,13 +137,31 @@ class SquashPull(Node):
         return True
 
 
+    def _set_servo_paused(self, paused: bool) -> None:
+        if not self._pause_servo_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn("pause_servo service not available")
+            return
+        future = self._pause_servo_client.call_async(SetBool.Request(data=paused))
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if future.done() and future.result() is not None:
+            state = "paused" if paused else "resumed"
+            self.get_logger().info(f"Servo {state}: {future.result().message}")
+        else:
+            self.get_logger().warn("pause_servo call did not complete")
+
+    def pause_servo(self) -> None:
+        self._set_servo_paused(True)
+
+    def resume_servo(self) -> None:
+        self._set_servo_paused(False)
+
     def move_to_pre_squash(self) -> bool:
         """Blocking MoveIt call to reach PRE_SQUASH pose. Returns True on success."""
         return plan_and_execute_pose_goal(
             self,
             self._move_group_client,
-            target_position=(PRE_SQUASH_X, PRE_SQUASH_Y, PRE_SQUASH_Z),
-            target_orientation=(PRE_SQUASH_QX, PRE_SQUASH_QY, PRE_SQUASH_QZ, PRE_SQUASH_QW),
+            target_position=self._pre_squash_pos,
+            target_orientation=self._pre_squash_ori,
         )
 
     def _on_wrench_ctrl(self, msg: WrenchStamped) -> None:
@@ -250,11 +268,27 @@ class SquashPull(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         return False
 
+    def _check_lost_contact(self) -> bool:
+        """Return True (and trigger RETRACT) if contact has been lost for LOST_CONTACT_STEPS consecutive ticks."""
+        if self._force_z < LOST_CONTACT_FORCE_THRESH_N:
+            self._lost_contact_count += 1
+            if self._lost_contact_count >= LOST_CONTACT_STEPS:
+                self.get_logger().error(
+                    f"Lost contact in {self._state} ({self._lost_contact_count} consecutive samples "
+                    f"below {LOST_CONTACT_FORCE_THRESH_N:.1f} N) — retracting"
+                )
+                self._transition("RETRACT")
+                return True
+        else:
+            self._lost_contact_count = 0
+        return False
+
     def _transition(self, state: str) -> None:
         if state != self._state:
             self.get_logger().info(f"{self._state} -> {state}")
             self._state = state
             self._state_start_time = self._now_s()
+            self._lost_contact_count = 0
 
     def _operator_confirm(self, message: str) -> bool:
         if not REQUIRE_OPERATOR_CONFIRM:
@@ -284,17 +318,17 @@ class SquashPull(Node):
         if pose is None:
             self._publish_zero()
             return
+        else:
+            # Log EE pose sample and cache Z
+            t = self._now_s()
+            px = pose.pose.position.x
+            py = pose.pose.position.y
+            pz = pose.pose.position.z
+            q = pose.pose.orientation
+            self._pose_log.append([t, px, py, pz, q.x, q.y, q.z, q.w])
 
-        # Log EE pose sample
-        t = self._now_s()
-        px = pose.pose.position.x
-        py = pose.pose.position.y
-        pz = pose.pose.position.z
-        q = pose.pose.orientation
-        self._pose_log.append([t, px, py, pz, q.x, q.y, q.z, q.w])
 
         x = pose.pose.position.x
-        z = pose.pose.position.z
 
         if self._have_force and self._force_z > FORCE_HARD_LIMIT_N and self._state != "RETRACT":
             self.get_logger().error(f"Hard z force limit exceeded: {self._force_z:.2f} N — retracting")
@@ -348,6 +382,7 @@ class SquashPull(Node):
 
         if self._state == "PULL":
             if self._check_timeout(PULL_TIMEOUT_SEC, "PULL"): return
+            if self._check_lost_contact(): return
             normal_z = -self._force_ctrl.update(self._force_z)
             self._publish_twist(-PULL_SPEED, 0.0, normal_z)
 
@@ -361,26 +396,22 @@ class SquashPull(Node):
             # Reverse the pull: move back toward _pull_start_x at the same speed,
             # running the same PI force loop to keep FORCE_REF_N against the surface.
             if self._check_timeout(UNPULL_TIMEOUT_SEC, "UNPULL"): return
+            if self._check_lost_contact(): return
             normal_z = -self._force_ctrl.update(self._force_z)
             self._publish_twist(+PULL_SPEED, 0.0, normal_z)
 
             # Done when we've returned to the x position where PULL began
-            if self._pull_start_x is not None and x >= self._pull_start_x:
+            if self._pull_start_x is not None and x >= self._pull_start_x - 0.002:
                 self._force_ctrl.set_reference(FORCE_REF_N)  # restore default for future phases
                 self._transition("RETRACT")
             return
 
         if self._state == "RETRACT":
-            if self._now_s() - self._state_start_time > RETRACT_TIMEOUT_SEC:
+            if self._now_s() - self._state_start_time < RETRACT_DURATION_SEC:
+                self._publish_twist(0.0, 0.0, RETRACT_SPEED)
+            else:
                 self._publish_zero()
                 self._done = True
-                self.get_logger().error(f"RETRACT timed out after {RETRACT_TIMEOUT_SEC:.0f}s. Aborting sequence.")
-                return
-            self._publish_twist(0.0, 0.0, RETRACT_SPEED)
-            if z >= PRE_SQUASH_Z + RETRACT_CLEARANCE:
-                self._publish_zero()
-                self._done = True
-                self.get_logger().info("Squash-pull sequence complete")
             return
 
 
@@ -389,7 +420,7 @@ def main(args=None) -> int:
     node = SquashPull()
     recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
-        set_recorder_output_dir(node, "squash_pull")
+        set_recorder_output_dir(node, node._log_subdir)
         if recorder_client.wait_for_service(timeout_sec=5.0):
             future = recorder_client.call_async(SetBool.Request(data=True))
             rclpy.spin_until_future_complete(node, future)
@@ -400,6 +431,9 @@ def main(args=None) -> int:
             node.get_logger().info("Recording started")
         else:
             node.get_logger().error("Recorder service not available after 5 s — aborting")
+            return 1
+
+        if not ensure_egm_active(node):
             return 1
 
         if not node._wait_for_servo_ready(timeout_sec=5.0):
@@ -414,14 +448,24 @@ def main(args=None) -> int:
             node.get_logger().error("Approach failed. Aborting.")
             return 1
 
+        # Log active parameters so they can be verified before motion starts.
+        node.get_logger().info(
+            f"[PARAMS] object={node._object}  "
+            f"force_ref={node._force_ctrl._force_ref:.2f}N  "
+            f"hard_limit={FORCE_HARD_LIMIT_N:.1f}N  "
+            f"pre_squash_pos={node._pre_squash_pos}  "
+            f"kp={KP_FORCE}  ki={KI_FORCE}  "
+            f"descend_speed={DESCEND_SPEED}m/s  pull_dist={PULL_DISTANCE}m"
+        )
+
         if not node._operator_confirm(
             "At pre-squash pose. Confirm clear contact conditions before descending."
         ):
             return 0
 
         # Phase 2: Servo-based squash/pull/retract
-        # Ensure EGM didn't timeout during the operator confirmation phase
-        node._restart_egm()
+        # EGM is already active; the LULL state fires an async keepalive mid-sequence.
+        node.resume_servo()
 
         # Timer drives the closed-loop state machine at CONTROL_HZ while spin_once
         # services subscriptions, TF updates, and timer callbacks.
@@ -429,6 +473,14 @@ def main(args=None) -> int:
         node._timer = node.create_timer(1.0 / CONTROL_HZ, node._tick)
         while rclpy.ok() and not node._done:
             rclpy.spin_once(node, timeout_sec=0.05)
+
+        # Phase 3: Return to pre-squash pose via MoveIt (replaces servo-based RETRACT)
+        if rclpy.ok():
+            node._publish_zero()
+            node.pause_servo()
+            node.get_logger().info("Returning to pre-squash pose via MoveIt...")
+            if not node.move_to_pre_squash():
+                node.get_logger().error("MoveIt return to pre-squash failed.")
     except KeyboardInterrupt:
         pass
     finally:
@@ -445,11 +497,12 @@ def main(args=None) -> int:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
         # Save logs (F/T + EE pose) to runtime_logs/squash_pull
         try:
-            save_ft_pose_log(node._ft_log, node._pose_log, "squash_pull", "squash_pull", node._obj_pose_log)
+            save_ft_pose_log(node._ft_log, node._pose_log, node._log_subdir, "squash_pull", node._obj_pose_log)
         except Exception as exc:
             node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
 
         node._publish_zero()
+        deactivate_egm(node)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

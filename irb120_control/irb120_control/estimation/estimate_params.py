@@ -64,11 +64,11 @@ def main():
     # if not os.path.exists(os.path.join(workspace_root, "runtime_logs")):
     #     workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
         
-    base_dir = os.path.join(workspace_root, "runtime_logs")
-    squash_file = os.path.join(base_dir, "squash_pull", "most_recent.npz")
+    base_dir = os.path.join(workspace_root, "runtime_logs", "heart")
+    squash_file = os.path.join(base_dir, "squash", "most_recent.npz")
 
     if not os.path.exists(squash_file):
-        print(f"Missing squash_pull log in {base_dir}")
+        print(f"Missing squash log in {base_dir}")
         return
 
     # Object geometry — distance from tipping pivot edge to COM in object-frame x (= half object depth)
@@ -124,8 +124,6 @@ def main():
     print(f"p_finger_at_contact = {p_finger_at_contact}")
     print(f"r_contact_O         = {r_contact_O}")
 
-    r_contact_O = np.array([0.0, 0.0, 0.30])
-
     # 5. Compute applied wrench in object frame via model_bkwd_wrench.
     #    Sensor frame = EE frame (finger tip); object frame rotates about pivot.
     #    T_B_sensor: EE at constant finger position, rotated with the object.
@@ -137,7 +135,7 @@ def main():
     N_c = contact_mask.sum()
 
     rv_contact = np.zeros((N_c, 3))
-    rv_contact[:, 1] = pitch_contact  # +Y rotation = tipping toward +x
+    rv_contact[:, 1] = -pitch_contact  # object tips in -Y direction; pitch_contact is the signed magnitude
 
     # T_B_sensor: ft_link pose logged directly at F/T rate
     R_ft = rotvec_to_rot(quat_to_rotvec(Q_ft[contact_mask]))  # (N,3,3)
@@ -180,17 +178,17 @@ def main():
     )
 
     # 8. Pre-fit diagnostic: w_app (fx, fy, fz, tau_y) vs tipping angle — tipping phase only
-    w_app_tip = np.column_stack([w_app_O[tip_sel, :3], w_app_O[tip_sel, 4]])
-    plot_4vec_vs_angle(
-        w_app_tip,
-        pitch_rad=pitch_contact[tip_sel],
-        vec_labels=("f_x", "f_y", "f_z", "tau_y"),
-        x_label="Tipping angle ||°||",
-        y_label="Force (N)",
-        torque_y_label="Torque (Nm)",
-        title=r"$w_{app}$ vs Tipping Angle in {O} (object)",
-        show=True,
-    )
+    # w_app_tip = np.column_stack([w_app_O[tip_sel, :3], w_app_O[tip_sel, 4]])
+    # plot_4vec_vs_angle(
+    #     w_app_tip,
+    #     pitch_rad=pitch_contact[tip_sel],
+    #     vec_labels=("f_x", "f_y", "f_z", "tau_y"),
+    #     x_label="Tipping angle ||°||",
+    #     y_label="Force (N)",
+    #     torque_y_label="Torque (Nm)",
+    #     title=r"$w_{app}$ vs Tipping Angle in {O} (object)",
+    #     show=True,
+    # )
 
     # 9. Fit on tipping phase only
     w_O_app_masked = w_app_O[tip_sel]
@@ -200,12 +198,12 @@ def main():
     def model_wrapper(params):
         com_z, mass = params
         com = np.array([COM_X, 0.0, com_z])
-        w_grav_pred, w_ground_pred = model_fwd_wrench(rv_B_masked, com, mass, 0.0, w_O_app=w_O_app_masked)
+        w_grav_pred, w_ground_pred = model_fwd_wrench(rv_B_masked, com, mass, 0.0)#, w_O_app=w_O_app_masked)
         # Only fit tau_y — the torque balance is what constrains com_z and mass.
         # Force residuals are O(4N) vs torque O(0.1Nm) and would drown out the signal.
-        tau_y_pred = w_grav_pred[:, 4] + w_ground_pred[:, 4]
+        tau_y_pred = w_grav_pred[:, 4] #+ w_ground_pred[:, 4]
         tau_y_meas = w_O_app_masked[:, 4]
-        return tau_y_pred + tau_y_meas  # residual = 0 at equilibrium
+        return tau_y_pred + tau_y_meas  # grav + applied = 0 at static equilibrium
 
     theta_star_rad = np.deg2rad(18.5)
     com_z0 = COM_X / np.tan(theta_star_rad)
@@ -231,18 +229,101 @@ def main():
     # 10. Fit result plot
     com_est_final = np.array([COM_X, 0.0, result_torque.x[0]])
     mass_est_final = result_torque.x[1]
-    w_grav_pred, w_ground_pred = model_fwd_wrench(rv_B_masked, com_est_final, mass_est_final, 0.0, w_O_app=w_O_app_masked)
+    w_grav_pred, _ = model_fwd_wrench(rv_B_masked, com_est_final, mass_est_final, 0.0)#, w_O_app=w_O_app_masked)
+
+    # 11. Friction estimate from push log
+    push_log = os.path.join(base_dir, "push", "most_recent.npz")
+    if os.path.exists(push_log):
+        mu_est, mu_std = estimate_friction(push_log, mass_est_final)
+        print(f"\n--- FRICTION ESTIMATE (push log) ---")
+        print(f"  μ_table: {mu_est:.4f}  ±  {mu_std:.4f}")
+        print(f"  (from mass estimate: {mass_est_final:.4f} kg)")
+    else:
+        print(f"\nNo push log found at {push_log}, skipping friction estimate.")
 
     push_sel = np.arange(len(pitch_B_masked)) <= np.argmax(pitch_B_masked)
     plot_torque_fit_result(
         pitch_rad=pitch_B_masked,
         tau_meas=w_O_app_masked[:, 4],
-        tau_pred=-(w_grav_pred[:, 4] + w_ground_pred[:, 4]),
-        theta_star_rad=np.arctan2(0.05, result_torque.x[0]),
+        tau_pred=(w_grav_pred[:, 4]),
+        theta_star_rad=np.arctan2(COM_X, result_torque.x[0]),
         push_sel=push_sel,
         title="Torque fit result",
         show=True,
     )
+
+def estimate_friction(push_log_path: str, mass_est: float) -> tuple:
+    """
+    Estimate table-object friction coefficient from a pure planar push log.
+
+    During steady sliding with no squash: f_push_planar = μ * m * g
+    => μ(t) = norm([fx, fy])(t) / (mass * g)
+
+    Steady sliding is detected automatically as samples where f_planar is
+    within one MAD of the global median — this excludes stick-slip transients
+    and start/stop ramps without relying on arbitrary window fractions.
+    """
+    import matplotlib.pyplot as plt
+
+    data = np.load(push_log_path)
+    t = data["ft_time_s"]
+    t = t - t[0]
+
+    b, a = butter(4, 6, fs=500, btype='low')
+    fx = filtfilt(b, a, data["fx"])
+    fy = filtfilt(b, a, data["fy"])
+    f_planar = np.sqrt(fx**2 + fy**2)
+
+    # Trim: drop pre-contact zeros and end dropoff
+    contact_threshold = 0.3  # N — below this is pre-contact or post-retract
+    active = f_planar > contact_threshold
+    first_active = np.argmax(active)
+    last_active = len(f_planar) - np.argmax(active[::-1])  # last sample above threshold
+    active_len = last_active - first_active
+    trim_start = first_active + int(0.15 * active_len)  # drop first 15% (force ramp)
+    trim_end   = first_active + int(0.85 * active_len)  # drop last 15% (retract dropoff)
+    f_planar = f_planar[trim_start:trim_end]
+    fx = fx[trim_start:trim_end]
+    fy = fy[trim_start:trim_end]
+    t = t[trim_start:trim_end]
+
+    mu_t = f_planar / (mass_est * 9.81)
+
+    # Steady sliding: samples within 1 MAD of the median (robust to transients)
+    med = np.median(f_planar)
+    mad = np.median(np.abs(f_planar - med))
+    steady_mask = np.abs(f_planar - med) <= mad
+
+    mu_est = float(np.median(mu_t[steady_mask]))
+    mu_std = float(np.std(mu_t[steady_mask]))
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    axes[0].plot(t, fx, label="f_x", color="tab:red")
+    axes[0].plot(t, fy, label="f_y", color="tab:green")
+    axes[0].plot(t, f_planar, label="|f_planar|", color="tab:blue", linewidth=2)
+    axes[0].axhline(med, color="k", linestyle="--", linewidth=1, label=f"median={med:.3f} N")
+    axes[0].fill_between(t, med - mad, med + mad, alpha=0.15, color="tab:blue", label="±1 MAD (steady window)")
+    axes[0].set_ylabel("Force (N)")
+    axes[0].set_title("Push phase: planar forces")
+    axes[0].legend(fontsize=10)
+    axes[0].grid(True)
+
+    axes[1].plot(t, mu_t, color="tab:orange", linewidth=1.5, label="μ(t) = |f_planar| / mg")
+    axes[1].plot(t[steady_mask], mu_t[steady_mask], color="tab:green", linewidth=2,
+                 linestyle="none", marker=".", markersize=2, label="steady samples")
+    axes[1].axhline(mu_est, color="k", linestyle="--", linewidth=1.5, label=f"μ estimate = {mu_est:.4f}")
+    axes[1].set_ylabel("μ estimate")
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_title(f"Friction coefficient over time  [μ = {mu_est:.4f} ± {mu_std:.4f}]")
+    axes[1].legend(fontsize=10)
+    axes[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    return mu_est, mu_std
+
 
 if __name__ == "__main__":
     main()
