@@ -38,9 +38,12 @@ setup(
             'keyboard_jog = irb120_control.keyboard_jog:main',
             'netft_preprocessor = irb120_control.monitoring.netft_preprocessor:main',
             'squash_pull = irb120_control.squash_pull:main',
+            'arc_squash_pull = irb120_control.arc_squash_pull:main',
             'push = irb120_control.push:main',
             'camera_hull_recorder = irb120_control.monitoring.camera_hull_recorder:main',
             'estimate_params = irb120_control.estimation.estimate_params:main',
+            'fbd_plot = irb120_control.estimation.fbd_plot:main',
+            'tst = irb120_control.estimation.tst:main',
         ],
     },
 )

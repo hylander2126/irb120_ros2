@@ -17,7 +17,7 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
 
-from irb120_control.controllers.force_controller import PIForceController
+from irb120_control.controllers.force_controller import PIDForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.runtime_log_dir import load_object_params, set_recorder_output_dir, save_ft_log, save_ft_pose_log, VALID_OBJECTS
@@ -29,7 +29,7 @@ BASE_FRAME = "base_link"
 EE_LINK = "finger_ball_center"
 
 FORCE_REF_N = 4.0  # default — overridden per object from JSON
-FORCE_HARD_LIMIT_N = 10.0
+FORCE_HARD_LIMIT_N = 12.0
 CONTACT_STABLE_SAMPLES = 1 # how many consecutive ref_n samples needed to stop squashing?
 
 DESCEND_SPEED = 0.005    # m/s
@@ -84,7 +84,7 @@ class SquashPull(Node):
 
         force_ref = float(params.get("force_ref_n", FORCE_REF_N))
         self.get_logger().info(f"Object: {obj}  force_ref={force_ref:.1f}N  hard_limit={FORCE_HARD_LIMIT_N:.1f}N")
-        self._force_ctrl = PIForceController(
+        self._force_ctrl = PIDForceController(
             kp                  =KP_FORCE,
             ki                  =KI_FORCE,
             force_ref_n         =force_ref,
@@ -354,19 +354,23 @@ class SquashPull(Node):
             self._publish_twist(0.0, 0.0, normal_z)
 
             # Fire EGM restart once at lull entry (first tick in this state).
-            if self._egm_future is None and self._now_s() - self._state_start_time < 0.01:
-                self._fire_egm_async()
+            # if self._egm_future is None and self._now_s() - self._state_start_time < 0.01:
+            #     self._fire_egm_async()
 
             # Wait for both the minimum lull hold AND the EGM call to settle.
             if self._now_s() - self._state_start_time < LULL_WAIT_SEC:
                 return
-            if not self._egm_ready():
-                return
+            # if not self._egm_ready():
+            #     return
 
             if self._lull_next == "PULL":
                 self._force_ctrl.reset()
-                self._force_ctrl.set_reference(FORCE_REF_N)
-                self._saved_force_ref = FORCE_REF_N
+                # Use actual measured force as the PULL setpoint so the controller
+                # starts with zero error and holds whatever contact was established.
+                pull_ref = max(self._force_z, FORCE_REF_N)
+                self._force_ctrl.set_reference(pull_ref)
+                self._saved_force_ref = pull_ref
+                self.get_logger().info(f"PULL setpoint: {pull_ref:.2f} N (measured={self._force_z:.2f} N)")
                 self._pull_start_x = x
             elif self._lull_next == "UNPULL":
                 # Restore the pre-PULL squash setpoint so the object remains loaded

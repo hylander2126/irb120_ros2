@@ -391,14 +391,17 @@ def plot_wrench_and_tipping(
     torque_primary: np.ndarray,
     pitch_rad: Optional[np.ndarray] = None,
     *,
+    force_xyz_smooth: Optional[np.ndarray] = None,
+    torque_primary_smooth: Optional[np.ndarray] = None,
     torque_label: str = "tau_y",
     force_labels: Sequence[str] = ("f_x", "f_y", "f_z"),
     y_label: str = "Force (N)",
     contact_time: float = 0.0,
     figsize: Tuple[float, float] = (10, 6),
     legend_fontsize: int = 13,
-    line_width: float = 3.0,
+    line_width: float = 5.0,
     title: Optional[str] = None,
+    save_path: Optional[str] = None,
     save_to_file: bool = False,
     show: bool = True,
 ):
@@ -406,9 +409,11 @@ def plot_wrench_and_tipping(
 
     Args:
         t: Time axis of shape (N,).
-        force_xyz: Force channels of shape (N,3).
-        torque_primary: Primary torque channel of shape (N,).
+        force_xyz: Raw force channels of shape (N,3).
+        torque_primary: Raw primary torque channel of shape (N,).
         pitch_rad: Optional tipping angle history in radians, shape (N,).
+        force_xyz_smooth: Optional smoothed force channels (N,3); overlaid in gray if provided.
+        torque_primary_smooth: Optional smoothed torque channel (N,); overlaid in gray if provided.
         torque_label: Legend label for the torque curve.
         force_labels: Legend labels for force x/y/z curves.
         y_label: Left-axis y-label text.
@@ -439,10 +444,22 @@ def plot_wrench_and_tipping(
         raise ValueError("force_labels must contain exactly 3 entries")
 
     fig, ax1 = plt.subplots(figsize=figsize)
-    ax1.plot(t, force_xyz[:, 0], color="tab:red", linewidth=line_width, label=force_labels[0])
-    ax1.plot(t, force_xyz[:, 1], color="tab:green", linewidth=line_width, label=force_labels[1])
-    ax1.plot(t, force_xyz[:, 2], color="tab:blue", linewidth=line_width, label=force_labels[2])
-    ax1.plot(t, torque_primary, color="tab:orange", linewidth=line_width, label=torque_label)
+
+    # Raw data — faint so smoothed overlay stands out
+    raw_alpha = 1.0 #0.35 if (force_xyz_smooth is not None or torque_primary_smooth is not None) else 1.0
+    ax1.plot(t, force_xyz[:, 0], color="tab:red",    linewidth=line_width, alpha=raw_alpha, label=force_labels[0])
+    ax1.plot(t, force_xyz[:, 1], color="tab:green",  linewidth=line_width, alpha=raw_alpha, label=force_labels[1])
+    ax1.plot(t, force_xyz[:, 2], color="tab:blue",   linewidth=line_width, alpha=raw_alpha, label=force_labels[2])
+    ax1.plot(t, torque_primary,  color="tab:orange", linewidth=line_width, alpha=raw_alpha, label=torque_label)
+
+    # Smoothed overlays in gray
+    if force_xyz_smooth is not None:
+        force_xyz_smooth = np.asarray(force_xyz_smooth)
+        ax1.plot(t, force_xyz_smooth[:, 0], color="gray", alpha=1, linewidth=line_width * 0.4, linestyle="--", label=f"{force_labels[0]} (smooth)")
+        ax1.plot(t, force_xyz_smooth[:, 1], color="gray", alpha=1, linewidth=line_width * 0.4, linestyle="-.",  label=f"{force_labels[1]} (smooth)")
+        ax1.plot(t, force_xyz_smooth[:, 2], color="gray", alpha=1, linewidth=line_width * 0.4, linestyle=":",   label=f"{force_labels[2]} (smooth)")
+    if torque_primary_smooth is not None:
+        ax1.plot(t, np.asarray(torque_primary_smooth), color="dimgray", alpha=1, linewidth=line_width * 0.4, linestyle="-", label=f"{torque_label} (smooth)")
 
     ax1.axvline(contact_time, color="k", linestyle="-", linewidth=2, label="first contact")
     ax1.set_xlabel("Time from first contact (s)")
@@ -487,6 +504,8 @@ def plot_wrench_and_tipping(
         plt.title(title)
 
     plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     _save_figure_if_requested(fig, title, save_to_file)
     if show:
         plt.show()
@@ -497,12 +516,15 @@ def plot_wrench_and_tipping(
 def plot_torque_fit_result(
     pitch_rad: np.ndarray,
     tau_meas: np.ndarray,
-    tau_pred: np.ndarray,
-    theta_star_rad: float,
+    tau_pred_push: np.ndarray,
+    theta_star_push_rad: float,
     *,
+    tau_pred_retract: Optional[np.ndarray] = None,
+    theta_star_retract_rad: Optional[float] = None,
     push_sel: Optional[np.ndarray] = None,
     figsize: Tuple[float, float] = (10, 6),
     title: Optional[str] = None,
+    save_path: Optional[str] = None,
     save_to_file: bool = False,
     show: bool = True,
 ):
@@ -511,8 +533,10 @@ def plot_torque_fit_result(
     Args:
         pitch_rad: Tipping angle for each sample, shape (N,).
         tau_meas: Measured torque (tau_y) per sample, shape (N,).
-        tau_pred: Model-predicted torque per sample, shape (N,).
-        theta_star_rad: Estimated tipping angle (rad) — drawn as a vertical line.
+        tau_pred_push: Model-predicted torque for push phase, shape (N,).
+        theta_star_push_rad: Estimated tipping angle from push fit (rad).
+        tau_pred_retract: Model-predicted torque for retract phase, shape (N,). If None, push pred used.
+        theta_star_retract_rad: Estimated tipping angle from retract fit (rad). If None, omitted.
         push_sel: Boolean mask (N,) selecting the push phase; retract = ~push_sel.
                   If None, all samples are treated as push phase.
         figsize: Matplotlib figure size.
@@ -523,10 +547,10 @@ def plot_torque_fit_result(
     Returns:
         fig, ax
     """
-    pitch_rad = np.asarray(pitch_rad)
-    tau_meas  = np.asarray(tau_meas)
-    tau_pred  = np.asarray(tau_pred)
-    pitch_deg = np.abs(np.rad2deg(pitch_rad))
+    pitch_rad      = np.asarray(pitch_rad)
+    tau_meas       = np.asarray(tau_meas)
+    tau_pred_push  = np.asarray(tau_pred_push)
+    pitch_deg      = np.abs(np.rad2deg(pitch_rad))
 
     if push_sel is None:
         push_sel = np.ones(len(pitch_deg), dtype=bool)
@@ -538,16 +562,27 @@ def plot_torque_fit_result(
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter(pitch_deg[push_sel],    tau_meas[push_sel],    alpha=0.5, color="tab:blue",   label="Push phase data")
     ax.scatter(pitch_deg[retract_sel], tau_meas[retract_sel], alpha=0.5, color="tab:orange", label="Retract phase data")
-    ax.plot(pitch_deg[push_sel][sort_push],       tau_pred[push_sel][sort_push],       color="black", linewidth=2, label="Model (push)")
-    ax.plot(pitch_deg[retract_sel][sort_retract], tau_pred[retract_sel][sort_retract], color="gray",  linewidth=2, label="Model (retract)")
+    ax.plot(pitch_deg[push_sel][sort_push], tau_pred_push[push_sel][sort_push], color="black", linewidth=2, label="Model (push)")
 
-    theta_star_deg = np.rad2deg(theta_star_rad)
-    ax.axvline(x=theta_star_deg, color="green", linestyle="--", linewidth=2,
-               label=f"Est. $\\theta^*$ ({theta_star_deg:.1f}°)")
+    if tau_pred_retract is not None:
+        tau_pred_retract = np.asarray(tau_pred_retract)
+        ax.plot(pitch_deg[retract_sel][sort_retract], tau_pred_retract[retract_sel][sort_retract],
+                color="gray", linewidth=2, label="Model (retract)")
+    else:
+        ax.plot(pitch_deg[retract_sel][sort_retract], tau_pred_push[retract_sel][sort_retract],
+                color="gray", linewidth=2, label="Model (retract)")
+
+    theta_star_push_deg = np.rad2deg(theta_star_push_rad)
+    ax.axvline(x=theta_star_push_deg, color="blue", linestyle="--", linewidth=2,
+               label=f"Est. $\\theta^*$ push ({theta_star_push_deg:.1f}°)")
+    if theta_star_retract_rad is not None:
+        theta_star_retract_deg = np.rad2deg(theta_star_retract_rad)
+        ax.axvline(x=theta_star_retract_deg, color="darkorange", linestyle="--", linewidth=2,
+                   label=f"Est. $\\theta^*$ retract ({theta_star_retract_deg:.1f}°)")
     ax.axhline(y=0, color="cyan", linestyle="-", alpha=0.8)
 
     ax.set_xlabel("Object angle (deg)", fontsize=14)
-    ax.set_ylabel("Torque (N·m)", fontsize=14)
+    ax.set_ylabel("Net torque (N·m)", fontsize=14)
     ax.grid(True, alpha=0.4)
     _densify_ticks(ax)
     ax.legend(fontsize=12)
@@ -556,6 +591,8 @@ def plot_torque_fit_result(
         plt.title(title)
 
     plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     _save_figure_if_requested(fig, title, save_to_file)
     if show:
         plt.show()

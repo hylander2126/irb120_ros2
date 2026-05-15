@@ -1,5 +1,101 @@
 import numpy as np
-from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv
+from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv, quat_to_rotvec
+
+
+def compute_applied_wrench(
+    f_meas_S: np.ndarray,
+    Q_ft: np.ndarray,
+    pitch_contact: np.ndarray,
+    p_finger_O: np.ndarray,
+) -> np.ndarray:
+    """Compute applied wrench in object frame directly from logged quantities.
+
+    Skips 4x4 homogeneous matrix packing. Equivalent to model_bkwd_wrench.
+
+    Steps:
+      R_obj = Ry(pitch)                     object frame orientation in base
+      R_O_S = R_obj.T @ R_ft               sensor rotation expressed in object frame
+      f_app_O = -(R_O_S @ f_S)             Newton's 3rd law
+      tau_app_O = p_finger_O × f_app_O    torque about object origin (pivot)
+
+    Args:
+        f_meas_S:      (N,3) measured forces in sensor frame
+        Q_ft:          (N,4) ft_link quaternion [x,y,z,w] in base frame
+        pitch_contact: (N,) tipping angle in radians (rotation about Y)
+        p_finger_O:    (N,3) finger position in object frame (constant, no-slip)
+    """
+    N = len(pitch_contact)
+    
+    R_obj = axisangle2rot(np.array([0, 1, 0]), pitch_contact)   # (N,3,3) R_B_O object rotation in {B} (robot/world)
+    R_ft  = rotvec_to_rot(quat_to_rotvec(Q_ft))                 # (N,3,3) R_B_S      ft rotation in {B}
+
+    # R_O_S = R_obj.T @ R_ft
+    R_O_S = np.einsum('nji,njk->nik', R_obj, R_ft)            # (N,3,3) {S} in {O}
+
+    f_app_O = -np.einsum('nij,nj->ni', R_O_S, f_meas_S)      # (N,3)
+    t_app_O = np.cross(p_finger_O, f_app_O)                  # (N,3)
+
+    return np.hstack((f_app_O, t_app_O))
+
+
+def compute_applied_wrench_surface(
+    f_meas_S: np.ndarray,
+    Q_ft: np.ndarray,
+    pitch_contact: np.ndarray,
+    p_finger_O: np.ndarray,
+) -> tuple:
+    """Compute applied wrench in object frame using contact surface geometry.
+
+    The EE maintains constant world orientation throughout squashing, so R_B_S
+    is time-varying only due to the fixed sensor mount offset — captured by Q_ft.
+    f_meas_S is first rotated to the world frame via Q_ft, then decomposed into
+    normal/tangential components at the (tilting) contact surface, then rotated
+    into the object frame.
+
+    Surface assumption: top-face normal is [0,0,1] in world at θ=0. As the
+    object tips by θ (Ry(θ)), the normal in world frame becomes:
+        n_B(θ) = [sin(θ), 0, cos(θ)]
+
+    Args:
+        f_meas_S:      (N,3) measured forces in sensor frame
+        Q_ft:          (N,4) sensor quaternion [x,y,z,w] in world/base frame
+        pitch_contact: (N,) tipping angle in radians (rotation about +Y)
+        p_finger_O:    (3,) contact point in object frame (constant, no-slip)
+
+    Returns:
+        w_app_O:   (N,6) applied wrench [fx,fy,fz,tx,ty,tz] in object frame
+        f_norm_O:  (N,3) normal component of applied force in object frame
+        f_tan_O:   (N,3) tangential component of applied force in object frame
+    """
+    N = len(pitch_contact)
+
+    # Rotate measured force from sensor frame into world frame using Q_ft
+    R_B_S = rotvec_to_rot(quat_to_rotvec(Q_ft))                # (N,3,3) R_B_S
+    f_meas_W = np.einsum('nij,nj->ni', R_B_S, f_meas_S)        # (N,3) force in world frame
+
+    # Surface normal in world frame as object tips: Ry(θ) @ [0,0,1]
+    n_B = np.column_stack([np.sin(pitch_contact),
+                           np.zeros(N),
+                           np.cos(pitch_contact)])              # (N,3)
+
+    # Decompose world-frame force into normal and tangential at the contact surface
+    f_dot_n  = np.einsum('ni,ni->n', f_meas_W, n_B)            # (N,) scalar projection onto normal
+    f_norm_B = np.einsum('n,ni->ni', f_dot_n, n_B)             # (N,3) normal component in world
+    f_tan_B  = f_meas_W - f_norm_B                             # (N,3) tangential component in world
+
+    # Rotate both components from world frame into object frame (R_O_B = R_B_O.T)
+    rv_contact = np.zeros((N, 3)); rv_contact[:, 1] = pitch_contact
+    R_obj = rotvec_to_rot(rv_contact)                           # (N,3,3) R_B_O
+    f_norm_O = np.einsum('nji,nj->ni', R_obj, f_norm_B)        # (N,3) normal in {O}
+    f_tan_O  = np.einsum('nji,nj->ni', R_obj, f_tan_B)         # (N,3) tangential in {O}
+
+    # Applied force on object = Newton's 3rd law
+    f_app_O = -(f_norm_O + f_tan_O)                            # (N,3)
+    t_app_O = np.cross(p_finger_O, f_app_O)                    # (N,3)
+
+    w_app_O = np.hstack((f_app_O, t_app_O))                    # (N,6)
+    return w_app_O, -f_norm_O, -f_tan_O                        # sign: forces ON the object
+
 
 def model_bkwd_wrench(
     w_meas_S: np.ndarray,
@@ -19,13 +115,14 @@ def model_bkwd_wrench(
     """
     # First get sensor pose in object frame, then get corresponding AdT
     T_O_S = TransInv(T_B_obj) @ T_B_sensor   # (N,4,4) sensor pose in object frame
-    AdT_S_O = Adjoint(T_O_S)          # (N,6,6)
-    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S)    # (N,6) wrench in {O}
+    AdT_S_O = Adjoint(T_O_S).reshape((-1, 6, 6))          # (N,6,6)
+    w_meas_S = w_meas_S.reshape(-1, 6)                    # (N,6) measured wrench in sensor frame
+    # print(AdT_S_O.shape, w_meas_S.shape)
+    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S.reshape(-1,6))    # (N,6) wrench in {O}
 
     f_app_O  = -w_meas_O[:, :3]                               # Newton's 3rd law
     t_app_O  = np.cross(p_finger_O, f_app_O)                  # r × f about object origin
     w_app_O = np.hstack((f_app_O, t_app_O))                      # (N,6)
-
     return w_app_O
 
 

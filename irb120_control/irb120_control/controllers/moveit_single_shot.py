@@ -13,6 +13,7 @@ from sensor_msgs.msg import JointState
 from moveit_msgs.msg import (
     BoundingVolume,
     Constraints,
+    JointConstraint,
     MoveItErrorCodes,
     MotionPlanRequest,
     OrientationConstraint,
@@ -209,4 +210,96 @@ def plan_and_execute_pose_goal(
         return False
 
     node.get_logger().info("Reached pose target.")
+    return True
+
+
+# Joint names for the IRB120 manipulator group (order matches robot URDF/SRDF)
+_IRB120_JOINT_NAMES = [
+    "joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6",
+]
+
+DEFAULT_JOINT_TOLERANCE = 0.01  # rad
+
+
+def plan_and_execute_joint_goal(
+    node,
+    move_group_client,
+    *,
+    joint_positions: Sequence[float],
+    group_name: str = DEFAULT_GROUP_NAME,
+    joint_names: Sequence[str] = _IRB120_JOINT_NAMES,
+    joint_tolerance: float = DEFAULT_JOINT_TOLERANCE,
+    velocity_scaling_factor: float = 0.1,
+    acceleration_scaling_factor: float = 0.1,
+    planning_attempts: int = 5,
+    allowed_planning_time: float = 10.0,
+    timeout_server_sec: float = 10.0,
+    timeout_goal_send_sec: float = 15.0,
+    timeout_result_sec: float = 30.0,
+) -> bool:
+    """Plan and execute a joint-space goal using MoveGroup.
+
+    joint_positions: 6-element sequence of target joint angles in radians,
+                     ordered to match joint_names.
+    """
+    if len(joint_positions) != len(joint_names):
+        node.get_logger().error(
+            f"joint_positions length {len(joint_positions)} != joint_names length {len(joint_names)}"
+        )
+        return False
+
+    node.get_logger().info(
+        f"Moving to joint target: {[round(v, 4) for v in joint_positions]}"
+    )
+
+    if not move_group_client.wait_for_server(timeout_sec=timeout_server_sec):
+        node.get_logger().error("MoveGroup action server not available")
+        return False
+
+    _wait_for_joint_states(node, timeout_sec=10.0)
+
+    goal_constraints = Constraints()
+    for name, position in zip(joint_names, joint_positions):
+        jc = JointConstraint()
+        jc.joint_name = name
+        jc.position = position
+        jc.tolerance_above = joint_tolerance
+        jc.tolerance_below = joint_tolerance
+        jc.weight = 1.0
+        goal_constraints.joint_constraints.append(jc)
+
+    request = MotionPlanRequest()
+    request.group_name = group_name
+    request.goal_constraints = [goal_constraints]
+    request.num_planning_attempts = planning_attempts
+    request.allowed_planning_time = allowed_planning_time
+    request.max_velocity_scaling_factor = velocity_scaling_factor
+    request.max_acceleration_scaling_factor = acceleration_scaling_factor
+
+    goal = MoveGroup.Goal()
+    goal.request = request
+
+    future = move_group_client.send_goal_async(goal)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
+    if not future.done() or future.result() is None:
+        node.get_logger().error("Failed to send MoveGroup joint goal")
+        return False
+
+    handle = future.result()
+    if not handle.accepted:
+        node.get_logger().error("MoveGroup joint goal rejected")
+        return False
+
+    result_future = handle.get_result_async()
+    rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_result_sec)
+    if not result_future.done() or result_future.result() is None:
+        node.get_logger().error("MoveGroup joint result not received")
+        return False
+
+    result = result_future.result().result
+    if result.error_code.val != MoveItErrorCodes.SUCCESS:
+        node.get_logger().error(f"MoveGroup joint goal failed: error_code={result.error_code.val}")
+        return False
+
+    node.get_logger().info("Reached joint target.")
     return True

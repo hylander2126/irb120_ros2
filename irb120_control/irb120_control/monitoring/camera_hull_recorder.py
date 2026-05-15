@@ -16,6 +16,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
+from vision_msgs.msg import Detection3DArray
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -71,6 +72,11 @@ class CameraHullRecorder(Node):
         self._ft_fz: float = 0.0
         self._ft_received: bool = False
 
+        self._obj_roll_deg: float = 0.0
+        self._obj_pitch_deg: float = 0.0
+        self._obj_yaw_deg: float = 0.0
+        self._obj_pose_received: bool = False
+
         self._bridge = CvBridge()
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -92,6 +98,7 @@ class CameraHullRecorder(Node):
         self._camera_info_sub = self.create_subscription(CameraInfo, self._camera_info_topic, self._on_camera_info, 10)
         self._marker_sub = self.create_subscription(MarkerArray, self._marker_topic, self._on_markers, 10)
         self._ft_sub = self.create_subscription(WrenchStamped, self.get_parameter("ft_topic").value, self._on_wrench, 10)
+        self._det_sub = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._annotated_pub = self.create_publisher(Image, self._annotated_image_topic, 10)
         self._recording_srv = self.create_service(SetBool, self._recording_service_name, self._on_set_recording)
 
@@ -106,6 +113,24 @@ class CameraHullRecorder(Node):
         self._ft_fy = msg.wrench.force.y
         self._ft_fz = msg.wrench.force.z
         self._ft_received = True
+
+    def _on_detection(self, msg: Detection3DArray) -> None:
+        if not msg.detections:
+            return
+        hyp = msg.detections[0].results[0] if msg.detections[0].results else None
+        if hyp is None:
+            return
+        q = hyp.pose.pose.orientation
+        # Convert quaternion → RPY (intrinsic XYZ / extrinsic ZYX)
+        sinr = 2.0 * (q.w * q.x + q.y * q.z)
+        cosr = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
+        sinp = 2.0 * (q.w * q.y - q.z * q.x)
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self._obj_roll_deg  = math.degrees(math.atan2(sinr, cosr))
+        self._obj_pitch_deg = math.degrees(math.asin(max(-1.0, min(1.0, sinp))))
+        self._obj_yaw_deg   = math.degrees(math.atan2(siny, cosy))
+        self._obj_pose_received = True
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:
@@ -169,6 +194,8 @@ class CameraHullRecorder(Node):
         self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
         if self._ft_received:
             self._draw_ft_hud(annotated)
+        if self._obj_pose_received:
+            self._draw_obj_rpy_hud(annotated)
 
         try:
             self._annotated_pub.publish(self._bridge.cv2_to_imgmsg(annotated, encoding="bgr8"))
@@ -267,6 +294,31 @@ class CameraHullRecorder(Node):
             # Centre zero tick
             cv2.line(img, (centre_x, trough_y - 1), (centre_x, trough_y + bar_h + 1),
                      (200, 200, 200), 1)
+
+    def _draw_obj_rpy_hud(self, img: np.ndarray) -> None:
+        """Burn object RPY (deg) into the bottom-right corner of img (in-place)."""
+        h, w = img.shape[:2]
+        panel_w, panel_h = 190, 82
+        panel_x = w - panel_w - 10
+        panel_y = h - panel_h - 10
+
+        roi = img[panel_y:panel_y + panel_h, panel_x:panel_x + panel_w]
+        overlay = roi.copy()
+        cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.55, roi, 0.45, 0, roi)
+
+        cv2.putText(img, "Object RPY", (panel_x + 6, panel_y + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (180, 180, 180), 1, cv2.LINE_AA)
+
+        rows = [
+            ("R", self._obj_roll_deg,  (100, 100, 255)),
+            ("P", self._obj_pitch_deg, (100, 255, 100)),
+            ("Y", self._obj_yaw_deg,   (255, 160, 60)),
+        ]
+        for i, (label, val, color) in enumerate(rows):
+            y = panel_y + 34 + i * 18
+            cv2.putText(img, f"{label}: {val:+7.2f} deg", (panel_x + 6, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.44, color, 1, cv2.LINE_AA)
 
     def _draw_marker_hulls(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
         for marker in self._latest_markers:
