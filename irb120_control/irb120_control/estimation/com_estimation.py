@@ -1,6 +1,16 @@
 import numpy as np
 from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv, quat_to_rotvec
 
+def W_app_arc(
+        f_meas_S: np.ndarray, # (N,3) measured forces in sensor frame
+        pitch_contact: np.ndarray, # (N,) tipping angle in radians (rotation about Y)
+        p_finger_O: np.ndarray, # (N,3) finger position in object frame
+) -> np.ndarray:
+    N = len(pitch_contact)
+
+    f_app_O = -f_meas_S  # (N,3) force in sensor frame, negated for Newton's 3rd law
+    t_app_O = np.cross(p_finger_O, f_app_O)  # (N,3) torque about object origin
+    return np.hstack((f_app_O, t_app_O))
 
 def compute_applied_wrench(
     f_meas_S: np.ndarray,
@@ -25,7 +35,7 @@ def compute_applied_wrench(
         p_finger_O:    (N,3) finger position in object frame (constant, no-slip)
     """
     N = len(pitch_contact)
-    
+
     R_obj = axisangle2rot(np.array([0, 1, 0]), pitch_contact)   # (N,3,3) R_B_O object rotation in {B} (robot/world)
     R_ft  = rotvec_to_rot(quat_to_rotvec(Q_ft))                 # (N,3,3) R_B_S      ft rotation in {B}
 

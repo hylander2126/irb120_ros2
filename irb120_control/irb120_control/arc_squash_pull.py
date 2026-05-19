@@ -21,7 +21,7 @@ from geometry_msgs.msg import PoseStamped, TwistStamped, WrenchStamped
 from moveit_msgs.action import MoveGroup
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from abb_robot_msgs.srv import TriggerWithResultCode
+# from abb_robot_msgs.srv import TriggerWithResultCode
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
@@ -139,7 +139,7 @@ class ArcSquashPull(Node):
         self._arc_start_angle: float | None = None # angle at squash contact (radians, in XZ plane)
         self._arc_end_angle: float | None = None   # target angle after full sweep
 
-        self._egm_keepalive_client = self.create_client(TriggerWithResultCode, _EGM_START_SRV)
+        # self._egm_keepalive_client = self.create_client(TriggerWithResultCode, _EGM_START_SRV)
         self._pause_servo_client   = self.create_client(SetBool, "/servo_node/pause_servo")
 
         self._ft_transformed_log: list = []

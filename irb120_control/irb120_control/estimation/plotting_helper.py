@@ -391,6 +391,7 @@ def plot_wrench_and_tipping(
     torque_primary: np.ndarray,
     pitch_rad: Optional[np.ndarray] = None,
     *,
+    ax: Optional[plt.Axes] = None,
     force_xyz_smooth: Optional[np.ndarray] = None,
     torque_primary_smooth: Optional[np.ndarray] = None,
     torque_label: str = "tau_y",
@@ -412,17 +413,18 @@ def plot_wrench_and_tipping(
         force_xyz: Raw force channels of shape (N,3).
         torque_primary: Raw primary torque channel of shape (N,).
         pitch_rad: Optional tipping angle history in radians, shape (N,).
+        ax: If provided, draw into this existing Axes instead of creating a new figure.
         force_xyz_smooth: Optional smoothed force channels (N,3); overlaid in gray if provided.
         torque_primary_smooth: Optional smoothed torque channel (N,); overlaid in gray if provided.
         torque_label: Legend label for the torque curve.
         force_labels: Legend labels for force x/y/z curves.
         y_label: Left-axis y-label text.
         contact_time: X-location (s) for the vertical contact marker.
-        figsize: Matplotlib figure size.
+        figsize: Matplotlib figure size (ignored when ax is provided).
         legend_fontsize: Combined legend font size.
         line_width: Shared line width for plotted curves.
         save_to_file: If True, save figure to disk using the title as filename.
-        show: If True, call plt.show().
+        show: If True, call plt.show() (ignored when ax is provided).
         title: Optional title for the plot.
 
     Returns:
@@ -443,7 +445,13 @@ def plot_wrench_and_tipping(
     if len(force_labels) != 3:
         raise ValueError("force_labels must contain exactly 3 entries")
 
-    fig, ax1 = plt.subplots(figsize=figsize)
+    if ax is not None:
+        ax1 = ax
+        fig = ax1.get_figure()
+        standalone = False
+    else:
+        fig, ax1 = plt.subplots(figsize=figsize)
+        standalone = True
 
     # Raw data — faint so smoothed overlay stands out
     raw_alpha = 1.0 #0.35 if (force_xyz_smooth is not None or torque_primary_smooth is not None) else 1.0
@@ -501,14 +509,15 @@ def plot_wrench_and_tipping(
         ax1.legend(loc="best", fontsize=legend_fontsize)
 
     if title is not None:
-        plt.title(title)
+        ax1.set_title(title)
 
-    plt.tight_layout()
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    _save_figure_if_requested(fig, title, save_to_file)
-    if show:
-        plt.show()
+    if standalone:
+        plt.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        _save_figure_if_requested(fig, title, save_to_file)
+        if show:
+            plt.show()
 
     return fig, ax1, ax2
 
@@ -519,6 +528,7 @@ def plot_torque_fit_result(
     tau_pred_push: np.ndarray,
     theta_star_push_rad: float,
     *,
+    ax: Optional[plt.Axes] = None,
     tau_pred_retract: Optional[np.ndarray] = None,
     theta_star_retract_rad: Optional[float] = None,
     push_sel: Optional[np.ndarray] = None,
@@ -535,14 +545,15 @@ def plot_torque_fit_result(
         tau_meas: Measured torque (tau_y) per sample, shape (N,).
         tau_pred_push: Model-predicted torque for push phase, shape (N,).
         theta_star_push_rad: Estimated tipping angle from push fit (rad).
+        ax: If provided, draw into this existing Axes instead of creating a new figure.
         tau_pred_retract: Model-predicted torque for retract phase, shape (N,). If None, push pred used.
         theta_star_retract_rad: Estimated tipping angle from retract fit (rad). If None, omitted.
         push_sel: Boolean mask (N,) selecting the push phase; retract = ~push_sel.
                   If None, all samples are treated as push phase.
-        figsize: Matplotlib figure size.
+        figsize: Matplotlib figure size (ignored when ax is provided).
         title: Optional figure title.
         save_to_file: If True, save figure to disk using the title as filename.
-        show: If True, call plt.show().
+        show: If True, call plt.show() (ignored when ax is provided).
 
     Returns:
         fig, ax
@@ -559,7 +570,13 @@ def plot_torque_fit_result(
     sort_push    = np.argsort(pitch_deg[push_sel])
     sort_retract = np.argsort(pitch_deg[retract_sel])
 
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is not None:
+        standalone = False
+        fig = ax.get_figure()
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        standalone = True
+
     ax.scatter(pitch_deg[push_sel],    tau_meas[push_sel],    alpha=0.5, color="tab:blue",   label="Push phase data")
     ax.scatter(pitch_deg[retract_sel], tau_meas[retract_sel], alpha=0.5, color="tab:orange", label="Retract phase data")
     ax.plot(pitch_deg[push_sel][sort_push], tau_pred_push[push_sel][sort_push], color="black", linewidth=2, label="Model (push)")
@@ -588,14 +605,15 @@ def plot_torque_fit_result(
     ax.legend(fontsize=12)
 
     if title is not None:
-        plt.title(title)
+        ax.set_title(title)
 
-    plt.tight_layout()
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    _save_figure_if_requested(fig, title, save_to_file)
-    if show:
-        plt.show()
+    if standalone:
+        plt.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        _save_figure_if_requested(fig, title, save_to_file)
+        if show:
+            plt.show()
 
     return fig, ax
 
