@@ -44,6 +44,7 @@ setup(
             'estimate_params = irb120_control.estimation.estimate_params:main',
             'fbd_plot = irb120_control.estimation.fbd_plot:main',
             'tst = irb120_control.estimation.tst:main',
+            'temp = irb120_control.estimation.temp:main',
         ],
     },
 )

@@ -12,6 +12,21 @@ def W_app_arc(
     t_app_O = np.cross(p_finger_O, f_app_O)  # (N,3) torque about object origin
     return np.hstack((f_app_O, t_app_O))
 
+
+def construct_T(p, quat=None, rv=None):
+    """Construct homogeneous transformation matrix from position and quaternion."""
+    if quat is not None:
+        R = rotvec_to_rot(quat_to_rotvec(quat))  # (N,3,3) rotation matrix from quaternion
+    elif rv is not None:
+        R = rotvec_to_rot(rv)  # (N,3,3) rotation matrix from rotation vector
+    else:
+        raise ValueError("Either 'quat' or 'rv' must be provided")
+    T = np.zeros((len(p), 4, 4))
+    T[:, :3, :3] = R
+    T[:, :3, 3] = p
+    T[:, 3, 3] = 1.0
+    return T
+
 def compute_applied_wrench(
     f_meas_S: np.ndarray,
     Q_ft: np.ndarray,
@@ -111,29 +126,34 @@ def model_bkwd_wrench(
     w_meas_S: np.ndarray,
     T_B_sensor: np.ndarray,
     T_B_obj: np.ndarray,
-    p_finger_O: np.ndarray,
+    # p_finger_O: np.ndarray,
 ) -> np.ndarray:
     """
-    Compute the 'backward' applied wrench [f; tau] in object frame {O}.
+    Compute the 'backward' applied wrench [tau, f] in object frame {O}.
 
     {O}, {B}, {S} are object, world/base, and sensor frames respectively.
 
     w_meas_S:   (N,6) measured wrenches in {S}  [fx fy fz tx ty tz]
-    T_B_sensor: (N,4,4) sensor poses in world frame
-    T_B_obj:    (N,4,4) object poses in world frame
-    p_finger_O: (N,3) or (3,) contact-point position in {O}
-    """
-    # First get sensor pose in object frame, then get corresponding AdT
-    T_O_S = TransInv(T_B_obj) @ T_B_sensor   # (N,4,4) sensor pose in object frame
-    AdT_S_O = Adjoint(T_O_S).reshape((-1, 6, 6))          # (N,6,6)
-    w_meas_S = w_meas_S.reshape(-1, 6)                    # (N,6) measured wrench in sensor frame
-    # print(AdT_S_O.shape, w_meas_S.shape)
-    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S.reshape(-1,6))    # (N,6) wrench in {O}
+    T_B_sensor: (N,4,4) sensor {S} poses in world frame {B}
+    T_B_obj:    (N,4,4) object {O} poses in world frame {B}
 
-    f_app_O  = -w_meas_O[:, :3]                               # Newton's 3rd law
-    t_app_O  = np.cross(p_finger_O, f_app_O)                  # r × f about object origin
-    w_app_O = np.hstack((f_app_O, t_app_O))                      # (N,6)
-    return w_app_O
+    Uses: w_O = Ad_{T_SO}^T w_S 
+    """
+    # First get object pose in sensor frame (OOPS WAS REVERSED...fixed.) -> AdT
+    # T_O_S = TransInv(T_B_obj) @ T_B_sensor   # (N,4,4) sensor pose in object frame
+    T_S_O = TransInv(T_B_sensor) @ T_B_obj   # (N,4,4) object pose in sensor frame
+    AdT_S_O = Adjoint(T_S_O).reshape((-1, 6,6)).transpose(0,2,1)          # (N,6,6)
+
+    # w_meas_S_flipped = np.concatenate([w_meas_S[:, 3:], w_meas_S[:, :3]], axis=1) # flip for [t, f] M.R. convention (func is designed like this)
+
+    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S.reshape(-1,6))    # (N,6) wrench in {O}
+    # w_meas_O[:, :3] = -w_meas_O[:, :3]                    # Newton's 3rd law: force on object = -force on sensor
+    return -w_meas_O
+
+    # f_app_O  = -w_meas_O[:, :3]                               # Newton's 3rd law
+    # t_app_O  = np.cross(p_finger_O, f_app_O)                  # r × f about object origin
+    # w_app_O = np.hstack((f_app_O, t_app_O))                      # (N,6)
+    # return w_app_O
 
 
 def model_fwd_wrench(

@@ -5,14 +5,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.signal import butter, filtfilt
-from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, compute_applied_wrench, W_app_arc
+from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, compute_applied_wrench, W_app_arc, construct_T
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result
 
-ALL_OBJECTS = ["box", "heart", "flashlight", "monitor", "soda"]
+ALL_OBJECTS = ["box"]#, "heart", "flashlight", "monitor", "soda"]
 
-_LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 6 Hz — removes high-freq sensor noise
-_LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 0.5 Hz — removes force-controller hunting
+_LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
+_LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
 
 
 def _lpf(x, axis=0):
@@ -39,34 +39,47 @@ def load_and_preprocess(filepath):
     time_ft  = data["ft_time_s"]
     time_ft_raw = data["ft_raw_time_s"]
     time_ee  = data["pose_time_s"]
-    time_obj = data["obj_time_s"]
+    time_obj = data["obj_time_s"] # Unused object detector time
 
-    f_meas_S = _lpf(np.column_stack([data["fx"], data["fy"], data["fz"]]))
+    f_meas_S = _lpf(np.column_stack([data["fx"], data["fy"], data["fz"]])) # F/T in world frame
     t_meas_S = _lpf(np.column_stack([data["tx"], data["ty"], data["tz"]]))
 
-    f_meas_raw = _lpf(np.column_stack([data["fx_raw"], data["fy_raw"], data["fz_raw"]]))
-    t_meas_raw = _lpf(np.column_stack([data["tx_raw"], data["ty_raw"], data["tz_raw"]]))
-    f_bias = np.mean(f_meas_raw[:500,:], axis=0)
-    t_bias = np.mean(t_meas_raw[:500,:], axis=0)
-    f_meas_raw -= f_bias
-    t_meas_raw -= t_bias
+    # BIASING HAPPENS ONCE ORIENTATION IS CALCULATED - The gravity changes wrt {S}
+    f_meas_raw = np.column_stack([data["fx_raw"], data["fy_raw"], data["fz_raw"]]) # F/T in {S} frame (unbiased)
+    t_meas_raw = np.column_stack([data["tx_raw"], data["ty_raw"], data["tz_raw"]])
 
     p_ft_B   = np.column_stack([data["ft_px"], data["ft_py"], data["ft_pz"]])
     Q_ft     = np.column_stack([data["ft_qx"], data["ft_qy"], data["ft_qz"], data["ft_qw"]])
     p_ee_B   = np.column_stack([data["x"], data["y"], data["z"]])
     p_obj_B  = np.column_stack([data["obj_x"], data["obj_y"], data["obj_z"]])
 
-    # If Q_ft idx don't align with time, append zeros
-    if len(Q_ft) < len(time_ft):
-        n_missing = len(time_ft) - len(Q_ft)
-        Q_ft = np.vstack((Q_ft, np.zeros((n_missing, 4))))
-        p_ft_B = np.vstack((p_ft_B, np.zeros((n_missing, 3))))
-    elif len(Q_ft) > len(time_ft):
-        Q_ft = Q_ft[:len(time_ft)]
-        p_ft_B = p_ft_B[:len(time_ft)]
+    # Now we can bias the raw F/T using Q_ft
+    bias_f_S = np.mean(f_meas_raw[50:250], axis=0) # average of first 50 samples as bias
+    bias_t_S = np.mean(t_meas_raw[50:250], axis=0)
+    # per-sample rotations: R[n] maps {S} -> {B}
+    R_ft_B = rotvec_to_rot(quat_to_rotvec(Q_ft)) # (N,3,3) rotation - {S} in {B}
+    # base-frame bias (use rotation at bias samples)
+    R0 = R_ft_B[100] # rotation at sample 100 (middle of bias window)
+    bias_f_B = R0 @ bias_f_S # (N,3) bias in {B}
+    bias_t_B = R0 @ bias_t_S
+    # Now rotate base bias into each sample's sensor frame
+    bias_f_S_all = np.einsum('nij,j->ni', R_ft_B.transpose(0,2,1), bias_f_B) # (N,3) bias in {S}
+    bias_t_S_all = np.einsum('nij,j->ni', R_ft_B.transpose(0,2,1), bias_t_B) # (N,3) bias in {S}
+    f_meas_raw -= bias_f_S_all
+    t_meas_raw -= bias_t_S_all
 
-    # Actually, since now FT is in 'expected' orientation, Q_ft not needed. Set to identity for now.
-    Q_ft = np.tile(np.array([0.0, 0.0, 0.0, 1.0]), (len(time_ft), 1))
+    # And finally apply filtering after biasing...
+    f_meas_raw = _lpf(f_meas_raw) 
+    t_meas_raw = _lpf(t_meas_raw)
+
+    # # If Q_ft idx don't align with time, append zeros
+    # if len(Q_ft) < len(time_ft):
+    #     n_missing = len(time_ft) - len(Q_ft)
+    #     Q_ft = np.vstack((Q_ft, np.zeros((n_missing, 4))))
+    #     p_ft_B = np.vstack((p_ft_B, np.zeros((n_missing, 3))))
+    # elif len(Q_ft) > len(time_ft):
+    #     Q_ft = Q_ft[:len(time_ft)]
+    #     p_ft_B = p_ft_B[:len(time_ft)]
 
     return time_ft, f_meas_S, t_meas_S, time_ft_raw, f_meas_raw, t_meas_raw, p_ft_B, Q_ft, time_ee, p_ee_B, time_obj, p_obj_B
 
@@ -74,53 +87,52 @@ def load_and_preprocess(filepath):
 def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     time_ft, f_meas_S, t_meas_S, time_ft_raw, f_meas_raw, t_meas_raw, p_ft_B, Q_ft, time_ee, p_ee_B, time_obj, p_obj_B = load_and_preprocess(squash_file)
 
+    # Temp change of variable name: Set raw data to "meas"...
+    time_ft = time_ft_raw
+    f_meas_S = f_meas_raw
+    t_meas_S = t_meas_raw
 
+    # Loop forward to find contact and find release by doing the opposite loop backwards.
     contact_ft_idx = np.argmax(np.linalg.norm(f_meas_S, axis=1) > 0.5) # argmax on bool array: first idx of norm > 0.5 N
-    time_contact_start = time_ft[contact_ft_idx] # and the corresponding time
+    release_ft_idx = len(time_ft) - np.argmax(np.linalg.norm(f_meas_S[::-1], axis=1) > 0.5) # last idx of norm > 0.5 N
+    print(f"[{obj}] contact start: idx={contact_ft_idx} contact end: idx={release_ft_idx}")
 
     # Pivot: near edge of object = pre-contact centroid x_min (closest to robot is approximate object frame)
     # p_pivot_B = np.array([p_obj_B[time_obj <= time_contact_start, 0].min(), 0.0, 0.0])
-    # print(f"[{obj}] pivot x={p_pivot_B[0]:.4f} m")
-
-    p_pivot_B = np.array([0.6, 0, 0])
+    p_pivot_B = np.array([0.6, 0, 0]) # Near-exact pivot from pre-defined object frame (I reset obj to known pose)
 
     # Proprioceptive tipping angle from EE triangle in X-Z plane
-    contact_ee_idx = np.argmin(np.abs(time_ee - time_contact_start)) # index of first EE (ball center) position after contact
-    r0  = p_ee_B[contact_ee_idx] - p_pivot_B
+    contact_ee_idx = np.argmin(np.abs(time_ee - time_ft[contact_ft_idx])) # index of first EE (ball center) position after contact
     r_t = p_ee_B                 - p_pivot_B
-
-    print(f"r0 from proprioception = {r0}")
-    
+    r0  = p_ee_B[contact_ee_idx] - p_pivot_B
+    print(f"[{obj}] p_pivot_B: {p_pivot_B}, p_ee_B[contact]: {np.round(p_ee_B[contact_ee_idx], 3)}, r0: {np.round(r0, 3)}")
     # Angle of moving r_t wrt stationary r0 in the X-Z plane (positive CCW, +Y into the screen)
-    prop_angle_deg = -np.degrees(np.arctan2(r0[0] * r_t[:, 2] - r0[2] * r_t[:, 0],
-                                           r0[0] * r_t[:, 0] + r0[2] * r_t[:, 2]))
-    
-    prop_angle_deg[:contact_ee_idx] = 0.0 # Set the angle to 0 before the contact
-    print(f"[{obj}] min angle={prop_angle_deg.min():.2f}°  ee_samples={len(time_ee)}")
-
-    pitch_B = np.deg2rad(np.interp(time_ft, time_ee, prop_angle_deg)) # Match the time of F/T data
-
-    # Applied wrench in object frame — angles are Negative (object tips CCW when looking from -Y)
-    contact_mask  = pitch_B < 0.0
+    prop_angle = -(np.arctan2(r0[0]*r_t[:, 2] - r0[2]*r_t[:, 0], r0[0]*r_t[:, 0] + r0[2]*r_t[:, 2]))
+    pitch_B = np.interp(time_ft, time_ee, prop_angle) # Match the time of F/T data
 
     # Build batched (N,4,4) homogeneous transforms for sensor and object frames
-    T_B_sensor = np.zeros((contact_mask.sum(), 4, 4))
-    T_B_sensor[:, :3, :3] = rotvec_to_rot(quat_to_rotvec(Q_ft[contact_mask]))       # (N,3,3) sensor rotation in {B}
-    T_B_sensor[:, :3,  3] = p_ft_B[contact_mask]
-    T_B_sensor[:,  3,  3] = 1.0
+    T_B_sensor = construct_T(p_ft_B, quat=Q_ft) # (N,4,4) sensor pose in {B}
 
-    rv_obj  = np.zeros((contact_mask.sum(), 3)); rv_obj[:, 1] = pitch_B[contact_mask]
-    T_B_obj = np.zeros((contact_mask.sum(), 4, 4))
-    T_B_obj[:, :3, :3] = rotvec_to_rot(rv_obj)                                    # (N,3,3) object rotation in {B}
-    T_B_obj[:, :3,  3] = p_pivot_B                                     # pivot = object frame origin in {B}
-    T_B_obj[:,  3,  3] = 1.0
+    rv_obj  = np.zeros((len(time_ft), 3))
+    rv_obj[:, 1] = pitch_B 
+    p_obj_B = np.tile(p_pivot_B, (len(time_ft), 1)) # Set object position to pivot for all samples
+    T_B_obj = construct_T(p_obj_B, rv=rv_obj) # (N,4,4) object pose in {B}
 
-    w_meas_S = np.hstack((f_meas_S[contact_mask], t_meas_S[contact_mask]))  # (N,6)
+    # ====================================================
+    w_meas_S = np.hstack((t_meas_S, f_meas_S))  # (N,6) IMPORTANT: [t, f] CONVENTION
+    # ====================================================
+
+    # And mask to contact samples only for estimation and plotting
+    contact_mask  = pitch_B < 0.0
+
+    T_B_sensor = T_B_sensor[contact_mask]
+    T_B_obj = T_B_obj[contact_mask]
+    w_meas_S = w_meas_S[contact_mask]
 
     ## HERE WE CAN REDEFINE THE r0 lever arm
     if obj == "box":
         # r0 = np.array([0.01, 0.0, 0.3]) # 0.026 old value, new is ~1.4 cm
-        COM_GT = np.array([0.05, 0.0, 0.15])
+        COM_GT = np.array([0.0, 0.0, 0.15])
         MASS_GT = 0.635
     elif obj == "heart":
         # r0 = np.array([0.01, 0.0, 0.2]) # 0.026
@@ -135,37 +147,22 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         COM_GT = np.array([0.055, 0.0, 0.15])
         MASS_GT = 2.05
 
-    # w_app_O = model_bkwd_wrench(w_meas_S, T_B_sensor, T_B_obj, r0)
-    w_app_O = W_app_arc(f_meas_S[contact_mask], pitch_B[contact_mask], r0)#[contact_mask]) # Input wrench already in same orientation as obj
+    pivot_axis_est = np.array([0.0, 1.0, 0.0])          # HARDCODE: force pure +Y for testing
 
-    # Estimate the true pivot axis from the torque vectors via PCA.
-    # Under a rigid rotation about axis n̂, all torques τ = r × f lie in the plane
-    # perpendicular to n̂ — so n̂ is the dominant direction of the torque cloud.
-    # SVD of the (N,3) torque matrix: first right-singular vector = axis of max variance.
-    tau_vecs = w_app_O[:, 3:6]                           # (N,3) torque vectors
-    tau_norms = np.linalg.norm(tau_vecs, axis=1)
-    tau_valid = tau_vecs[tau_norms > 0.01 * tau_norms.max()]  # drop near-zero samples
-    _, _, Vt = np.linalg.svd(tau_valid - tau_valid.mean(axis=0), full_matrices=False)
-    pivot_axis_est = Vt[-1]                                # (3,) dominant torque direction
-    if pivot_axis_est[1] < 0:
-        pivot_axis_est = -pivot_axis_est                  # keep consistent sign with +Y convention
-    pivot_axis_deg_from_Y = np.degrees(np.arccos(np.clip(np.dot(pivot_axis_est, [0,1,0]), -1, 1)))
-    print(f"[{obj}] estimated pivot axis = [{pivot_axis_est[0]:.4f}, {pivot_axis_est[1]:.4f}, {pivot_axis_est[2]:.4f}]  ({pivot_axis_deg_from_Y:.2f}° from +Y)")
+    w_app_O = model_bkwd_wrench(w_meas_S, T_B_sensor, T_B_obj) #, r0)
 
+    print(f"[{obj}] Percent of applied torque below zero (expect 100%): {(w_app_O[:, 4] < 0).mean() * 100:.1f}%")
 
     # 0.5 Hz LPF on applied wrench to suppress force-controller hunting for fitting
     pitch_contact  = pitch_B[contact_mask]
     N_c            = len(pitch_contact)
     w_app_O_smooth = _lpf_slow(w_app_O)
 
-    # Project every torque vector onto the estimated pivot axis to get the
-    # scalar torque driving the tipping motion. This replaces the naive τ_y
-    # (which assumes a perfect +Y axis) with a corrected τ_axis signal.
+    # Project torque onto pivot axis to get scalar torque driving tipping.
     tau_axis        = w_app_O[:, 3:6] @ pivot_axis_est           # (N,) raw projected torque
     tau_axis_smooth = _lpf_slow(tau_axis)                         # (N,) smoothed
 
-    tau_residual_rms = np.sqrt(np.mean(np.linalg.norm(
-        w_app_O[:, 3:6] - tau_axis[:, None] * pivot_axis_est, axis=1)**2))
+    tau_residual_rms = np.sqrt(np.mean(np.linalg.norm(w_app_O[:, 3:6] - tau_axis[:, None] * pivot_axis_est, axis=1)**2))
     print(f"[{obj}] τ_axis RMS={np.sqrt(np.mean(tau_axis**2)):.4f} N·m  "
           f"off-axis residual RMS={tau_residual_rms:.4f} N·m  "
           f"({100*tau_residual_rms/max(np.sqrt(np.mean(tau_axis**2)), 1e-9):.1f}% of signal)")
@@ -183,9 +180,9 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     time_contact_xp  = time_ft[contact_mask] - time_ft[contact_ft_idx]
     tau_axis_on_ft   = np.interp(time_ft_rel, time_contact_xp, tau_axis,        left=0.0, right=0.0)
     tau_axis_smooth_ft = np.interp(time_ft_rel, time_contact_xp, tau_axis_smooth, left=0.0, right=0.0)
-    plot_wrench_and_tipping(time_ft_rel, f_meas_W, 2*tau_axis_on_ft,
+    plot_wrench_and_tipping(time_ft_rel, f_meas_W, tau_axis_on_ft,
                             ax=axes_obj[0],
-                            pitch_rad=pitch_B[contact_ft_idx:], torque_label="(2x) τ_axis",
+                            pitch_rad=pitch_B[contact_ft_idx:], torque_label="τ_axis",
                             force_xyz_smooth=f_meas_W_smooth, torque_primary_smooth=tau_axis_smooth_ft,
                             contact_time=0.0, title=f"Raw F/T + tipping angle", show=False)
 
@@ -286,6 +283,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         ax=axes_obj[2],
         tau_pred_retract=tau_pred_retract if com_z_retract is not None else None,
         theta_star_retract_rad=theta_retract,
+        theta_star_gt_rad=np.arctan2(COM_GT[0], COM_GT[2]),
         push_sel=push_sel_plot,
         title=f"Torque fit result (full torque)",
         show=False,

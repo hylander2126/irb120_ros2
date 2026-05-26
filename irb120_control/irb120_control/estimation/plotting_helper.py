@@ -531,6 +531,7 @@ def plot_torque_fit_result(
     ax: Optional[plt.Axes] = None,
     tau_pred_retract: Optional[np.ndarray] = None,
     theta_star_retract_rad: Optional[float] = None,
+    theta_star_gt_rad: Optional[float] = None,
     push_sel: Optional[np.ndarray] = None,
     figsize: Tuple[float, float] = (10, 6),
     title: Optional[str] = None,
@@ -596,6 +597,10 @@ def plot_torque_fit_result(
         theta_star_retract_deg = np.rad2deg(theta_star_retract_rad)
         ax.axvline(x=theta_star_retract_deg, color="darkorange", linestyle="--", linewidth=2,
                    label=f"Est. $\\theta^*$ retract ({theta_star_retract_deg:.1f}°)")
+    if theta_star_gt_rad is not None:
+        theta_star_gt_deg = np.rad2deg(theta_star_gt_rad)
+        ax.axvline(x=theta_star_gt_deg, color="green", linestyle="--", linewidth=2,
+                   label=f"GT $\\theta^*$ ({theta_star_gt_deg:.1f}°)")
     ax.axhline(y=0, color="cyan", linestyle="-", alpha=0.8)
 
     ax.set_xlabel("Object angle (deg)", fontsize=14)
