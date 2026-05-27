@@ -239,8 +239,8 @@ def run(obj: str, workspace_root: str, n_steps: int):
     T_B_O[:, :3,  3] = p_pivot_B
     T_B_O[:,  3,  3] = 1.0
 
-    w_meas_S = np.hstack([f_meas_S[contact_mask], t_meas_S[contact_mask]])
-    w_app_O  = _lpf_slow(model_bkwd_wrench(w_meas_S, T_B_S, T_B_O, r_contact_O))
+    w_meas_S = np.hstack([t_meas_S[contact_mask], f_meas_S[contact_mask]])  # [tau, f] convention
+    w_app_O  = _lpf_slow(model_bkwd_wrench(w_meas_S, T_B_S, T_B_O))
 
     # pick n_steps evenly-spaced contact indices
     indices = np.linspace(0, N_c - 1, n_steps, dtype=int)
@@ -252,15 +252,16 @@ def run(obj: str, workspace_root: str, n_steps: int):
     axes = np.array(axes).ravel()
 
     # adaptive force scale: normalise so 1 N → ~3 cm on plot
-    f_max  = max(np.linalg.norm(w_app_O[:, :3], axis=1).max(), 1.0)
+    # [tau,f] convention: force is in indices [3:]
+    f_max  = max(np.linalg.norm(w_app_O[:, 3:], axis=1).max(), 1.0)
     f_scale = 0.12 / f_max   # metres per Newton
 
     for k, idx in enumerate(indices):
         ax = axes[k]
 
         pitch_k   = pitch_c[idx]
-        f_app_O_k = w_app_O[idx, :3]
-        tau_y_k   = w_app_O[idx, 4]
+        f_app_O_k = w_app_O[idx, 3:]   # [tau,f]: force in [3:]
+        tau_y_k   = w_app_O[idx, 1]    # [tau,f]: tau_y is index 1
 
         _draw_fbd(ax, pitch_k, p_pivot_B, r_contact_O,
                   f_app_O_k, tau_y_k, f_scale=f_scale,

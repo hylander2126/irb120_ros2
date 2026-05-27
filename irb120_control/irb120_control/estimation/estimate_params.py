@@ -5,11 +5,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.signal import butter, filtfilt
-from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, compute_applied_wrench, W_app_arc, construct_T
+from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, construct_T
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
-from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result
+from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 
-ALL_OBJECTS = ["box"]#, "heart", "flashlight", "monitor", "soda"]
+ALL_OBJECTS = ["box", "heart", "flashlight", "soda"] #, "monitor"]
 
 _LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
 _LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
@@ -35,104 +35,52 @@ def load_and_preprocess(filepath):
         if not all(k in data for k in keys) or len(data[keys[0]]) == 0:
             raise KeyError(f"Missing keys {keys} in {filepath}.")
 
-    # Three independently-sampled time axes: F/T @ 500 Hz, EE pose @ ~100 Hz, object detector @ ~2 Hz (unused)
-    time_ft  = data["ft_time_s"]
+    # EE pose is the sparsest stream (~100 Hz); use it as the common time grid.
+    # F/T raw (~500 Hz) is subsampled onto this grid via interpolation here so
+    # _run_estimation never has to manage multiple time axes.
+    time  = data["pose_time_s"]
     time_ft_raw = data["ft_raw_time_s"]
-    time_ee  = data["pose_time_s"]
-    time_obj = data["obj_time_s"] # Unused object detector time
+    time_obj = data["obj_time_s"]
 
-    f_meas_S = _lpf(np.column_stack([data["fx"], data["fy"], data["fz"]])) # F/T in world frame
-    t_meas_S = _lpf(np.column_stack([data["tx"], data["ty"], data["tz"]]))
+    p_ee_B = np.column_stack([data["x"], data["y"], data["z"]])
 
-    # BIASING HAPPENS ONCE ORIENTATION IS CALCULATED - The gravity changes wrt {S}
-    f_meas_raw = np.column_stack([data["fx_raw"], data["fy_raw"], data["fz_raw"]]) # F/T in {S} frame (unbiased)
-    t_meas_raw = np.column_stack([data["tx_raw"], data["ty_raw"], data["tz_raw"]])
+    f_raw_ft = np.column_stack([data["fx_raw"], data["fy_raw"], data["fz_raw"]])
+    t_raw_ft = np.column_stack([data["tx_raw"], data["ty_raw"], data["tz_raw"]])
+    p_ft_ft  = np.column_stack([data["ft_px"], data["ft_py"], data["ft_pz"]])
+    Q_ft_ft  = np.column_stack([data["ft_qx"], data["ft_qy"], data["ft_qz"], data["ft_qw"]])
+    Q_obj    = np.column_stack([data["obj_qx"], data["obj_qy"], data["obj_qz"], data["obj_qw"]])
 
-    p_ft_B   = np.column_stack([data["ft_px"], data["ft_py"], data["ft_pz"]])
-    Q_ft     = np.column_stack([data["ft_qx"], data["ft_qy"], data["ft_qz"], data["ft_qw"]])
-    p_ee_B   = np.column_stack([data["x"], data["y"], data["z"]])
-    p_obj_B  = np.column_stack([data["obj_x"], data["obj_y"], data["obj_z"]])
+    # Bias removal on the native F/T grid (needs Q_ft at full rate)
+    R_ft_B = rotvec_to_rot(quat_to_rotvec(Q_ft_ft))          # (N_ft, 3,3)
+    bias_f_B = R_ft_B[100] @ np.mean(f_raw_ft[50:250], axis=0)
+    bias_t_B = R_ft_B[100] @ np.mean(t_raw_ft[50:250], axis=0)
+    bias_f_S = np.einsum('nij,j->ni', R_ft_B.transpose(0, 2, 1), bias_f_B)
+    bias_t_S = np.einsum('nij,j->ni', R_ft_B.transpose(0, 2, 1), bias_t_B)
+    f_raw_ft -= bias_f_S
+    t_raw_ft -= bias_t_S
 
-    # Now we can bias the raw F/T using Q_ft
-    bias_f_S = np.mean(f_meas_raw[50:250], axis=0) # average of first 50 samples as bias
-    bias_t_S = np.mean(t_meas_raw[50:250], axis=0)
-    # per-sample rotations: R[n] maps {S} -> {B}
-    R_ft_B = rotvec_to_rot(quat_to_rotvec(Q_ft)) # (N,3,3) rotation - {S} in {B}
-    # base-frame bias (use rotation at bias samples)
-    R0 = R_ft_B[100] # rotation at sample 100 (middle of bias window)
-    bias_f_B = R0 @ bias_f_S # (N,3) bias in {B}
-    bias_t_B = R0 @ bias_t_S
-    # Now rotate base bias into each sample's sensor frame
-    bias_f_S_all = np.einsum('nij,j->ni', R_ft_B.transpose(0,2,1), bias_f_B) # (N,3) bias in {S}
-    bias_t_S_all = np.einsum('nij,j->ni', R_ft_B.transpose(0,2,1), bias_t_B) # (N,3) bias in {S}
-    f_meas_raw -= bias_f_S_all
-    t_meas_raw -= bias_t_S_all
+    # f_raw_ft = _lpf(f_raw_ft)
+    # t_raw_ft = _lpf(t_raw_ft)
 
-    # And finally apply filtering after biasing...
-    f_meas_raw = _lpf(f_meas_raw) 
-    t_meas_raw = _lpf(t_meas_raw)
+    # Subsample everything onto the EE time grid
+    def _interp_cols(t_src, arr, t_dst):
+        return np.column_stack([np.interp(t_dst, t_src, arr[:, i]) for i in range(arr.shape[1])])
 
-    # # If Q_ft idx don't align with time, append zeros
-    # if len(Q_ft) < len(time_ft):
-    #     n_missing = len(time_ft) - len(Q_ft)
-    #     Q_ft = np.vstack((Q_ft, np.zeros((n_missing, 4))))
-    #     p_ft_B = np.vstack((p_ft_B, np.zeros((n_missing, 3))))
-    # elif len(Q_ft) > len(time_ft):
-    #     Q_ft = Q_ft[:len(time_ft)]
-    #     p_ft_B = p_ft_B[:len(time_ft)]
+    f_meas_S = _interp_cols(time_ft_raw, f_raw_ft,  time)
+    t_meas_S = _interp_cols(time_ft_raw, t_raw_ft,  time)
+    p_ft_B   = _interp_cols(time_ft_raw, p_ft_ft,   time)
+    Q_ft     = _interp_cols(time_ft_raw, Q_ft_ft,   time)
+    Q_obj    = _interp_cols(time_obj,    Q_obj,     time)  # obj quat is on EE grid; interp to FT grid for bias removal check
 
-    return time_ft, f_meas_S, t_meas_S, time_ft_raw, f_meas_raw, t_meas_raw, p_ft_B, Q_ft, time_ee, p_ee_B, time_obj, p_obj_B
+    return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj
 
 
 def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
-    time_ft, f_meas_S, t_meas_S, time_ft_raw, f_meas_raw, t_meas_raw, p_ft_B, Q_ft, time_ee, p_ee_B, time_obj, p_obj_B = load_and_preprocess(squash_file)
-
-    # Temp change of variable name: Set raw data to "meas"...
-    time_ft = time_ft_raw
-    f_meas_S = f_meas_raw
-    t_meas_S = t_meas_raw
-
-    # Loop forward to find contact and find release by doing the opposite loop backwards.
-    contact_ft_idx = np.argmax(np.linalg.norm(f_meas_S, axis=1) > 0.5) # argmax on bool array: first idx of norm > 0.5 N
-    release_ft_idx = len(time_ft) - np.argmax(np.linalg.norm(f_meas_S[::-1], axis=1) > 0.5) # last idx of norm > 0.5 N
-    print(f"[{obj}] contact start: idx={contact_ft_idx} contact end: idx={release_ft_idx}")
-
-    # Pivot: near edge of object = pre-contact centroid x_min (closest to robot is approximate object frame)
-    # p_pivot_B = np.array([p_obj_B[time_obj <= time_contact_start, 0].min(), 0.0, 0.0])
-    p_pivot_B = np.array([0.6, 0, 0]) # Near-exact pivot from pre-defined object frame (I reset obj to known pose)
-
-    # Proprioceptive tipping angle from EE triangle in X-Z plane
-    contact_ee_idx = np.argmin(np.abs(time_ee - time_ft[contact_ft_idx])) # index of first EE (ball center) position after contact
-    r_t = p_ee_B                 - p_pivot_B
-    r0  = p_ee_B[contact_ee_idx] - p_pivot_B
-    print(f"[{obj}] p_pivot_B: {p_pivot_B}, p_ee_B[contact]: {np.round(p_ee_B[contact_ee_idx], 3)}, r0: {np.round(r0, 3)}")
-    # Angle of moving r_t wrt stationary r0 in the X-Z plane (positive CCW, +Y into the screen)
-    prop_angle = -(np.arctan2(r0[0]*r_t[:, 2] - r0[2]*r_t[:, 0], r0[0]*r_t[:, 0] + r0[2]*r_t[:, 2]))
-    pitch_B = np.interp(time_ft, time_ee, prop_angle) # Match the time of F/T data
-
-    # Build batched (N,4,4) homogeneous transforms for sensor and object frames
-    T_B_sensor = construct_T(p_ft_B, quat=Q_ft) # (N,4,4) sensor pose in {B}
-
-    rv_obj  = np.zeros((len(time_ft), 3))
-    rv_obj[:, 1] = pitch_B 
-    p_obj_B = np.tile(p_pivot_B, (len(time_ft), 1)) # Set object position to pivot for all samples
-    T_B_obj = construct_T(p_obj_B, rv=rv_obj) # (N,4,4) object pose in {B}
-
-    # ====================================================
-    w_meas_S = np.hstack((t_meas_S, f_meas_S))  # (N,6) IMPORTANT: [t, f] CONVENTION
-    # ====================================================
-
-    # And mask to contact samples only for estimation and plotting
-    contact_mask  = pitch_B < 0.0
-
-    T_B_sensor = T_B_sensor[contact_mask]
-    T_B_obj = T_B_obj[contact_mask]
-    w_meas_S = w_meas_S[contact_mask]
-
+    
     ## HERE WE CAN REDEFINE THE r0 lever arm
     if obj == "box":
         # r0 = np.array([0.01, 0.0, 0.3]) # 0.026 old value, new is ~1.4 cm
-        COM_GT = np.array([0.0, 0.0, 0.15])
+        COM_GT = np.array([0.05, 0.0, 0.15])
         MASS_GT = 0.635
     elif obj == "heart":
         # r0 = np.array([0.01, 0.0, 0.2]) # 0.026
@@ -147,148 +95,213 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         COM_GT = np.array([0.055, 0.0, 0.15])
         MASS_GT = 2.05
 
-    pivot_axis_est = np.array([0.0, 1.0, 0.0])          # HARDCODE: force pure +Y for testing
+    time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj = load_and_preprocess(squash_file)
 
-    w_app_O = model_bkwd_wrench(w_meas_S, T_B_sensor, T_B_obj) #, r0)
+    # f_meas_S[:, 1] = 0 # zero the z-force to see if results are better
+ 
+    p_pivot_B = np.array([0.6, 0, 0])# -0.021]) # 0.6 Near-exact pivot from pre-defined object frame (I reset obj to known pose)
 
-    print(f"[{obj}] Percent of applied torque below zero (expect 100%): {(w_app_O[:, 4] < 0).mean() * 100:.1f}%")
+    # Bootstrap: find EE reference pose using force spike (first physical touch)
+    in_contact = np.linalg.norm(f_meas_S, axis=1) > 0.5
+    if not np.any(in_contact):
+        print(f"[{obj}] No force contact detected — skipping.")
+        return
 
-    # 0.5 Hz LPF on applied wrench to suppress force-controller hunting for fitting
-    pitch_contact  = pitch_B[contact_mask]
-    N_c            = len(pitch_contact)
-    w_app_O_smooth = _lpf_slow(w_app_O)
+    contact_idx = np.argmax(in_contact)
+    r_t = p_ee_B - p_pivot_B
+    r0  = r_t[contact_idx]
+    print(f"[{obj}] p_pivot_B: {p_pivot_B}, p_ee_B[contact]: {np.round(p_ee_B[contact_idx], 3)}, r0: {np.round(r0, 3)}")
 
-    # Project torque onto pivot axis to get scalar torque driving tipping.
-    tau_axis        = w_app_O[:, 3:6] @ pivot_axis_est           # (N,) raw projected torque
-    tau_axis_smooth = _lpf_slow(tau_axis)                         # (N,) smoothed
+    def rotvec_between(a, b):
+        # rotation taking unit(a) -> unit(b), as a rotation vector (axis*angle)
+        # a: (3,) reference vector; b: (N,3) query vectors
+        a = np.atleast_2d(a) / np.linalg.norm(a)
+        b = b / np.linalg.norm(b, axis=-1, keepdims=True)
+        axis = np.cross(a, b)
+        s = np.linalg.norm(axis, axis=-1)
+        c = np.einsum('ni,ni->n', np.broadcast_to(a, b.shape), b)
+        ang = np.arctan2(s, c)
+        axis = axis / np.where(s[:, None] > 1e-9, s[:, None], 1.0)
+        return axis * ang[:, None]  # (N,3) rotation vector
 
-    tau_residual_rms = np.sqrt(np.mean(np.linalg.norm(w_app_O[:, 3:6] - tau_axis[:, None] * pivot_axis_est, axis=1)**2))
-    print(f"[{obj}] τ_axis RMS={np.sqrt(np.mean(tau_axis**2)):.4f} N·m  "
-          f"off-axis residual RMS={tau_residual_rms:.4f} N·m  "
-          f"({100*tau_residual_rms/max(np.sqrt(np.mean(tau_axis**2)), 1e-9):.1f}% of signal)")
+    rv_obj = rotvec_between(r0, r_t)  # (N, 3) object rotation vector in {B} on unified time grid
+    rv_obj[~in_contact] = 0.0         # Keep only the contact window; zero outside
+    
+    # Let's compare proprioceptive tipping angle vs the raw Q_obj on a plot:
+    R_obj_B = rotvec_to_rot(rv_obj).transpose(0, 2, 1)  # (N,3,3) object rotation in {B}
+    Q_obj_from_rv = np.empty_like(Q_obj)
+    for i in range(len(rv_obj)):
+        R_i = R_obj_B[i]
+        qw = 0.5 * np.sqrt(1 + R_i[0, 0] + R_i[1, 1] + R_i[2, 2])
+        qx = 0.25 * (R_i[2, 1] - R_i[1, 2]) / qw
+        qy = 0.25 * (R_i[0, 2] - R_i[2, 0]) / qw
+        qz = 0.25 * (R_i[1, 0] - R_i[0, 1]) / qw
+        Q_obj_from_rv[i] = [qx, qy, qz, qw]
 
-    # One figure per object: 3 subplots side-by-side
+    # Contact mask: within the force window and past the small-angle deadband.
+    # Y-component is negative when the object tips toward the robot.
+    contact_mask = in_contact & (rv_obj[:, 1] < -np.deg2rad(1.0))
+
+    # Build batched (N,4,4) homogeneous transforms for sensor and object frames
+    T_B_sensor = construct_T(p_ft_B, quat=Q_ft)
+    T_B_obj    = construct_T(np.tile(p_pivot_B, (len(time), 1)), rv=rv_obj)
+
+    print(f"[{obj}] \n\n T_sensor pos: {T_B_sensor[50, :3, 3]} \n T_obj pos: {T_B_obj[50, :3, 3]} \n\n")
+
+    w_meas_S = np.hstack((t_meas_S, f_meas_S))  # (N,6) [tau, f] convention (Modern Robotics)
+
+    w_app_O = model_bkwd_wrench(w_meas_S[contact_mask],
+                                T_B_sensor[contact_mask],
+                                T_B_obj[contact_mask])
+
+    print(f"[{obj}] Percent of applied torque_y below zero (expect 100%): {(w_app_O[:, 1] < 0).mean() * 100:.1f}%")  # tau_y is index 1
+
+    ## ======== One figure per object: 3 subplots side-by-side =========
     fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
     fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
 
-    # Raw F/T overview plot (post-contact only) with smoothed overlay
-    time_ft_rel     = time_ft[contact_ft_idx:] - time_ft[contact_ft_idx]
-    R_ft_all        = rotvec_to_rot(quat_to_rotvec(Q_ft[contact_ft_idx:]))
-    # f_meas_W        = np.einsum('nij,nj->ni', R_ft_all, f_meas_S[contact_ft_idx:])
-    f_meas_W = f_meas_S[contact_ft_idx:]
-    f_meas_W_smooth = _lpf_slow(f_meas_W)
-    time_contact_xp  = time_ft[contact_mask] - time_ft[contact_ft_idx]
-    tau_axis_on_ft   = np.interp(time_ft_rel, time_contact_xp, tau_axis,        left=0.0, right=0.0)
-    tau_axis_smooth_ft = np.interp(time_ft_rel, time_contact_xp, tau_axis_smooth, left=0.0, right=0.0)
-    plot_wrench_and_tipping(time_ft_rel, f_meas_W, tau_axis_on_ft,
-                            ax=axes_obj[0],
-                            pitch_rad=pitch_B[contact_ft_idx:], torque_label="τ_axis",
-                            force_xyz_smooth=f_meas_W_smooth, torque_primary_smooth=tau_axis_smooth_ft,
-                            contact_time=0.0, title=f"Raw F/T + tipping angle", show=False)
+    time_plot = time[contact_mask] - time[contact_mask][0]
 
-    # Calculated Applied Wrench overview plot
-    f_app_O_on_ft = np.zeros((len(time_ft_rel), 3))
-    f_app_O_smooth_ft = np.zeros((len(time_ft_rel), 3))
-    for i in range(3):
-        f_app_O_on_ft[:, i] = np.interp(time_ft_rel, time_contact_xp, w_app_O[:, i], left=0.0, right=0.0)
-        f_app_O_smooth_ft[:, i] = np.interp(time_ft_rel, time_contact_xp, w_app_O_smooth[:, i], left=0.0, right=0.0)
-
-    plot_wrench_and_tipping(time_ft_rel, f_app_O_on_ft, tau_axis_on_ft,
+    plot_raw_forces(time_plot, f_meas_S[contact_mask], ax=axes_obj[0], title="Measured Force (Sensor Frame)", show=False)
+    plot_wrench_and_tipping(time_plot, w_app_O[:, 3:], w_app_O[:, :3],
                             ax=axes_obj[1],
-                            pitch_rad=pitch_B[contact_ft_idx:], torque_label="τ_axis",
-                            force_xyz_smooth=f_app_O_smooth_ft, torque_primary_smooth=tau_axis_smooth_ft,
-                            contact_time=0.0, title=f"Applied Wrench (Object Frame) + tipping angle", show=False)
+                            pitch_rad=rv_obj[contact_mask, 1], torque_label="τ",
+                            contact_time=0.0, title=f"Applied Wrench (Object Frame)", show=False)
 
-    # Tipping phase selection: exclude 1.5° from start and peak (angles are negative)
-    tip_sel = (pitch_contact < -np.deg2rad(1.6)) & (pitch_contact > pitch_contact.min() + np.deg2rad(1.6))
-    print(f"[{obj}] pitch_contact: N={N_c}  min={np.rad2deg(pitch_contact.min()):.2f}°  max={np.rad2deg(pitch_contact.max()):.2f}°")
-    print(f"[{obj}] peak={np.rad2deg(pitch_contact.min()):.2f}°  lower_bound=-1.5°  upper_bound={np.rad2deg(pitch_contact.min() + np.deg2rad(1.5)):.2f}°  tip_sel={tip_sel.sum()}")
+    ## Trim to contact window and then separate tipping from retract phase
+    rv_contact    = rv_obj[contact_mask]           # (N_c, 3) full rotation vectors during contact
+    pitch_contact = rv_contact[:, 1]               # (N_c,)   y-axis pitch for phase/threshold logic (plot only)
+
+    tau = w_app_O[:, :3]        # (N,3) applied moment in {O}
+    u_tau = tau.mean(0) + 1e-6  # add small bias to avoid zero vector
+    u_tau /= np.linalg.norm(u_tau)
+    u_kin = rv_contact.mean(0)
+    u_kin /= np.linalg.norm(u_kin)
+    print(f"[{obj}] Average applied moment direction in object frame: {np.round(u_tau, 3)}")
+    print(f"[{obj}] Average kinematic rotation direction: {np.round(u_kin, 3)}")
+
+    # Tipping phase selection: exclude 1.6° from start and peak
+    pitch_max = pitch_contact.min()                # most-negative = largest tip
+    tip_sel = (pitch_contact < -np.deg2rad(1.6)) & (pitch_contact > pitch_max + np.deg2rad(1.6))
+    print(f"[{obj}] pitch_contact: N={len(pitch_contact)}  min={np.rad2deg(pitch_contact.min()):.2f}°  max={np.rad2deg(pitch_contact.max()):.2f}°")
+    peak_idx = np.argmin(pitch_contact)
+    rv_peak_avg = rv_contact[peak_idx-3:peak_idx+4].mean(axis=0)
+    print(f"[{obj}] peak tip rv 6idx avg @ idx={peak_idx} = {np.round(np.rad2deg(rv_peak_avg), 2)}")
+    
     if abs(tip_sel.sum()) < 10:
         print(f"[{obj}] Too few tipping samples — skipping fit.")
         return
 
-    # Split tip_sel into push / retract phases
-    peak_idx_in_contact = np.argmin(pitch_contact)           # index of most-negative pitch in contact array
-    push_phase    = np.arange(N_c) <= peak_idx_in_contact    # (N_c,) bool — up to and including the peak
+    # Split tip_sel into push / retract phases based on peak angle
+    push_phase      = np.arange(len(pitch_contact)) <= np.argmin(pitch_contact)
     push_tip_sel    = tip_sel & push_phase
     retract_tip_sel = tip_sel & ~push_phase
 
-    def _fit_phase(phase_sel, label, COM_GT, tau_y_override=None):
-        """Fit COM_z and mass from applied torque.
 
-        phase_sel: (N_c,) bool array selecting samples in the tipping phase to fit
-        label: string label for printing
-        COM_GT: ground truth center of mass
-        tau_y_override: if provided, use this (N,) array as the measured tau_y
-        instead of w_app_O_smooth[:, 4]. Useful for fitting against a single
-        force component's torque contribution (e.g. F_x only).
-        """
+    T_B_sensor_contact = T_B_sensor[contact_mask]
+    p_ee_contact = p_ee_B[contact_mask]
+    dump = np.column_stack([
+        np.rad2deg(rv_contact[tip_sel,1]),
+        w_app_O[tip_sel,3], w_app_O[tip_sel,4], w_app_O[tip_sel,5],   # f_O
+        w_app_O[tip_sel,0], w_app_O[tip_sel,1], w_app_O[tip_sel,2],   # tau_O
+        T_B_sensor_contact[tip_sel,0,3], T_B_sensor_contact[tip_sel,1,3], T_B_sensor_contact[tip_sel,2,3],   # ft pos in B
+        p_ee_contact[tip_sel,0], p_ee_contact[tip_sel,1], p_ee_contact[tip_sel,2],  # ee in B
+    ])
+    np.savetxt("lever_dump.csv", dump[::max(1,len(dump)//150)],
+            header="pitch_deg,fxO,fyO,fzO,txO,tyO,tzO,ftx,fty,ftz,eex,eey,eez",
+            delimiter=",", comments="")
+    
+
+    TIP_AXIS = u_kin #np.array([-0.75, 0.75, 0.0]) # u_kin
+    print(f"\n[{obj}] FORCING TIP AXIS TO: {TIP_AXIS}")
+    print(f"[{obj}] And testing p_pivot_B at: {p_pivot_B}\n")
+
+    def _fit_phase(phase_sel, label, COM_GT):
         if phase_sel.sum() < 10:
             print(f"[{obj}] Too few {label} samples ({phase_sel.sum()}) — skipping.")
             return None, None
-        p_ph    = pitch_contact[phase_sel]
-        rv_ph   = np.column_stack([np.zeros(phase_sel.sum()), p_ph, np.zeros(phase_sel.sum())]) # rotation vec for y
-        tau_y_meas = tau_y_override[phase_sel] if tau_y_override is not None else tau_axis_smooth[phase_sel]
-        com_z0 = mass0 = 0.1
+        rv_ph = rv_contact[phase_sel]  # (N,3) full rotation vectors for this phase
+
         def _residual(params):
-            w_grav, _ = model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, params[0]]), params[1], 0.0)
-            # project gravity torque onto estimated pivot axis for consistency
-            return (w_grav[:, 3:6] @ pivot_axis_est) + tau_y_meas
-        res = least_squares(_residual, x0=[com_z0, mass0],
+            w_grav = model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, params[0]]), params[1])
+                
+            tau_grav_axis = w_grav[:, :3] @ TIP_AXIS
+            tau_meas_axis = w_app_O[phase_sel, :3] @ TIP_AXIS
+
+            # return (w_grav[:, :3] - w_app_O[phase_sel, :3]).ravel()
+            return (tau_grav_axis - tau_meas_axis).ravel()
+        
+        res = least_squares(_residual, x0=[0.1, 0.1],
                             bounds=([1e-6, 1e-6], [np.inf, np.inf]), method='trf')
         com_z, mass = res.x
         print(f"  [{obj}] {label:>7s} fit — COM_z={com_z:.4f} m  Mass={mass:.4f} kg  θ*={np.degrees(np.arctan2(COM_GT[0], com_z)):.1f}°")
         return com_z, mass
-
 
     print(f"\n--- [{obj}] PHASE ESTIMATES (full torque) ---")
     com_z_push,    mass_push    = _fit_phase(push_tip_sel,    "push", COM_GT)
     com_z_retract, mass_retract = _fit_phase(retract_tip_sel, "retract", COM_GT)
     print(f"  [{obj}] Ground truth — COM_z={COM_GT[2]:.4f} m  Mass={MASS_GT:.4f} kg  θ*={np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
 
-
-
-    # Use push estimate for friction (more reliable — no friction hysteresis on approach)
-    # mass_est = mass_push if mass_push is not None else mass_retract
-    # push_log = os.path.join(base_dir, "push", "most_recent.npz")
-    # if os.path.exists(push_log) and mass_est is not None:
-    #     mu_est, mu_std = estimate_friction(push_log, mass_est)
-    #     print(f"  μ_table={mu_est:.4f} ± {mu_std:.4f}")
-    # else:
-    #     print(f"  No push log — skipping friction estimate.")
-
-    # # Build per-sample predictions over the full tip_sel window for plotting
-    pitch_fit = pitch_contact[tip_sel]
-    rv_fit    = np.column_stack([np.zeros(tip_sel.sum()), pitch_fit, np.zeros(tip_sel.sum())])
-    push_sel_plot = push_phase[tip_sel]   # push mask re-indexed to tip_sel
+    rv_fit        = rv_contact[tip_sel]        # (N,3) full rotation vectors for fit window
+    push_sel_plot = push_phase[tip_sel]
 
     tau_pred_push = np.zeros(tip_sel.sum())
     if com_z_push is not None:
-        w_grav_push, _ = model_fwd_wrench(rv_fit, np.array([COM_GT[0], 0.0, com_z_push]), mass_push, 0.0)
-        tau_pred_push = -(w_grav_push[:, 3:6] @ pivot_axis_est)
+        w_grav_push = model_fwd_wrench(rv_fit, np.array([COM_GT[0], 0.0, com_z_push]), mass_push)
+        tau_pred_push = w_grav_push[:, 1]
 
     tau_pred_retract = np.zeros(tip_sel.sum())
     if com_z_retract is not None:
-        w_grav_ret, _ = model_fwd_wrench(rv_fit, np.array([COM_GT[0], 0.0, com_z_retract]), mass_retract, 0.0)
-        tau_pred_retract = -(w_grav_ret[:, 3:6] @ pivot_axis_est)
+        w_grav_ret = model_fwd_wrench(rv_fit, np.array([COM_GT[0], 0.0, com_z_retract]), mass_retract)
+        tau_pred_retract = w_grav_ret[:, 1]
 
     theta_push    = np.arctan2(COM_GT[0], com_z_push)    if com_z_push    is not None else None
     theta_retract = np.arctan2(COM_GT[0], com_z_retract) if com_z_retract is not None else None
 
-    plot_torque_fit_result(
-        pitch_rad=pitch_fit,
-        tau_meas=tau_axis_smooth[tip_sel],
-        tau_pred_push=tau_pred_push,
-        theta_star_push_rad=theta_push if theta_push is not None else 0.0,
-        ax=axes_obj[2],
-        tau_pred_retract=tau_pred_retract if com_z_retract is not None else None,
-        theta_star_retract_rad=theta_retract,
-        theta_star_gt_rad=np.arctan2(COM_GT[0], COM_GT[2]),
-        push_sel=push_sel_plot,
-        title=f"Torque fit result (full torque)",
-        show=False,
-    )
+    # plot_torque_fit_result(
+    #     pitch_rad=-pitch_contact[tip_sel],  # sign-flip for plotting: positive = larger tip
+    #     tau_meas=w_app_O[tip_sel, 1],
+    #     tau_pred_push=tau_pred_push,
+    #     theta_star_push_rad=theta_push if theta_push is not None else 0.0,
+    #     ax=axes_obj[2],
+    #     tau_pred_retract=tau_pred_retract if com_z_retract is not None else None,
+    #     theta_star_retract_rad=theta_retract,
+    #     theta_star_gt_rad=np.arctan2(COM_GT[0], COM_GT[2]),
+    #     push_sel=push_sel_plot,
+    #     title=f"Torque fit result (full torque)",
+    #     show=False,
+    # )
 
+    # --- f_x zero-crossing extrapolation ---
+    # Fit a line to f_x vs pitch over the push phase, then find the angle where f_x = 0.
+    # That angle is an independent estimate of θ* (tipping point) without relying on the torque model.
+    pitch_push_deg = np.rad2deg(pitch_contact[push_tip_sel])
+    fx_push        = w_app_O[push_tip_sel, 3]  # f_x in object frame
+
+    fx_coeffs = np.polyfit(pitch_push_deg, fx_push, 1)  # linear fit: f_x = a*θ + b
+    theta_fx_zero_deg = -fx_coeffs[1] / fx_coeffs[0]   # zero crossing: θ = -b/a
+    print(f"  [{obj}] f_x zero-crossing — θ*={theta_fx_zero_deg:.2f}°  (GT={np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°)")
+
+    # Extrapolation range: span observed data plus padding toward zero crossing
+    theta_extrap = np.linspace(
+        min(pitch_push_deg.min(), theta_fx_zero_deg) - 1.0,
+        max(pitch_push_deg.max(), theta_fx_zero_deg) + 1.0,
+        200
+    )
+    fx_extrap = np.polyval(fx_coeffs, theta_extrap)
+
+    # Plot f_x data and extrapolated line
+    axes_obj[2].plot(np.rad2deg(pitch_contact[tip_sel]), w_app_O[tip_sel, 3], 'o', markersize=3, label="f_x (object frame)")
+    axes_obj[2].plot(theta_extrap, fx_extrap, '--', label=f"linear fit (push)")
+    axes_obj[2].axvline(theta_fx_zero_deg, color='red', linestyle=':', label=f"θ* = {theta_fx_zero_deg:.2f}°")
+    axes_obj[2].axvline(np.degrees(np.arctan2(COM_GT[0], COM_GT[2])), color='green', linestyle=':', label=f"θ* GT = {np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
+    axes_obj[2].axhline(0, color='k', linewidth=0.8)
+    axes_obj[2].set_xlabel("Pitch angle (degrees)")
+    axes_obj[2].set_ylabel("f_x in object frame (N)")
+    axes_obj[2].set_title("f_x zero-crossing → θ*")
+    axes_obj[2].legend()
+    axes_obj[2].grid(True)
+    
     fig_obj.tight_layout()
     fig_obj.savefig(os.path.join(base_dir, "estimation_summary.png"), dpi=150, bbox_inches="tight")
 

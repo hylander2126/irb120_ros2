@@ -1,18 +1,6 @@
 import numpy as np
 from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv, quat_to_rotvec
 
-def W_app_arc(
-        f_meas_S: np.ndarray, # (N,3) measured forces in sensor frame
-        pitch_contact: np.ndarray, # (N,) tipping angle in radians (rotation about Y)
-        p_finger_O: np.ndarray, # (N,3) finger position in object frame
-) -> np.ndarray:
-    N = len(pitch_contact)
-
-    f_app_O = -f_meas_S  # (N,3) force in sensor frame, negated for Newton's 3rd law
-    t_app_O = np.cross(p_finger_O, f_app_O)  # (N,3) torque about object origin
-    return np.hstack((f_app_O, t_app_O))
-
-
 def construct_T(p, quat=None, rv=None):
     """Construct homogeneous transformation matrix from position and quaternion."""
     if quat is not None:
@@ -27,101 +15,6 @@ def construct_T(p, quat=None, rv=None):
     T[:, 3, 3] = 1.0
     return T
 
-def compute_applied_wrench(
-    f_meas_S: np.ndarray,
-    Q_ft: np.ndarray,
-    pitch_contact: np.ndarray,
-    p_finger_O: np.ndarray,
-) -> np.ndarray:
-    """Compute applied wrench in object frame directly from logged quantities.
-
-    Skips 4x4 homogeneous matrix packing. Equivalent to model_bkwd_wrench.
-
-    Steps:
-      R_obj = Ry(pitch)                     object frame orientation in base
-      R_O_S = R_obj.T @ R_ft               sensor rotation expressed in object frame
-      f_app_O = -(R_O_S @ f_S)             Newton's 3rd law
-      tau_app_O = p_finger_O × f_app_O    torque about object origin (pivot)
-
-    Args:
-        f_meas_S:      (N,3) measured forces in sensor frame
-        Q_ft:          (N,4) ft_link quaternion [x,y,z,w] in base frame
-        pitch_contact: (N,) tipping angle in radians (rotation about Y)
-        p_finger_O:    (N,3) finger position in object frame (constant, no-slip)
-    """
-    N = len(pitch_contact)
-
-    R_obj = axisangle2rot(np.array([0, 1, 0]), pitch_contact)   # (N,3,3) R_B_O object rotation in {B} (robot/world)
-    R_ft  = rotvec_to_rot(quat_to_rotvec(Q_ft))                 # (N,3,3) R_B_S      ft rotation in {B}
-
-    # R_O_S = R_obj.T @ R_ft
-    R_O_S = np.einsum('nji,njk->nik', R_obj, R_ft)            # (N,3,3) {S} in {O}
-
-    f_app_O = -np.einsum('nij,nj->ni', R_O_S, f_meas_S)      # (N,3)
-    t_app_O = np.cross(p_finger_O, f_app_O)                  # (N,3)
-
-    return np.hstack((f_app_O, t_app_O))
-
-
-def compute_applied_wrench_surface(
-    f_meas_S: np.ndarray,
-    Q_ft: np.ndarray,
-    pitch_contact: np.ndarray,
-    p_finger_O: np.ndarray,
-) -> tuple:
-    """Compute applied wrench in object frame using contact surface geometry.
-
-    The EE maintains constant world orientation throughout squashing, so R_B_S
-    is time-varying only due to the fixed sensor mount offset — captured by Q_ft.
-    f_meas_S is first rotated to the world frame via Q_ft, then decomposed into
-    normal/tangential components at the (tilting) contact surface, then rotated
-    into the object frame.
-
-    Surface assumption: top-face normal is [0,0,1] in world at θ=0. As the
-    object tips by θ (Ry(θ)), the normal in world frame becomes:
-        n_B(θ) = [sin(θ), 0, cos(θ)]
-
-    Args:
-        f_meas_S:      (N,3) measured forces in sensor frame
-        Q_ft:          (N,4) sensor quaternion [x,y,z,w] in world/base frame
-        pitch_contact: (N,) tipping angle in radians (rotation about +Y)
-        p_finger_O:    (3,) contact point in object frame (constant, no-slip)
-
-    Returns:
-        w_app_O:   (N,6) applied wrench [fx,fy,fz,tx,ty,tz] in object frame
-        f_norm_O:  (N,3) normal component of applied force in object frame
-        f_tan_O:   (N,3) tangential component of applied force in object frame
-    """
-    N = len(pitch_contact)
-
-    # Rotate measured force from sensor frame into world frame using Q_ft
-    R_B_S = rotvec_to_rot(quat_to_rotvec(Q_ft))                # (N,3,3) R_B_S
-    f_meas_W = np.einsum('nij,nj->ni', R_B_S, f_meas_S)        # (N,3) force in world frame
-
-    # Surface normal in world frame as object tips: Ry(θ) @ [0,0,1]
-    n_B = np.column_stack([np.sin(pitch_contact),
-                           np.zeros(N),
-                           np.cos(pitch_contact)])              # (N,3)
-
-    # Decompose world-frame force into normal and tangential at the contact surface
-    f_dot_n  = np.einsum('ni,ni->n', f_meas_W, n_B)            # (N,) scalar projection onto normal
-    f_norm_B = np.einsum('n,ni->ni', f_dot_n, n_B)             # (N,3) normal component in world
-    f_tan_B  = f_meas_W - f_norm_B                             # (N,3) tangential component in world
-
-    # Rotate both components from world frame into object frame (R_O_B = R_B_O.T)
-    rv_contact = np.zeros((N, 3)); rv_contact[:, 1] = pitch_contact
-    R_obj = rotvec_to_rot(rv_contact)                           # (N,3,3) R_B_O
-    f_norm_O = np.einsum('nji,nj->ni', R_obj, f_norm_B)        # (N,3) normal in {O}
-    f_tan_O  = np.einsum('nji,nj->ni', R_obj, f_tan_B)         # (N,3) tangential in {O}
-
-    # Applied force on object = Newton's 3rd law
-    f_app_O = -(f_norm_O + f_tan_O)                            # (N,3)
-    t_app_O = np.cross(p_finger_O, f_app_O)                    # (N,3)
-
-    w_app_O = np.hstack((f_app_O, t_app_O))                    # (N,6)
-    return w_app_O, -f_norm_O, -f_tan_O                        # sign: forces ON the object
-
-
 def model_bkwd_wrench(
     w_meas_S: np.ndarray,
     T_B_sensor: np.ndarray,
@@ -133,30 +26,54 @@ def model_bkwd_wrench(
 
     {O}, {B}, {S} are object, world/base, and sensor frames respectively.
 
-    w_meas_S:   (N,6) measured wrenches in {S}  [fx fy fz tx ty tz]
+    w_meas_S:   (N,6) measured wrenches in {S} — [tau, f] convention (Modern Robotics:
+                moment first, force second) i.e. [tx ty tz fx fy fz]
     T_B_sensor: (N,4,4) sensor {S} poses in world frame {B}
     T_B_obj:    (N,4,4) object {O} poses in world frame {B}
 
-    Uses: w_O = Ad_{T_SO}^T w_S 
+    Returns: (N,6) applied wrench on object in {O}, [tau, f] convention [tx ty tz fx fy fz]
+             Newton's 3rd law: reaction on object = negative of sensor reading.
+
+    Uses: w_O = Ad_{T_SO}^T w_S  (Adjoint built for [tau, f] convention)
     """
-    # First get object pose in sensor frame (OOPS WAS REVERSED...fixed.) -> AdT
-    # T_O_S = TransInv(T_B_obj) @ T_B_sensor   # (N,4,4) sensor pose in object frame
-    T_S_O = TransInv(T_B_sensor) @ T_B_obj   # (N,4,4) object pose in sensor frame
-    AdT_S_O = Adjoint(T_S_O).reshape((-1, 6,6)).transpose(0,2,1)          # (N,6,6)
+    T_S_O = TransInv(T_B_sensor) @ T_B_obj          # (N,4,4) object pose in sensor frame
+    AdT_S_O = Adjoint(T_S_O).reshape((-1, 6, 6)).transpose(0, 2, 1)   # (N,6,6)
 
-    # w_meas_S_flipped = np.concatenate([w_meas_S[:, 3:], w_meas_S[:, :3]], axis=1) # flip for [t, f] M.R. convention (func is designed like this)
-
-    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S.reshape(-1,6))    # (N,6) wrench in {O}
-    # w_meas_O[:, :3] = -w_meas_O[:, :3]                    # Newton's 3rd law: force on object = -force on sensor
-    return -w_meas_O
-
-    # f_app_O  = -w_meas_O[:, :3]                               # Newton's 3rd law
-    # t_app_O  = np.cross(p_finger_O, f_app_O)                  # r × f about object origin
-    # w_app_O = np.hstack((f_app_O, t_app_O))                      # (N,6)
-    # return w_app_O
-
+    w_meas_O = np.einsum('nij,nj->ni', AdT_S_O, w_meas_S.reshape(-1, 6))   # (N,6) [tau,f] in {O}
+    return -w_meas_O                                                          # (N,6) [tau,f] applied on object
 
 def model_fwd_wrench(
+        rot_vecs_B: np.ndarray,
+        p_c_O: np.ndarray,
+        mass: float,
+):
+    """
+    Compute 'forward' gravity + ground reaction wrench in object frame {O}.
+
+    {O}, {B}, {S} are object, robot base/table/world, and sensor frames, respectively.
+
+    rot_vecs_B: (N,3) array of axis-angle rotation vectors (angle in radians)
+    p_c_O:      (N,3) position(s) of object CoM in object frame
+    mass:       scalar mass of the object
+    mu_table:   scalar friction coefficient of the table
+    w_O_app:    (N,6) applied wrench in {O} in [tau, f] convention [tx ty tz fx fy fz]
+
+    Returns: (w_O_grav, w_O_ground) where each is (N,6) in [tau, f] convention [tx ty tz fx fy fz]
+    """
+    rot_vecs_B = np.asarray(rot_vecs_B, dtype=float)
+    R_B = rotvec_to_rot(rot_vecs_B)  # (N,3,3) object rotation in world frame
+    R_B_T = R_B.transpose(0, 2, 1)  # (N,3b,3a) Transpose for inverse rotation (swaps correctly each 3x3 block)
+    g_B = np.array([0, 0, -9.81])  # gravity in world/robot/table frame
+
+    ## CONSTRUCT GRAVITY WRENCH IN OBJECT FRAME
+    f_B_grav = mass * g_B                           # (3,) gravity force in world/robot/table frame
+    f_O_grav = R_B_T @ f_B_grav                     # (N,3) gravity force in object frame
+    tau_O_grav = -np.cross(p_c_O, f_O_grav)          # (N,3) gravity torque in object frame about CoM
+    w_O_grav = np.hstack((tau_O_grav, f_O_grav))    # (N,6) gravity wrench [tau,f] in object frame
+    
+    return w_O_grav
+
+def model_fwd_wrench_OLD(
         rot_vecs_B: np.ndarray,
         p_c_O: np.ndarray,
         mass: float,
@@ -164,40 +81,36 @@ def model_fwd_wrench(
         w_O_app: np.ndarray = None
 ):
     """
-    Compute 'forward' gravity + ground reaction wrench [F; tau] IN OBJECT FRAME
+    Compute 'forward' gravity + ground reaction wrench in object frame {O}.
+
     {O}, {B}, {S} are object, robot base/table/world, and sensor frames, respectively.
 
-    rot_vecs: (N,3) array of axis-angle rotation vectors (angle in radians)
+    rot_vecs_B: (N,3) array of axis-angle rotation vectors (angle in radians)
+    p_c_O:      (N,3) position(s) of object CoM in object frame
+    mass:       scalar mass of the object
+    mu_table:   scalar friction coefficient of the table
+    w_O_app:    (N,6) applied wrench in {O} in [tau, f] convention [tx ty tz fx fy fz]
 
-    w_O_app: (N,6) array of applied wrenches in object frame (F_x, F_y, F_z, tau_x, tau_y, tau_z)
-
-    p_c_O: (N,3) position(s) of object CoM in object frame. N samples for liquid-filled containers.
-
-    mass: scalar mass of the object
-
-    mu_table: scalar friction coefficient of the table
-
-    Returns: (w_O_grav, w_O_ground) where each is a (N,6) array of wrenches in object frame.
+    Returns: (w_O_grav, w_O_ground) where each is (N,6) in [tau, f] convention [tx ty tz fx fy fz]
     """
     rot_vecs_B = np.asarray(rot_vecs_B, dtype=float)
     R_B = rotvec_to_rot(rot_vecs_B)  # (N,3,3) object rotation in world frame
     R_B_T = R_B.transpose(0, 2, 1)  # (N,3b,3a) Transpose for inverse rotation (swaps correctly each 3x3 block)
     g_B = np.array([0, 0, -9.81])  # gravity in world/robot/table frame
-    n_samples = rot_vecs_B.shape[0]
 
     if w_O_app is None:
-        f_O_app = np.zeros((n_samples, 3), dtype=float)
+        f_O_app = np.zeros((len(rot_vecs_B), 3), dtype=float)
     else:
         w_O_app = np.asarray(w_O_app, dtype=float)
         if w_O_app.ndim == 1 and w_O_app.shape[0] == 6:
             w_O_app = w_O_app.reshape(1, 6)
-        f_O_app = w_O_app[:, :3]
-        
+        f_O_app = w_O_app[:, 3:]                     # [tau,f] convention: force is in last 3 elements
+
     ## CONSTRUCT GRAVITY WRENCH IN OBJECT FRAME
     f_B_grav = mass * g_B                           # (3,) gravity force in world/robot/table frame
     f_O_grav = R_B_T @ f_B_grav                     # (N,3) gravity force in object frame
     tau_O_grav = np.cross(p_c_O, f_O_grav)          # (N,3) gravity torque in object frame about CoM
-    w_O_grav = np.hstack((f_O_grav, tau_O_grav))    # (N,6) gravity wrench in object frame
+    w_O_grav = np.hstack((tau_O_grav, f_O_grav))    # (N,6) gravity wrench [tau,f] in object frame
 
     ## CONSTRUCT GROUND REACTION WRENCH IN OBJECT FRAME
     # 1. Get table normal force in object frame from force balance along table normal.
@@ -221,8 +134,8 @@ def model_fwd_wrench(
     
     # 3. Finish construction; ground cannot apply torque to object (explicit force)
     f_O_ground = f_O_norm + f_O_fr                              # (N,3) total ground reaction force in object frame
-    t_O_ground = np.zeros_like(f_O_ground)                      # (N,3) ground reaction torque in object frame (assumed zero since ground cannot apply torque)
-    w_O_ground = np.hstack((f_O_ground, t_O_ground))            # (N,6) ground reaction wrench in object frame
+    t_O_ground = np.zeros_like(f_O_ground)                      # (N,3) ground reaction torque (zero: ground can't apply torque)
+    w_O_ground = np.hstack((t_O_ground, f_O_ground))            # (N,6) ground reaction wrench [tau,f] in object frame
 
     # print("\nGravity wrench in object frame:\n", w_grav_O)
     # print("Ground reaction wrench in object frame:\n", w_O_ground)

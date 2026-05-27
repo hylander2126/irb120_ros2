@@ -384,6 +384,114 @@ def plot_3vec_vs_angle(
 
     return fig, ax1
 
+def plot_raw_forces(
+    t: np.ndarray,
+    force_xyz: np.ndarray,
+    pitch_rad: Optional[np.ndarray] = None,
+    *,
+    ax: Optional[plt.Axes] = None,
+    force_labels: Sequence[str] = ("f_x", "f_y", "f_z"),
+    y_label: str = "Force (N)",
+    contact_time: float = 0.0,
+    figsize: Tuple[float, float] = (10, 6),
+    legend_fontsize: int = 13,
+    line_width: float = 4.0,
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    save_to_file: bool = False,
+    show: bool = True,
+):
+    """Plot raw force channels over time with optional object angle overlay.
+
+    Args:
+        t: Time axis of shape (N,).
+        force_xyz: Force channels of shape (N, 3).
+        pitch_rad: Optional tipping angle history in radians, shape (N,).
+        ax: If provided, draw into this existing Axes instead of creating a new figure.
+        force_labels: Legend labels for force x/y/z curves.
+        y_label: Left-axis y-label text.
+        contact_time: X-location (s) for the vertical contact marker.
+        figsize: Matplotlib figure size (ignored when ax is provided).
+        legend_fontsize: Combined legend font size.
+        line_width: Shared line width for plotted curves.
+        save_to_file: If True, save figure to disk using the title as filename.
+        show: If True, call plt.show() (ignored when ax is provided).
+        title: Optional title for the plot.
+
+    Returns:
+        fig, ax1, ax2 where ax2 is None if pitch_rad is not provided.
+    """
+    t = np.asarray(t)
+    force_xyz = np.asarray(force_xyz)
+
+    if t.ndim != 1:
+        raise ValueError(f"Expected t with shape (N,), got {t.shape}")
+    if force_xyz.shape != (t.size, 3):
+        raise ValueError(f"Expected force_xyz with shape ({t.size}, 3), got {force_xyz.shape}")
+    if len(force_labels) != 3:
+        raise ValueError("force_labels must contain exactly 3 entries")
+
+    if ax is not None:
+        ax1 = ax
+        fig = ax1.get_figure()
+        standalone = False
+    else:
+        fig, ax1 = plt.subplots(figsize=figsize)
+        standalone = True
+
+    ax1.plot(t, force_xyz[:, 0], color="tab:red", linewidth=line_width, label=force_labels[0])
+    ax1.plot(t, force_xyz[:, 1], color="tab:green", linewidth=line_width, label=force_labels[1])
+    ax1.plot(t, force_xyz[:, 2], color="tab:blue", linewidth=line_width, label=force_labels[2])
+    ax1.axvline(contact_time, color="k", linestyle="-", linewidth=2, label="first contact")
+    ax1.set_xlabel("Time from first contact (s)")
+    ax1.set_ylabel(y_label)
+    ax1.tick_params(axis="y")
+    _densify_ticks(ax1)
+    ax1.grid(True)
+
+    ax2 = None
+    if pitch_rad is not None:
+        pitch_rad = np.asarray(pitch_rad)
+        if pitch_rad.shape != (t.size,):
+            raise ValueError(f"Expected pitch_rad with shape ({t.size},), got {pitch_rad.shape}")
+
+        ax2 = ax1.twinx()
+        ax2.plot(
+            t,
+            np.rad2deg(pitch_rad),
+            color="black",
+            linewidth=line_width,
+            linestyle="-.",
+            label="pitch angle",
+        )
+        ax2.set_ylabel("Tipping angle (deg)", color="black")
+        ax2.tick_params(axis="y", labelcolor="black")
+        _densify_ticks(ax2)
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+            loc="best",
+            fontsize=legend_fontsize,
+        )
+        align_zeros([ax1, ax2])
+    else:
+        ax1.legend(loc="best", fontsize=legend_fontsize)
+
+    if title is not None:
+        ax1.set_title(title)
+
+    if standalone:
+        plt.tight_layout()
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        _save_figure_if_requested(fig, title, save_to_file)
+        if show:
+            plt.show()
+
+    return fig, ax1, ax2
 
 def plot_wrench_and_tipping(
     t: np.ndarray,
@@ -438,9 +546,10 @@ def plot_wrench_and_tipping(
         raise ValueError(f"Expected t with shape (N,), got {t.shape}")
     if force_xyz.shape != (t.size, 3):
         raise ValueError(f"Expected force_xyz with shape ({t.size}, 3), got {force_xyz.shape}")
-    if torque_primary.shape != (t.size,):
+    # torque_primary may be (N,) scalar or (N,3) full torque vector
+    if torque_primary.shape not in ((t.size,), (t.size, 3)):
         raise ValueError(
-            f"Expected torque_primary with shape ({t.size},), got {torque_primary.shape}"
+            f"Expected torque_primary with shape ({t.size},) or ({t.size},3), got {torque_primary.shape}"
         )
     if len(force_labels) != 3:
         raise ValueError("force_labels must contain exactly 3 entries")
@@ -454,11 +563,19 @@ def plot_wrench_and_tipping(
         standalone = True
 
     # Raw data — faint so smoothed overlay stands out
-    raw_alpha = 1.0 #0.35 if (force_xyz_smooth is not None or torque_primary_smooth is not None) else 1.0
+    raw_alpha = 1.0
     ax1.plot(t, force_xyz[:, 0], color="tab:red",    linewidth=line_width, alpha=raw_alpha, label=force_labels[0])
     ax1.plot(t, force_xyz[:, 1], color="tab:green",  linewidth=line_width, alpha=raw_alpha, label=force_labels[1])
     ax1.plot(t, force_xyz[:, 2], color="tab:blue",   linewidth=line_width, alpha=raw_alpha, label=force_labels[2])
-    ax1.plot(t, torque_primary,  color="tab:orange", linewidth=line_width, alpha=raw_alpha, label=torque_label)
+    if torque_primary.ndim == 2:
+        # Full (N,3) torque — plot each component with dashed style
+        tau_colors  = ("tab:red", "tab:green", "tab:blue")
+        tau_labels  = (f"{torque_label}_x", f"{torque_label}_y", f"{torque_label}_z")
+        for i in range(3):
+            ax1.plot(t, torque_primary[:, i], color=tau_colors[i], linewidth=line_width,
+                     alpha=raw_alpha, linestyle="--", label=tau_labels[i])
+    else:
+        ax1.plot(t, torque_primary, color="tab:orange", linewidth=line_width, alpha=raw_alpha, label=torque_label)
 
     # Smoothed overlays in gray
     if force_xyz_smooth is not None:
@@ -467,7 +584,15 @@ def plot_wrench_and_tipping(
         ax1.plot(t, force_xyz_smooth[:, 1], color="gray", alpha=1, linewidth=line_width * 0.4, linestyle="-.",  label=f"{force_labels[1]} (smooth)")
         ax1.plot(t, force_xyz_smooth[:, 2], color="gray", alpha=1, linewidth=line_width * 0.4, linestyle=":",   label=f"{force_labels[2]} (smooth)")
     if torque_primary_smooth is not None:
-        ax1.plot(t, np.asarray(torque_primary_smooth), color="dimgray", alpha=1, linewidth=line_width * 0.4, linestyle="-", label=f"{torque_label} (smooth)")
+        torque_primary_smooth = np.asarray(torque_primary_smooth)
+        if torque_primary_smooth.ndim == 2:
+            tau_colors = ("tab:red", "tab:green", "tab:blue")
+            tau_labels = (f"{torque_label}_x", f"{torque_label}_y", f"{torque_label}_z")
+            for i in range(3):
+                ax1.plot(t, torque_primary_smooth[:, i], color=tau_colors[i], alpha=0.5,
+                         linewidth=line_width * 0.4, linestyle=":", label=f"{tau_labels[i]} (smooth)")
+        else:
+            ax1.plot(t, torque_primary_smooth, color="dimgray", alpha=1, linewidth=line_width * 0.4, linestyle="-", label=f"{torque_label} (smooth)")
 
     ax1.axvline(contact_time, color="k", linestyle="-", linewidth=2, label="first contact")
     ax1.set_xlabel("Time from first contact (s)")

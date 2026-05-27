@@ -38,30 +38,34 @@
     configure_via_rws="${configure_via_rws}"/>
 
   <!-- ====== Params to tweak ====== -->
-  <xacro:property name="ft_mass" value="0.255"/>          <!-- kg (sensor) (from spec sheet) -->
-  <xacro:property name="ft_cog_z" value="0.063"/>         <!-- meters in tool frame (from spec sheet)-->
-  <xacro:property name="ft_length" value="0.08225"/>         <!-- FT sensor length -->
-  <xacro:property name="finger_mass" value="0.066"/>      <!-- kg (finger) (from onshape) -->
-  <xacro:property name="finger_length" value="0.100"/>   <!-- finger length (from onshape)-->
+  <xacro:property name="ft_mass" value="0.255"/>               <!-- kg (sensor) (from spec sheet) -->
+  <xacro:property name="ft_cog" value="0.063"/>              <!-- meters in tool frame (from spec sheet)-->
+  <xacro:property name="ft_length" value="0.08225"/>           <!-- FT sensor length (measured) -->
+  <xacro:property name="finger_mass" value="0.066"/>           <!-- kg (measured finger+ball+screws) -->
+  <xacro:property name="finger_cog" value="0.0275"/>         <!-- meters in finger frame (measured) -->
+  <xacro:property name="finger_length" value="0.100"/>         <!-- finger length (measured)-->
+  <xacro:property name="finger_ball_radius" value="0.01312"/>  <!-- Ball radius (measured 26.25 mm diameter)-->
+  <xacro:property name="finger_contact" value="0.0875"/>     <!-- finger contact length (measured ball center from base)-->
   <xacro:property name="finger_mesh" value="package://irb120_control/urdf/pusher_link.stl"/>
   <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
+  <!-- Total offset from link_6 to contact point will be ft_length + finger_contact -->
 
-  <xacro:property name="table_thickness" value="0.044"/>
+  <xacro:property name="table_thickness" value="0.044"/> <!-- Visual feature -->
   <xacro:property name="bracket_thickness" value="0.021"/>
-  <xacro:property name="table_center_x" value="0.40"/>
+  <xacro:property name="table_center_x" value="0.40"/> <!-- Mostly visual, maybe for workspace bounds -->
   <xacro:property name="table_center_y" value="0.0"/>
 
   <!-- FT sensor internal-frame mapping relative to link_6 (requested):
        x_link6 ~ z_ft, y_link6 ~ -x_ft, z_link6 ~ -y_ft (right-hand completion).
        Then we apply the inverse on ft_to_finger so finger stays in link_6/world-like
        orientation at home for task reasoning. -->
-  <xacro:property name="ft_mount_roll" value="-1.5708"/>
+  <!-- <xacro:property name="ft_mount_roll" value="-1.5708"/>
   <xacro:property name="ft_mount_pitch" value="0.0"/>
-  <xacro:property name="ft_mount_yaw" value="-1.5708"/>
+  <xacro:property name="ft_mount_yaw" value="-1.5708"/> -->
 
-  <xacro:property name="finger_unwind_roll" value="0.0"/>
+  <!-- <xacro:property name="finger_unwind_roll" value="0.0"/>
   <xacro:property name="finger_unwind_pitch" value="-1.5708"/>
-  <xacro:property name="finger_unwind_yaw" value="1.5708"/>
+  <xacro:property name="finger_unwind_yaw" value="1.5708"/> -->
 
   <!-- world: base_link is at x=y=0; table top surface is z=0 -->
   <link name="world"/>
@@ -78,7 +82,7 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/>
+      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/> <!-- At the center, bottom of table-->
       <geometry>
         <box size="2.0 0.8 ${table_thickness}"/>
       </geometry>
@@ -108,12 +112,12 @@
   <!-- ====== FT sensor link mounted to link_6 ====== -->
   <link name="ft_link">
     <inertial>
-      <origin xyz="0 0 ${ft_cog_z}" rpy="0 0 0"/>
+      <origin xyz="${ft_cog} 0 0" rpy="0 1.5708 0"/>
       <mass value="${ft_mass}"/>
       <inertia ixx="5e-4" iyy="5e-4" izz="5e-4" ixy="0" ixz="0" iyz="0"/>
     </inertial>
     <visual>
-      <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
+      <origin xyz="${ft_length / 2} 0 0" rpy="0 1.5708 0"/>
       <geometry>
         <cylinder radius="0.025" length="${ft_length}"/>
       </geometry>
@@ -122,9 +126,9 @@
       </material>
     </visual>
     <collision>
-        <origin xyz="0 0 ${ft_length / 2}" rpy="0 0 0"/>
+        <origin xyz="${ft_length / 2} 0 0" rpy="0 1.5708 0"/>
         <geometry>
-            <cylinder radius="0.025" length="${ft_length / 2.5}"/> <!-- collision smaller to not interfere with finger (they never collide) -->
+            <cylinder radius="0.025" length="${ft_length / 2.5}"/> <!-- smaller to avoid finger interference (no collision anyways) -->
         </geometry>
     </collision>
   </link>
@@ -132,9 +136,9 @@
   <!-- ====== Finger link ====== -->
   <link name="finger_link">
     <inertial>
-        <origin xyz="0 0 0.026" rpy="0 1.5708 0"/>   <!-- adjust CoG -->
-        <mass value="${finger_mass}"/>                   <!-- kg -->
-        <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/> <!-- kg mm^2-->
+        <origin xyz="${finger_cog} 0 0" rpy="0 1.5708 0"/>   <!-- Rotate for correct attachment and orientation -->
+        <mass value="${finger_mass}"/>
+        <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/>
     </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 1.5708 0"/>
@@ -160,7 +164,7 @@
     <parent link="tool0"/>
     <origin
       xyz="0 0 0"
-      rpy="${ft_mount_roll} ${ft_mount_pitch} ${ft_mount_yaw}"/>
+      rpy="0 0 0"/> <!-- Now we re-orient the FT sensor internally (net ft settings configuration)-->
     <child link="ft_link"/>
   </joint>
 
@@ -168,19 +172,20 @@
   <joint name="ft_to_finger" type="fixed">
     <parent link="ft_link"/>
     <origin
-      xyz="0 0 ${ft_length}"
-      rpy="${finger_unwind_roll} ${finger_unwind_pitch} ${finger_unwind_yaw}"/>
+      xyz="${ft_length} 0 0"
+      rpy="0 0 0"/>
     <child link="finger_link"/>
   </joint>
 
-  <!-- finger_ball_center at the very end of the finger for EE position (like mujoco 'site') -->
+  <!-- finger_ball_center at contact point for EE position (like mujoco 'site') -->
   <link name="finger_ball_center"/>
-  <joint name="finger_to_tip" type="fixed">
+  <joint name="finger_to_ball_center" type="fixed">
     <parent link="finger_link"/>
-    <origin xyz="${finger_length} 0 0" rpy="0 0 0"/>
+    <origin xyz="${finger_contact} 0 0" rpy="0 0 0"/>
     <child link="finger_ball_center"/>
   </joint>
 
+  <!-- World and table should coincide, at the top table surface -->
   <joint name="world_to_table" type="fixed">
     <parent link="world"/>
     <origin xyz="${table_center_x} ${table_center_y} 0" rpy="0 0 0"/>

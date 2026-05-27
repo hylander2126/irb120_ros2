@@ -147,7 +147,7 @@ def generate_launch_description():
         "netft_node",
     )
     net_ft_node = ExecuteProcess(
-        cmd=[netft_node_exe, "--address", "192.168.126.125"],
+        cmd=[netft_node_exe, "--address", "192.168.126.125", "--frame_id", "ft_link"],
         output="screen",
     )
 
