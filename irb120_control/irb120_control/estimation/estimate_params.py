@@ -9,7 +9,13 @@ from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkw
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 
-ALL_OBJECTS = ["box", "heart", "flashlight", "soda"] #, "monitor"]
+ALL_OBJECTS = ["box"]#, "heart", "flashlight", "soda"] #, "monitor"]
+
+STATE_SQUASH = 1
+STATE_LULL = 2
+STATE_ARC = 3
+STATE_UNARC = 4
+STATE_RETRACT = 5
 
 _LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
 _LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
@@ -26,53 +32,56 @@ def _lpf_slow(x, axis=0):
 def load_and_preprocess(filepath):
     data = np.load(filepath)
 
-    for keys in [
-        ("ft_px", "ft_py", "ft_pz", "ft_qx", "ft_qy", "ft_qz", "ft_qw"),
-        ("pose_time_s", "x", "y", "z"),
-        ("obj_time_s", "obj_x", "obj_y", "obj_z", "obj_qx", "obj_qy", "obj_qz", "obj_qw"),
-        ("ft_raw_time_s", "fx_raw", "fy_raw", "fz_raw", "tx_raw", "ty_raw", "tz_raw")
-    ]:
-        if not all(k in data for k in keys) or len(data[keys[0]]) == 0:
+    def _require(keys):
+        if not all(k in data for k in keys) or any(len(data[k]) == 0 for k in keys):
             raise KeyError(f"Missing keys {keys} in {filepath}.")
 
+    required_keys = (
+        "pose_time_s", "x", "y", "z", "qx", "qy", "qz", "qw",
+        "controller_state_id",
+        "obj_time_s", "obj_x", "obj_y", "obj_z", "obj_qx", "obj_qy", "obj_qz", "obj_qw",
+        "ft_time_s", "fx", "fy", "fz", "tx", "ty", "tz",
+        "ft_px", "ft_py", "ft_pz", "ft_qx", "ft_qy", "ft_qz", "ft_qw",
+    )
+    _require(required_keys)
+
     # EE pose is the sparsest stream (~100 Hz); use it as the common time grid.
-    # F/T raw (~500 Hz) is subsampled onto this grid via interpolation here so
+    # F/T is subsampled onto this grid via interpolation here so
     # _run_estimation never has to manage multiple time axes.
     time  = data["pose_time_s"]
-    time_ft_raw = data["ft_raw_time_s"]
     time_obj = data["obj_time_s"]
+    state_id = data["controller_state_id"].astype(int)
+    if len(state_id) != len(time):
+        raise ValueError(
+            f"controller_state_id length ({len(state_id)}) does not match pose_time_s length ({len(time)}) in {filepath}."
+        )
 
     p_ee_B = np.column_stack([data["x"], data["y"], data["z"]])
-
-    f_raw_ft = np.column_stack([data["fx_raw"], data["fy_raw"], data["fz_raw"]])
-    t_raw_ft = np.column_stack([data["tx_raw"], data["ty_raw"], data["tz_raw"]])
-    p_ft_ft  = np.column_stack([data["ft_px"], data["ft_py"], data["ft_pz"]])
-    Q_ft_ft  = np.column_stack([data["ft_qx"], data["ft_qy"], data["ft_qz"], data["ft_qw"]])
     Q_obj    = np.column_stack([data["obj_qx"], data["obj_qy"], data["obj_qz"], data["obj_qw"]])
-
-    # Bias removal on the native F/T grid (needs Q_ft at full rate)
-    R_ft_B = rotvec_to_rot(quat_to_rotvec(Q_ft_ft))          # (N_ft, 3,3)
-    bias_f_B = R_ft_B[100] @ np.mean(f_raw_ft[50:250], axis=0)
-    bias_t_B = R_ft_B[100] @ np.mean(t_raw_ft[50:250], axis=0)
-    bias_f_S = np.einsum('nij,j->ni', R_ft_B.transpose(0, 2, 1), bias_f_B)
-    bias_t_S = np.einsum('nij,j->ni', R_ft_B.transpose(0, 2, 1), bias_t_B)
-    f_raw_ft -= bias_f_S
-    t_raw_ft -= bias_t_S
-
-    # f_raw_ft = _lpf(f_raw_ft)
-    # t_raw_ft = _lpf(t_raw_ft)
 
     # Subsample everything onto the EE time grid
     def _interp_cols(t_src, arr, t_dst):
         return np.column_stack([np.interp(t_dst, t_src, arr[:, i]) for i in range(arr.shape[1])])
 
-    f_meas_S = _interp_cols(time_ft_raw, f_raw_ft,  time)
-    t_meas_S = _interp_cols(time_ft_raw, t_raw_ft,  time)
-    p_ft_B   = _interp_cols(time_ft_raw, p_ft_ft,   time)
-    Q_ft     = _interp_cols(time_ft_raw, Q_ft_ft,   time)
-    Q_obj    = _interp_cols(time_obj,    Q_obj,     time)  # obj quat is on EE grid; interp to FT grid for bias removal check
+    time_ft = data["ft_time_s"]
+    ft_aligned_keys = ("fx", "fy", "fz", "tx", "ty", "tz", "ft_px", "ft_py", "ft_pz", "ft_qx", "ft_qy", "ft_qz", "ft_qw")
+    bad_lengths = {k: len(data[k]) for k in ft_aligned_keys if len(data[k]) != len(time_ft)}
+    if bad_lengths:
+        raise ValueError(f"F/T-aligned key lengths do not match ft_time_s ({len(time_ft)}) in {filepath}: {bad_lengths}")
 
-    return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj
+    f_ft = np.column_stack([data["fx"], data["fy"], data["fz"]])
+    t_ft = np.column_stack([data["tx"], data["ty"], data["tz"]])
+    p_ft_ft = np.column_stack([data["ft_px"], data["ft_py"], data["ft_pz"]])
+    Q_ft_ft = np.column_stack([data["ft_qx"], data["ft_qy"], data["ft_qz"], data["ft_qw"]])
+
+    f_meas_S = _interp_cols(time_ft, f_ft, time)
+    t_meas_S = _interp_cols(time_ft, t_ft, time)
+    p_ft_B = _interp_cols(time_ft, p_ft_ft, time)
+    Q_ft = _interp_cols(time_ft, Q_ft_ft, time)
+
+    Q_obj = _interp_cols(time_obj, Q_obj, time)
+
+    return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id
 
 
 def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
@@ -95,14 +104,15 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         COM_GT = np.array([0.055, 0.0, 0.15])
         MASS_GT = 2.05
 
-    time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj = load_and_preprocess(squash_file)
+    time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id = load_and_preprocess(squash_file)
 
     # f_meas_S[:, 1] = 0 # zero the z-force to see if results are better
  
-    p_pivot_B = np.array([0.6, 0, 0])# -0.021]) # 0.6 Near-exact pivot from pre-defined object frame (I reset obj to known pose)
+    p_pivot_B = np.array([0.605, 0, 0])# -0.021]) # 0.6 Near-exact pivot from pre-defined object frame (I reset obj to known pose)
 
-    # Bootstrap: find EE reference pose using force spike (first physical touch)
-    in_contact = np.linalg.norm(f_meas_S, axis=1) > 0.5
+    # Bootstrap from controller state timing rather than inferring contact/release.
+    in_contact = np.isin(state_id, [STATE_LULL, STATE_ARC, STATE_UNARC, STATE_RETRACT])
+    print(f"[{obj}] Using controller_state_id for contact/phase segmentation.")
     if not np.any(in_contact):
         print(f"[{obj}] No force contact detected — skipping.")
         return
@@ -140,7 +150,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
 
     # Contact mask: within the force window and past the small-angle deadband.
     # Y-component is negative when the object tips toward the robot.
-    contact_mask = in_contact & (rv_obj[:, 1] < -np.deg2rad(1.0))
+    contact_mask = np.isin(state_id, [STATE_ARC, STATE_UNARC]) & (rv_obj[:, 1] < -np.deg2rad(1.0))
 
     # Build batched (N,4,4) homogeneous transforms for sensor and object frames
     T_B_sensor = construct_T(p_ft_B, quat=Q_ft)
@@ -171,6 +181,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     ## Trim to contact window and then separate tipping from retract phase
     rv_contact    = rv_obj[contact_mask]           # (N_c, 3) full rotation vectors during contact
     pitch_contact = rv_contact[:, 1]               # (N_c,)   y-axis pitch for phase/threshold logic (plot only)
+    state_contact = state_id[contact_mask]
 
     tau = w_app_O[:, :3]        # (N,3) applied moment in {O}
     u_tau = tau.mean(0) + 1e-6  # add small bias to avoid zero vector
@@ -192,10 +203,11 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         print(f"[{obj}] Too few tipping samples — skipping fit.")
         return
 
-    # Split tip_sel into push / retract phases based on peak angle
-    push_phase      = np.arange(len(pitch_contact)) <= np.argmin(pitch_contact)
+    # Split tip_sel into push / retract phases using controller state labels.
+    push_phase = state_contact == STATE_ARC
+    retract_phase = state_contact == STATE_UNARC
     push_tip_sel    = tip_sel & push_phase
-    retract_tip_sel = tip_sel & ~push_phase
+    retract_tip_sel = tip_sel & retract_phase
 
 
     T_B_sensor_contact = T_B_sensor[contact_mask]

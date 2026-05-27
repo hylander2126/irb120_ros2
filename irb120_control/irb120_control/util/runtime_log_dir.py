@@ -104,9 +104,10 @@ def save_ft_pose_log(
     """Save collected F/T, EE pose, and optional object pose buffers to a timestamped .npz file.
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
 
-    ft_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz] rows — bias-corrected transformed wrench.
+    ft_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz] rows — bias-corrected transformed wrench;
+            optional columns 7-13 are ft_link pose [px, py, pz, qx, qy, qz, qw].
     pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (EE pose);
-              optional columns 8 and 9 are arc_angle_rad and wrist_pitch_rad.
+              optional columns 8, 9, and 10 are arc_angle_rad, wrist_pitch_rad, and controller_state_id.
     obj_pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (object pose from detector);
                   optional column 8 is obj_pitch_rad.
     ft_raw_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw] rows.
@@ -121,6 +122,7 @@ def save_ft_pose_log(
     pose_arr = np.array(pose_log, dtype=np.float64) if pose_log else np.empty((0, 8), dtype=np.float64)
     obj_arr = np.array(obj_pose_log, dtype=np.float64) if obj_pose_log else np.empty((0, 8), dtype=np.float64)
     raw_arr = np.array(ft_raw_log, dtype=np.float64) if ft_raw_log else np.empty((0, 14), dtype=np.float64)
+    ft_pose_arr = ft_arr if ft_arr.size and ft_arr.shape[1] > 13 else raw_arr
 
     log_dir = runtime_log_dir(subdir)
     npz_path = log_dir / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz"
@@ -144,6 +146,8 @@ def save_ft_pose_log(
         qw=pose_arr[:, 7] if pose_arr.size else np.array([]),
         arc_angle_rad=pose_arr[:, 8] if pose_arr.size and pose_arr.shape[1] > 8 else np.array([]),
         wrist_pitch_rad=pose_arr[:, 9] if pose_arr.size and pose_arr.shape[1] > 9 else np.array([]),
+        controller_state_id=pose_arr[:, 10] if pose_arr.size and pose_arr.shape[1] > 10 else np.array([]),
+        controller_state_names=np.array(["UNKNOWN", "SQUASH", "LULL", "ARC", "UNARC", "RETRACT"]),
         # Object pose columns (from detector)
         obj_time_s=obj_arr[:, 0] if obj_arr.size else np.array([]),
         obj_x=obj_arr[:, 1] if obj_arr.size else np.array([]),
@@ -154,7 +158,7 @@ def save_ft_pose_log(
         obj_qz=obj_arr[:, 6] if obj_arr.size else np.array([]),
         obj_qw=obj_arr[:, 7] if obj_arr.size else np.array([]),
         obj_pitch_rad=obj_arr[:, 8] if obj_arr.size and obj_arr.shape[1] > 8 else np.array([]),
-        # Raw sensor frame F/T + ft_link pose in base frame
+        # Legacy raw sensor frame F/T
         ft_raw_time_s=raw_arr[:, 0]  if raw_arr.size else np.array([]),
         fx_raw=raw_arr[:, 1]         if raw_arr.size else np.array([]),
         fy_raw=raw_arr[:, 2]         if raw_arr.size else np.array([]),
@@ -162,13 +166,15 @@ def save_ft_pose_log(
         tx_raw=raw_arr[:, 4]         if raw_arr.size else np.array([]),
         ty_raw=raw_arr[:, 5]         if raw_arr.size else np.array([]),
         tz_raw=raw_arr[:, 6]         if raw_arr.size else np.array([]),
-        ft_px=raw_arr[:, 7]          if raw_arr.size else np.array([]),
-        ft_py=raw_arr[:, 8]          if raw_arr.size else np.array([]),
-        ft_pz=raw_arr[:, 9]          if raw_arr.size else np.array([]),
-        ft_qx=raw_arr[:, 10]         if raw_arr.size else np.array([]),
-        ft_qy=raw_arr[:, 11]         if raw_arr.size else np.array([]),
-        ft_qz=raw_arr[:, 12]         if raw_arr.size else np.array([]),
-        ft_qw=raw_arr[:, 13]         if raw_arr.size else np.array([]),
+        # ft_link pose in base/world frame. New logs store this alongside transformed F/T;
+        # legacy logs stored it alongside raw F/T.
+        ft_px=ft_pose_arr[:, 7]       if ft_pose_arr.size else np.array([]),
+        ft_py=ft_pose_arr[:, 8]       if ft_pose_arr.size else np.array([]),
+        ft_pz=ft_pose_arr[:, 9]       if ft_pose_arr.size else np.array([]),
+        ft_qx=ft_pose_arr[:, 10]      if ft_pose_arr.size else np.array([]),
+        ft_qy=ft_pose_arr[:, 11]      if ft_pose_arr.size else np.array([]),
+        ft_qz=ft_pose_arr[:, 12]      if ft_pose_arr.size else np.array([]),
+        ft_qw=ft_pose_arr[:, 13]      if ft_pose_arr.size else np.array([]),
     )
     np.savez_compressed(npz_path, **save_kwargs)
     print(f"F/T + EE pose + object pose log written to {npz_path}")

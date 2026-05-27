@@ -42,12 +42,20 @@ BASE_FRAME = "world"       # fixed world frame — used for TF lookups and arc g
 SERVO_FRAME = "base_link"  # MoveIt Servo requires base_link as the twist command frame
 EE_LINK = "finger_ball_center"
 
+STATE_IDS = {
+    "SQUASH": 1,
+    "LULL": 2,
+    "ARC": 3,
+    "UNARC": 4,
+    "RETRACT": 5,
+}
+
 FORCE_HARD_LIMIT_N = 15.0
 CONTACT_STABLE_SAMPLES = 1
 
 DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
-ARC_MAX_ANGLE_DEG = -25.0     # safety cap; ARC exits earlier once fx flips sign
+ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
 ARC_CENTER_X_OFFSET = 0.005  # m — shifts arc center in +x so EE starts at a negative angle, giving an immediate -z tangential component
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
@@ -152,7 +160,7 @@ class ArcSquashPull(Node):
         self._pause_servo_client   = self.create_client(SetBool, "/servo_node/pause_servo")
 
         self._ft_transformed_log: list = []
-        self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw, arc_angle_rad, wrist_pitch_rad]
+        self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw, arc_angle_rad, wrist_pitch_rad, state_id]
         self._obj_pose_log: list = [] # rows: [time_s, x, y, z, qx, qy, qz, qw, obj_pitch_rad]
         self._last_wrench_log_time = 0.0
         self._last_arc_log_time = 0.0
@@ -204,14 +212,23 @@ class ArcSquashPull(Node):
         self._force_z = abs(msg.wrench.force.z)
         self._have_force = True
         t = self._now_s()
+        try:
+            tf = self._tf_buffer.lookup_transform(BASE_FRAME, "ft_link", rclpy.time.Time())
+            tr = tf.transform.translation
+            ro = tf.transform.rotation
+            ft_px, ft_py, ft_pz = tr.x, tr.y, tr.z
+            ft_qx, ft_qy, ft_qz, ft_qw = ro.x, ro.y, ro.z, ro.w
+        except TransformException:
+            ft_px = ft_py = ft_pz = float("nan")
+            ft_qx = ft_qy = ft_qz = ft_qw = float("nan")
         self._ft_transformed_log.append([
             t,
             msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z,
             msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z,
+            ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw,
         ])
         if self._force_z > 0.25 and t - self._last_wrench_log_time > 0.2:
             self._last_wrench_log_time = t
-            self.get_logger().info(f"fx: {self._force_x:.2f} fz: {self._force_z:.2f} state: {self._state}")
 
     def _on_detection(self, msg: Detection3DArray) -> None:
         if not msg.detections:
@@ -427,7 +444,8 @@ class ArcSquashPull(Node):
             if self._arc_center_x is not None
             else float("nan")
         )
-        self._pose_log.append([t, px, py, pz, qx, qy, qz, qw, arc_angle, current_pitch])
+        state_id = STATE_IDS.get(self._state, 0)
+        self._pose_log.append([t, px, py, pz, qx, qy, qz, qw, arc_angle, current_pitch, state_id])
 
         contact_force = self._controlled_contact_force(px, pz) if self._have_force else 0.0
         if self._have_force and contact_force > FORCE_HARD_LIMIT_N and self._state != "RETRACT":
@@ -498,10 +516,9 @@ class ArcSquashPull(Node):
             if t - self._last_arc_log_time > 0.2:
                 self._last_arc_log_time = t
                 self.get_logger().info(
-                    f"arc_angle: {angle_deg:.1f} / {ARC_MAX_ANGLE_DEG:.1f} deg  "
+                    f"{angle_deg:.1f} / {ARC_MAX_ANGLE_DEG:.1f} deg  "
                     f"pitch: {math.degrees(current_pitch):.1f} deg  err: {math.degrees(pitch_err):.1f} deg  "
-                    f"f_radial: {f_radial:.2f} N  fy: {self._force_y:.2f} N  vy: {vy:.4f} m/s"
-                    f"  (fx={self._force_x:.2f} fz={self._force_z:.2f})"
+                    f"fx_tangent: {self._force_x:.2f} N  fz_radial: {f_radial:.2f} N"
                 )
             if self._arc_fx_flipped(angle):
                 self._lull_next = "UNARC"
