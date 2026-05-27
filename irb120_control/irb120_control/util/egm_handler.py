@@ -29,7 +29,8 @@ class EGMHandler(Node):
         self.declare_parameter("shutdown_service_timeout_sec", 5.0)
 
         self.declare_parameter("max_speed_dev_rad", 1.5)
-        self.declare_parameter("comm_timeout", 5.0)
+        self.declare_parameter("comm_timeout", 120.0)
+        self.declare_parameter("cond_time", 180.0) # 3 mins
         self.declare_parameter("ramp_in_time", 2.0)
         self.declare_parameter("ramp_out_time", 0.25)
         self.declare_parameter("pos_corr_gain", 1.0)
@@ -138,6 +139,7 @@ class EGMHandler(Node):
         settings = get_future.result().settings
         settings.activate.max_speed_deviation = math.degrees(float(self.get_parameter("max_speed_dev_rad").value))
         settings.setup_uc.comm_timeout = float(self.get_parameter("comm_timeout").value)
+        settings.run.cond_time = float(self.get_parameter("cond_time").value)
         settings.run.ramp_in_time = float(self.get_parameter("ramp_in_time").value)
         settings.stop.ramp_out_time = float(self.get_parameter("ramp_out_time").value)
         settings.run.pos_corr_gain = float(self.get_parameter("pos_corr_gain").value)

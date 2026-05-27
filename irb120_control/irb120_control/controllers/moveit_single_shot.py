@@ -24,10 +24,10 @@ from shape_msgs.msg import SolidPrimitive
 
 
 DEFAULT_GROUP_NAME = "manipulator"
-DEFAULT_BASE_FRAME = "base_link"
+DEFAULT_BASE_FRAME = "world"
 DEFAULT_EE_LINK = "finger_ball_center"
-DEFAULT_POSITION_TOLERANCE = 0.002
-DEFAULT_ORIENTATION_TOLERANCE = 0.01
+DEFAULT_POSITION_TOLERANCE = 0.0005 # 0.002
+DEFAULT_ORIENTATION_TOLERANCE = 0.001 # 0.01
 
 
 @dataclass(frozen=True)

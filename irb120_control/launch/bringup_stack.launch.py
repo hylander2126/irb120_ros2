@@ -58,6 +58,7 @@ def generate_launch_description():
             {"task": "T_ROB1"},
             {"startup_service_timeout_sec": 30.0},
             {"comm_timeout": 120.0},
+            {"cond_time": 180.0}, # 3 mins until egm shutoff...
         ],
     )
 

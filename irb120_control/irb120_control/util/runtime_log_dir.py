@@ -105,8 +105,10 @@ def save_ft_pose_log(
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
 
     ft_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz] rows — bias-corrected transformed wrench.
-    pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (EE pose).
-    obj_pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (object pose from detector).
+    pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (EE pose);
+              optional columns 8 and 9 are arc_angle_rad and wrist_pitch_rad.
+    obj_pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (object pose from detector);
+                  optional column 8 is obj_pitch_rad.
     ft_raw_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw] rows.
     subdir: subdirectory under runtime_logs/ (e.g. "push").
     prefix: filename prefix (e.g. "push_ft_pose").
@@ -140,6 +142,8 @@ def save_ft_pose_log(
         qy=pose_arr[:, 5] if pose_arr.size else np.array([]),
         qz=pose_arr[:, 6] if pose_arr.size else np.array([]),
         qw=pose_arr[:, 7] if pose_arr.size else np.array([]),
+        arc_angle_rad=pose_arr[:, 8] if pose_arr.size and pose_arr.shape[1] > 8 else np.array([]),
+        wrist_pitch_rad=pose_arr[:, 9] if pose_arr.size and pose_arr.shape[1] > 9 else np.array([]),
         # Object pose columns (from detector)
         obj_time_s=obj_arr[:, 0] if obj_arr.size else np.array([]),
         obj_x=obj_arr[:, 1] if obj_arr.size else np.array([]),
@@ -149,6 +153,7 @@ def save_ft_pose_log(
         obj_qy=obj_arr[:, 5] if obj_arr.size else np.array([]),
         obj_qz=obj_arr[:, 6] if obj_arr.size else np.array([]),
         obj_qw=obj_arr[:, 7] if obj_arr.size else np.array([]),
+        obj_pitch_rad=obj_arr[:, 8] if obj_arr.size and obj_arr.shape[1] > 8 else np.array([]),
         # Raw sensor frame F/T + ft_link pose in base frame
         ft_raw_time_s=raw_arr[:, 0]  if raw_arr.size else np.array([]),
         fx_raw=raw_arr[:, 1]         if raw_arr.size else np.array([]),
