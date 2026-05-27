@@ -167,14 +167,14 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     print(f"[{obj}] Percent of applied torque_y below zero (expect 100%): {(w_app_O[:, 1] < 0).mean() * 100:.1f}%")  # tau_y is index 1
 
     ## ======== One figure per object: 3 subplots side-by-side =========
-    fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
+    fig_obj, axes_obj = plt.subplots(1, 2, figsize=(24, 6))
     fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
 
     time_plot = time[contact_mask] - time[contact_mask][0]
 
-    plot_raw_forces(time_plot, f_meas_S[contact_mask], ax=axes_obj[0], title="Measured Force (Sensor Frame)", show=False)
+    plot_raw_forces(time_plot, f_meas_S[contact_mask], title="Measured Force (Sensor Frame)", show=False)
     plot_wrench_and_tipping(time_plot, w_app_O[:, 3:], w_app_O[:, :3],
-                            ax=axes_obj[1],
+                            ax=axes_obj[0],
                             pitch_rad=rv_obj[contact_mask, 1], torque_label="τ",
                             contact_time=0.0, title=f"Applied Wrench (Object Frame)", show=False)
 
@@ -303,18 +303,18 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     fx_extrap = np.polyval(fx_coeffs, theta_extrap)
 
     # Plot f_x data and extrapolated line
-    axes_obj[2].plot(np.rad2deg(pitch_contact[tip_sel]), w_app_O[tip_sel, 3], 'o', markersize=3, label="f_x (object frame)")
-    axes_obj[2].plot(theta_extrap, fx_extrap, '--', label=f"linear fit (push)")
-    axes_obj[2].axvline(theta_fx_zero_deg, color='red', linestyle=':', label=f"θ* = {theta_fx_zero_deg:.2f}°")
-    axes_obj[2].axvline(np.degrees(np.arctan2(COM_GT[0], COM_GT[2])), color='green', linestyle=':', label=f"θ* GT = {np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
-    axes_obj[2].axhline(0, color='k', linewidth=0.8)
-    axes_obj[2].set_xlabel("Pitch angle (degrees)")
-    axes_obj[2].set_ylabel("f_x in object frame (N)")
-    axes_obj[2].set_title("f_x zero-crossing → θ*")
-    axes_obj[2].legend()
-    axes_obj[2].grid(True)
+    axes_obj[1].plot(np.rad2deg(pitch_contact[tip_sel]), w_app_O[tip_sel, 3], 'o', markersize=3, label="f_x (object frame)")
+    axes_obj[1].plot(theta_extrap, fx_extrap, '--', label=f"linear fit (push)")
+    axes_obj[1].axvline(theta_fx_zero_deg, color='red', linestyle=':', label=f"θ* = {theta_fx_zero_deg:.2f}°")
+    axes_obj[1].axvline(np.degrees(np.arctan2(COM_GT[0], COM_GT[2])), color='green', linestyle=':', label=f"θ* GT = {np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
+    axes_obj[1].axhline(0, color='k', linewidth=0.8)
+    axes_obj[1].set_xlabel("Pitch angle (degrees)")
+    axes_obj[1].set_ylabel("f_x in object frame (N)")
+    axes_obj[1].set_title("f_x zero-crossing → θ*")
+    axes_obj[1].legend()
+    axes_obj[1].grid(True)
     
-    fig_obj.tight_layout()
+    # fig_obj.tight_layout()
     fig_obj.savefig(os.path.join(base_dir, "estimation_summary.png"), dpi=150, bbox_inches="tight")
 
 
