@@ -56,8 +56,9 @@ CONTACT_STABLE_SAMPLES = 1
 
 DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
+ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
-ARC_CENTER_X_OFFSET = 0.005  # m — shifts arc center in +x so EE starts at a negative angle, giving an immediate -z tangential component
+ARC_CENTER = (0.61, 0.0, 0.0) # world-frame pivot edge / arc center (x, y, z) # IF BOX AND HEART FAIL, IT'S CAUSE OF THIS, SORTOF. WE USED THE OLD ARC CALCULATION FOR THOSE
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
@@ -79,6 +80,8 @@ MAX_NORMAL_SPEED = 0.006
 FORCE_DEADBAND_N = 0.25
 FORCE_FILTER_ALPHA = 0.12
 FORCE_OUTPUT_SLEW_RATE = 0.02  # m/s^2
+UNARC_FORCE_AUGMENT_SPEED = 0.004  # m/s inward bias at large force deficit, still clamped by MAX_NORMAL_SPEED
+UNARC_FORCE_AUGMENT_SOFTNESS_N = 0.75  # larger = smoother/slower augmentation onset
 
 KP_Y_FORCE = 0#.0025      # m/s per N of Y force error
 KI_Y_FORCE = 0#.0005      # m/s per N·s of accumulated Y force error
@@ -148,7 +151,8 @@ class ArcStatic(Node):
         self._vy_integral: float = 0.0        # PI integrator for Y force controller
 
         # Arc geometry — set when SQUASH completes
-        self._arc_center_x: float | None = None    # x of post-squash EE = center x
+        self._arc_center_x: float | None = None    # fixed world-frame arc center x
+        self._arc_center_z: float | None = None    # fixed world-frame arc center z
         self._arc_start_angle: float | None = None # angle at squash contact (radians, in XZ plane)
         self._arc_end_angle: float | None = None   # target angle after full sweep
         self._arc_fx_pos_count = 0
@@ -326,30 +330,29 @@ class ArcStatic(Node):
     def _init_arc(self, x_contact: float, y_contact: float, z_contact: float) -> None:
         """Compute arc parameters from the post-squash EE position.
 
-        Arc lives in the XZ plane at y = y_contact.
-        Center: (x_contact + ARC_CENTER_X_OFFSET, y_contact, 0)
-        Radius: z_contact  (height of EE above the z=0 plane)
+        Arc lives in the XZ plane around fixed world-frame ARC_CENTER.
+        Radius is the current EE distance from that fixed pivot edge.
 
         The start angle is the angle of the EE from the center, measured
         from the +Z axis toward +X:  theta = atan2(dx, dz)
-        where dx = x_contact - cx and dz = z_contact - 0. A positive center
-        x offset makes the start angle slightly negative, so the first ARC
-        command immediately has a downward component.
         """
-        self._arc_center_x = x_contact + ARC_CENTER_X_OFFSET  # +x shift puts EE at negative start angle
-        self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x)
+        center_x, center_y, center_z = ARC_CENTER
+        self._arc_center_x = center_x
+        self._arc_center_z = center_z
+        self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x, self._arc_center_z)
         self._arc_end_angle = math.radians(ARC_MAX_ANGLE_DEG)
+        radius = math.hypot(x_contact - center_x, z_contact - center_z)
         self._arc_fx_pos_count = 0
         self._arc_fx_neg_count = 0
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign = None
         self.get_logger().info(
-            f"Arc init: center=({self._arc_center_x:.4f}, {y_contact:.4f}, 0)  "
-            f"r={z_contact:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
+            f"Arc init: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})  "
+            f"r={radius:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
         )
 
     def _current_arc_angle(self, x: float, z: float) -> float:
-        return arc_angle_xz(x, z, self._arc_center_x)
+        return arc_angle_xz(x, z, self._arc_center_x, self._arc_center_z)
 
     def _radial_force(self, theta: float) -> float:
         return radial_force_xz(theta, self._force_x, self._force_z_signed)
@@ -414,10 +417,24 @@ class ArcStatic(Node):
     ) -> tuple[float, float, float, bool]:
         angle = self._current_arc_angle(x, z)
         f_radial = self._radial_force(angle)
+
         if self._check_lost_contact(f_radial):
             return angle, f_radial, 0.0, False
+
         radial_corr = -self._force_ctrl.update(f_radial)
-        vx, vz = arc_velocity_xz(angle, tangential_speed, radial_corr)
+        # Arc-only experiment option: disable radial force regulation by restoring:
+        # radial_corr = 0.0
+        if self._state == "UNARC":
+            force_deficit = max(0.0, self._force_ctrl.reference - f_radial)
+            augment = force_deficit / (force_deficit + UNARC_FORCE_AUGMENT_SOFTNESS_N) if force_deficit > 0.0 else 0.0
+            radial_corr = clamp(
+                radial_corr - UNARC_FORCE_AUGMENT_SPEED * augment,
+                MAX_NORMAL_SPEED,
+            )
+
+        ramp = min(1.0, max(0.0, (self._now_s() - self._state_start_time) / ARC_TANGENTIAL_RAMP_SEC))
+        tangential_cmd = tangential_speed * ramp
+        vx, vz = arc_velocity_xz(angle, tangential_cmd, radial_corr)
         vy = self._vy_force()
         wy = 0.0
         self._command_log.append([
@@ -430,7 +447,7 @@ class ArcStatic(Node):
             vy,
             vz,
             wy,
-            tangential_speed,
+            tangential_cmd,
         ])
         if not self._servo_cmd.publish_twist(vx, vy, vz, wy, self._state, f_radial):
             self._done = True
@@ -635,7 +652,9 @@ def main(args=None) -> int:
             f"force_deadband={FORCE_DEADBAND_N}N  "
             f"force_filter_alpha={FORCE_FILTER_ALPHA}  "
             f"max_normal_speed={MAX_NORMAL_SPEED}m/s  "
-            f"descend_speed={DESCEND_SPEED}m/s  arc_max={ARC_MAX_ANGLE_DEG}deg  static_wrist=true"
+            f"descend_speed={DESCEND_SPEED}m/s  arc_max={ARC_MAX_ANGLE_DEG}deg  "
+            f"static_wrist=true  radial_force_control=true  tangential_ramp={ARC_TANGENTIAL_RAMP_SEC:.1f}s  "
+            f"unarc_force_augment={UNARC_FORCE_AUGMENT_SPEED:.4f}m/s softness={UNARC_FORCE_AUGMENT_SOFTNESS_N:.2f}N"
         )
 
         if not node._operator_confirm(

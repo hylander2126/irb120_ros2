@@ -9,7 +9,9 @@ from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkw
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 
-ALL_OBJECTS = ["box"]#, "heart", "flashlight", "soda"] #, "monitor"]
+# ALL_OBJECTS = ["box", "heart", "flashlight"]#, "soda"] #, "monitor"]
+# ALL_OBJECTS = ["flashlight"]
+ALL_OBJECTS = ["soda"]
 
 STATE_SQUASH = 1
 STATE_LULL = 2
@@ -111,7 +113,21 @@ def plot_force_command_debug(data, obj: str, base_dir: str) -> None:
     cmd_t = cmd_time - t0
     force = np.column_stack([data["fx"], data["fy"], data["fz"]])
     cmd_state = data["cmd_state_id"].astype(int)
-    cmd_vel = np.column_stack([data["cmd_vx"], data["cmd_vy"], data["cmd_vz"], data["cmd_wy"]])
+    has_obj_pitch = (
+        "obj_time_s" in data
+        and "obj_pitch_rad" in data
+        and len(data["obj_time_s"]) > 1
+        and len(data["obj_pitch_rad"]) == len(data["obj_time_s"])
+    )
+    obj_t = None
+    obj_pitch_rel_deg = None
+    obj_pitch_on_cmd_deg = None
+    if has_obj_pitch:
+        obj_t = data["obj_time_s"] - t0
+        obj_pitch_deg = np.rad2deg(data["obj_pitch_rad"])
+        obj_pitch_ref_deg = np.interp(t0, data["obj_time_s"], obj_pitch_deg)
+        obj_pitch_rel_deg = obj_pitch_deg - obj_pitch_ref_deg
+        obj_pitch_on_cmd_deg = np.interp(cmd_time, data["obj_time_s"], obj_pitch_rel_deg)
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
     fig.suptitle(f"[{obj}] Measured force vs commanded motion", fontsize=14, fontweight="bold")
@@ -138,6 +154,8 @@ def plot_force_command_debug(data, obj: str, base_dir: str) -> None:
     axes[2].grid(True)
 
     axes[3].plot(cmd_t, np.rad2deg(data["cmd_arc_angle_rad"]), label="arc angle (deg)")
+    if has_obj_pitch:
+        axes[3].plot(obj_t, obj_pitch_rel_deg, label="object pitch rel. (deg)", alpha=0.85)
     axes[3].step(cmd_t, cmd_state, where="post", label="state id", alpha=0.5)
     axes[3].set_xlabel("Time from first command (s)")
     axes[3].set_ylabel("Angle / state")
@@ -168,12 +186,22 @@ def plot_force_command_debug(data, obj: str, base_dir: str) -> None:
         if not np.any(mask):
             continue
         name = _state_name(state)
+        slip_text = ""
+        if obj_pitch_on_cmd_deg is not None:
+            arc_deg = np.rad2deg(data["cmd_arc_angle_rad"][mask])
+            obj_deg = obj_pitch_on_cmd_deg[mask]
+            slip_deg = arc_deg - obj_deg
+            slip_text = (
+                f" slip_arc_minus_obj=[{np.nanmin(slip_deg):+.2f}, "
+                f"{np.nanmedian(slip_deg):+.2f}, {np.nanmax(slip_deg):+.2f}] deg"
+            )
         print(
             f"  {name}: n={int(mask.sum())} "
             f"angle=[{np.rad2deg(data['cmd_arc_angle_rad'][mask]).min():.2f}, {np.rad2deg(data['cmd_arc_angle_rad'][mask]).max():.2f}] deg "
             f"radial_corr=[{data['cmd_radial_corr'][mask].min():+.5f}, {np.median(data['cmd_radial_corr'][mask]):+.5f}, {data['cmd_radial_corr'][mask].max():+.5f}] m/s "
             f"vx=[{data['cmd_vx'][mask].min():+.5f}, {data['cmd_vx'][mask].max():+.5f}] "
             f"vz=[{data['cmd_vz'][mask].min():+.5f}, {data['cmd_vz'][mask].max():+.5f}]"
+            f"{slip_text}"
         )
 
     if len(cmd_time) > 3:
@@ -183,11 +211,16 @@ def plot_force_command_debug(data, obj: str, base_dir: str) -> None:
         low = np.argsort(fz_on_cmd)[:5]
         print("  lowest f_z at command times:")
         for i in low:
+            slip_suffix = ""
+            if obj_pitch_on_cmd_deg is not None:
+                arc_deg_i = np.rad2deg(data["cmd_arc_angle_rad"][i])
+                slip_suffix = f" obj_pitch_rel={obj_pitch_on_cmd_deg[i]:+.2f}deg slip={arc_deg_i - obj_pitch_on_cmd_deg[i]:+.2f}deg"
             print(
                 f"    t={cmd_t[i]:.3f}s state={_state_name(cmd_state[i])} "
                 f"angle={np.rad2deg(data['cmd_arc_angle_rad'][i]):.2f}deg "
                 f"fz={fz_on_cmd[i]:.3f}N radial_corr={data['cmd_radial_corr'][i]:+.5f}m/s "
                 f"vx={data['cmd_vx'][i]:+.5f} vz={data['cmd_vz'][i]:+.5f}"
+                f"{slip_suffix}"
             )
 
 

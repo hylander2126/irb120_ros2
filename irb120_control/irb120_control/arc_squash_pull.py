@@ -57,7 +57,7 @@ CONTACT_STABLE_SAMPLES = 1
 DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
-ARC_CENTER_X_OFFSET = 0.005  # m — shifts arc center in +x so EE starts at a negative angle, giving an immediate -z tangential component
+ARC_CENTER = (0.605, 0.0, 0.0) # world-frame pivot edge / arc center (x, y, z)
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
@@ -150,7 +150,8 @@ class ArcSquashPull(Node):
         self._vy_integral: float = 0.0        # PI integrator for Y force controller
 
         # Arc geometry — set when SQUASH completes
-        self._arc_center_x: float | None = None    # x of post-squash EE = center x
+        self._arc_center_x: float | None = None    # fixed world-frame arc center x
+        self._arc_center_z: float | None = None    # fixed world-frame arc center z
         self._arc_start_angle: float | None = None # angle at squash contact (radians, in XZ plane)
         self._arc_end_angle: float | None = None   # target angle after full sweep
         self._arc_fx_pos_count = 0
@@ -327,30 +328,29 @@ class ArcSquashPull(Node):
     def _init_arc(self, x_contact: float, y_contact: float, z_contact: float) -> None:
         """Compute arc parameters from the post-squash EE position.
 
-        Arc lives in the XZ plane at y = y_contact.
-        Center: (x_contact + ARC_CENTER_X_OFFSET, y_contact, 0)
-        Radius: z_contact  (height of EE above the z=0 plane)
+        Arc lives in the XZ plane around fixed world-frame ARC_CENTER.
+        Radius is the current EE distance from that fixed pivot edge.
 
         The start angle is the angle of the EE from the center, measured
         from the +Z axis toward +X:  theta = atan2(dx, dz)
-        where dx = x_contact - cx and dz = z_contact - 0. A positive center
-        x offset makes the start angle slightly negative, so the first ARC
-        command immediately has a downward component.
         """
-        self._arc_center_x = x_contact + ARC_CENTER_X_OFFSET  # +x shift puts EE at negative start angle
-        self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x)
+        center_x, center_y, center_z = ARC_CENTER
+        self._arc_center_x = center_x
+        self._arc_center_z = center_z
+        self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x, self._arc_center_z)
         self._arc_end_angle = math.radians(ARC_MAX_ANGLE_DEG)
+        radius = math.hypot(x_contact - center_x, z_contact - center_z)
         self._arc_fx_pos_count = 0
         self._arc_fx_neg_count = 0
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign = None
         self.get_logger().info(
-            f"Arc init: center=({self._arc_center_x:.4f}, {y_contact:.4f}, 0)  "
-            f"r={z_contact:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
+            f"Arc init: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})  "
+            f"r={radius:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
         )
 
     def _current_arc_angle(self, x: float, z: float) -> float:
-        return arc_angle_xz(x, z, self._arc_center_x)
+        return arc_angle_xz(x, z, self._arc_center_x, self._arc_center_z)
 
     def _radial_force(self, theta: float) -> float:
         return radial_force_xz(theta, self._force_x, self._force_z)

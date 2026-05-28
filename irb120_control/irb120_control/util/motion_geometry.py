@@ -15,9 +15,9 @@ def quat_to_pitch(qx: float, qy: float, qz: float, qw: float) -> float:
     return math.asin(clamp(sin_pitch, 1.0))
 
 
-def arc_angle_xz(x: float, z: float, center_x: float) -> float:
-    """Angle from +Z toward +X for an XZ-plane arc centered at z=0."""
-    return math.atan2(x - center_x, z)
+def arc_angle_xz(x: float, z: float, center_x: float, center_z: float = 0.0) -> float:
+    """Angle from +Z toward +X for an XZ-plane arc."""
+    return math.atan2(x - center_x, z - center_z)
 
 
 def arc_velocity_xz(
