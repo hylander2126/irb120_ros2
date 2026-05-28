@@ -100,6 +100,7 @@ def save_ft_pose_log(
     prefix: str,
     obj_pose_log: list | None = None,
     ft_raw_log: list | None = None,
+    command_log: list | None = None,
 ) -> None:
     """Save collected F/T, EE pose, and optional object pose buffers to a timestamped .npz file.
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
@@ -111,6 +112,8 @@ def save_ft_pose_log(
     obj_pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (object pose from detector);
                   optional column 8 is obj_pitch_rad.
     ft_raw_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw] rows.
+    command_log: list of [timestamp_s, state_id, arc_angle_rad, f_radial, radial_corr,
+                 vx, vy, vz, wy, tangential_speed] rows.
     subdir: subdirectory under runtime_logs/ (e.g. "push").
     prefix: filename prefix (e.g. "push_ft_pose").
     """
@@ -122,6 +125,7 @@ def save_ft_pose_log(
     pose_arr = np.array(pose_log, dtype=np.float64) if pose_log else np.empty((0, 8), dtype=np.float64)
     obj_arr = np.array(obj_pose_log, dtype=np.float64) if obj_pose_log else np.empty((0, 8), dtype=np.float64)
     raw_arr = np.array(ft_raw_log, dtype=np.float64) if ft_raw_log else np.empty((0, 14), dtype=np.float64)
+    cmd_arr = np.array(command_log, dtype=np.float64) if command_log else np.empty((0, 10), dtype=np.float64)
     ft_pose_arr = ft_arr if ft_arr.size and ft_arr.shape[1] > 13 else raw_arr
 
     log_dir = runtime_log_dir(subdir)
@@ -175,6 +179,17 @@ def save_ft_pose_log(
         ft_qy=ft_pose_arr[:, 11]      if ft_pose_arr.size else np.array([]),
         ft_qz=ft_pose_arr[:, 12]      if ft_pose_arr.size else np.array([]),
         ft_qw=ft_pose_arr[:, 13]      if ft_pose_arr.size else np.array([]),
+        # Servo/controller command diagnostics.
+        cmd_time_s=cmd_arr[:, 0]       if cmd_arr.size else np.array([]),
+        cmd_state_id=cmd_arr[:, 1]     if cmd_arr.size else np.array([]),
+        cmd_arc_angle_rad=cmd_arr[:, 2] if cmd_arr.size else np.array([]),
+        cmd_f_radial=cmd_arr[:, 3]     if cmd_arr.size else np.array([]),
+        cmd_radial_corr=cmd_arr[:, 4]  if cmd_arr.size else np.array([]),
+        cmd_vx=cmd_arr[:, 5]           if cmd_arr.size else np.array([]),
+        cmd_vy=cmd_arr[:, 6]           if cmd_arr.size else np.array([]),
+        cmd_vz=cmd_arr[:, 7]           if cmd_arr.size else np.array([]),
+        cmd_wy=cmd_arr[:, 8]           if cmd_arr.size else np.array([]),
+        cmd_tangential_speed=cmd_arr[:, 9] if cmd_arr.size else np.array([]),
     )
     np.savez_compressed(npz_path, **save_kwargs)
     print(f"F/T + EE pose + object pose log written to {npz_path}")

@@ -163,6 +163,7 @@ class ArcSquashPull(Node):
         self._ft_transformed_log: list = []
         self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw, arc_angle_rad, wrist_pitch_rad, state_id]
         self._obj_pose_log: list = [] # rows: [time_s, x, y, z, qx, qy, qz, qw, obj_pitch_rad]
+        self._command_log: list = []  # rows: [time_s, state_id, angle, f_radial, radial_corr, vx, vy, vz, wy, tangential_speed]
         self._last_wrench_log_time = 0.0
         self._last_arc_log_time = 0.0
 
@@ -417,6 +418,18 @@ class ArcSquashPull(Node):
         vy = self._vy_force()
         pitch_err = angle - pitch
         wy = clamp(KP_ORIENT * pitch_err, MAX_ORIENT_SPEED)
+        self._command_log.append([
+            self._now_s(),
+            STATE_IDS.get(self._state, 0),
+            angle,
+            f_radial,
+            radial_corr,
+            vx,
+            vy,
+            vz,
+            wy,
+            tangential_speed,
+        ])
         if not self._servo_cmd.publish_twist(vx, vy, vz, wy, self._state, f_radial):
             self._done = True
             return angle, f_radial, vy, False
@@ -476,23 +489,29 @@ class ArcSquashPull(Node):
 
         # -------- LULL --------
         if self._state == "LULL":
-            normal_z = -self._force_ctrl.update(self._force_z)
-            if not self._servo_cmd.publish_twist(0.0, 0.0, normal_z, state=self._state, force_z=self._force_z):
+            if not self._servo_cmd.publish_zero(self._state, self._force_z):
                 self._done = True
                 return
             elapsed = self._now_s() - self._state_start_time
             if elapsed < LULL_WAIT_SEC:
                 return
-            # Wait until force is close to reference, or timeout
-            force_error = abs(self._force_z - self._force_ctrl.reference)
-            settled = force_error < LULL_SETTLE_N
-            timed_out = elapsed > LULL_SETTLE_TIMEOUT_SEC
-            if not settled and not timed_out:
-                return
-            if timed_out and not settled:
-                self.get_logger().warn(
-                    f"LULL settle timeout — proceeding with force error {force_error:.2f} N"
-                )
+
+            # Previous behavior: use LULL as a force-settling phase.
+            # Leaving this here intentionally in case we want to re-enable it.
+            # normal_z = -self._force_ctrl.update(self._force_z)
+            # if not self._servo_cmd.publish_twist(0.0, 0.0, normal_z, state=self._state, force_z=self._force_z):
+            #     self._done = True
+            #     return
+            # force_error = abs(self._force_z - self._force_ctrl.reference)
+            # settled = force_error < LULL_SETTLE_N
+            # timed_out = elapsed > LULL_SETTLE_TIMEOUT_SEC
+            # if not settled and not timed_out:
+            #     return
+            # if timed_out and not settled:
+            #     self.get_logger().warn(
+            #         f"LULL settle timeout — proceeding with force error {force_error:.2f} N"
+            #     )
+
             if self._lull_next == "ARC":
                 self._force_ctrl.reset()
                 # Cap at the object's configured force_ref so we don't enter ARC near the hard limit
@@ -541,8 +560,17 @@ class ArcSquashPull(Node):
         # -------- UNARC --------
         if self._state == "UNARC":
             if self._check_timeout(UNARC_TIMEOUT_SEC, "UNARC"): return
-            angle, _f_radial, _vy, ok = self._publish_arc_step(px, pz, current_pitch, -ARC_TANGENTIAL_SPEED)
+            angle, f_radial, vy, ok = self._publish_arc_step(px, pz, current_pitch, -ARC_TANGENTIAL_SPEED)
             if not ok: return
+
+            pitch_err = angle - current_pitch
+            if t - self._last_arc_log_time > 0.2:
+                self._last_arc_log_time = t
+                self.get_logger().info(
+                    f"unarc {math.degrees(angle):.1f} / {math.degrees(self._arc_start_angle):.1f} deg  "
+                    f"pitch: {math.degrees(current_pitch):.1f} deg  err: {math.degrees(pitch_err):.1f} deg  "
+                    f"fx_tangent: {self._force_x:.2f} N  fz_radial: {f_radial:.2f} N"
+                )
 
             if angle >= self._arc_start_angle - math.radians(1.0):  # 1 deg tolerance
                 self._transition("RETRACT")
@@ -643,7 +671,14 @@ def main(args=None) -> int:
             else:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
         try:
-            save_ft_pose_log(node._ft_transformed_log, node._pose_log, node._log_subdir, "arc_squash_pull", node._obj_pose_log)
+            save_ft_pose_log(
+                node._ft_transformed_log,
+                node._pose_log,
+                node._log_subdir,
+                "arc_squash_pull",
+                node._obj_pose_log,
+                command_log=node._command_log,
+            )
         except Exception as exc:
             node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
         node._servo_cmd.publish_zero(node._state, node._force_z)

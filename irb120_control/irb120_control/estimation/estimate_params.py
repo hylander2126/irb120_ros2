@@ -17,16 +17,22 @@ STATE_ARC = 3
 STATE_UNARC = 4
 STATE_RETRACT = 5
 
-_LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
-_LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
+# _LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
+# _LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
+# def _lpf(x, axis=0):
+#     return filtfilt(_LPF_B, _LPF_A, x, axis=axis) if x.shape[0] > 20 else x
+# def _lpf_slow(x, axis=0):
+#     return filtfilt(_LPF_SLOW_B, _LPF_SLOW_A, x, axis=axis) if x.shape[0] > 20 else x
 
 
-def _lpf(x, axis=0):
-    return filtfilt(_LPF_B, _LPF_A, x, axis=axis) if x.shape[0] > 20 else x
-
-
-def _lpf_slow(x, axis=0):
-    return filtfilt(_LPF_SLOW_B, _LPF_SLOW_A, x, axis=axis) if x.shape[0] > 20 else x
+def _state_name(state_id: int) -> str:
+    return {
+        STATE_SQUASH: "SQUASH",
+        STATE_LULL: "LULL",
+        STATE_ARC: "ARC",
+        STATE_UNARC: "UNARC",
+        STATE_RETRACT: "RETRACT",
+    }.get(int(state_id), f"UNKNOWN({int(state_id)})")
 
 
 def load_and_preprocess(filepath):
@@ -84,6 +90,107 @@ def load_and_preprocess(filepath):
     return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id
 
 
+def plot_force_command_debug(data, obj: str, base_dir: str) -> None:
+    cmd_keys = (
+        "cmd_time_s", "cmd_state_id", "cmd_arc_angle_rad", "cmd_f_radial", "cmd_radial_corr",
+        "cmd_vx", "cmd_vy", "cmd_vz", "cmd_wy", "cmd_tangential_speed",
+    )
+    if not all(k in data for k in cmd_keys) or len(data["cmd_time_s"]) == 0:
+        print(f"[{obj}] No command diagnostics in log; skipping force/command debug plot.")
+        return
+
+    ft_time = data["ft_time_s"]
+    cmd_time = data["cmd_time_s"]
+    if len(ft_time) == 0:
+        print(f"[{obj}] No F/T stream in log; skipping force/command debug plot.")
+        return
+
+    # Use first controller command as the plot origin so ARC/UNARC commands and forces line up.
+    t0 = cmd_time[0]
+    ft_t = ft_time - t0
+    cmd_t = cmd_time - t0
+    force = np.column_stack([data["fx"], data["fy"], data["fz"]])
+    cmd_state = data["cmd_state_id"].astype(int)
+    cmd_vel = np.column_stack([data["cmd_vx"], data["cmd_vy"], data["cmd_vz"], data["cmd_wy"]])
+
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
+    fig.suptitle(f"[{obj}] Measured force vs commanded motion", fontsize=14, fontweight="bold")
+
+    axes[0].plot(ft_t, force[:, 0], label="f_x", linewidth=1.5)
+    axes[0].plot(ft_t, force[:, 1], label="f_y", linewidth=1.5)
+    axes[0].plot(ft_t, force[:, 2], label="f_z", linewidth=1.5)
+    axes[0].set_ylabel("Force (N)")
+    axes[0].legend(loc="upper right")
+    axes[0].grid(True)
+
+    axes[1].plot(cmd_t, data["cmd_vx"], label="cmd_vx")
+    axes[1].plot(cmd_t, data["cmd_vy"], label="cmd_vy")
+    axes[1].plot(cmd_t, data["cmd_vz"], label="cmd_vz")
+    axes[1].plot(cmd_t, data["cmd_wy"], label="cmd_wy")
+    axes[1].set_ylabel("Velocity cmd")
+    axes[1].legend(loc="upper right")
+    axes[1].grid(True)
+
+    axes[2].plot(cmd_t, data["cmd_radial_corr"], label="radial_corr")
+    axes[2].plot(cmd_t, data["cmd_f_radial"], label="f_radial")
+    axes[2].set_ylabel("Radial")
+    axes[2].legend(loc="upper right")
+    axes[2].grid(True)
+
+    axes[3].plot(cmd_t, np.rad2deg(data["cmd_arc_angle_rad"]), label="arc angle (deg)")
+    axes[3].step(cmd_t, cmd_state, where="post", label="state id", alpha=0.5)
+    axes[3].set_xlabel("Time from first command (s)")
+    axes[3].set_ylabel("Angle / state")
+    axes[3].legend(loc="upper right")
+    axes[3].grid(True)
+
+    for state in (STATE_ARC, STATE_UNARC):
+        idx = np.where(cmd_state == state)[0]
+        if len(idx) == 0:
+            continue
+        start = cmd_t[idx[0]]
+        end = cmd_t[idx[-1]]
+        for ax in axes:
+            ax.axvspan(start, end, alpha=0.08, label=None)
+
+    fig.tight_layout()
+    out_path = os.path.join(base_dir, "force_command_debug.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[{obj}] force/command debug plot saved: {out_path}")
+
+    print(f"[{obj}] Command diagnostics summary:")
+    print(f"  samples: ft={len(ft_time)} cmd={len(cmd_time)}")
+    print(f"  ft dt: median={np.median(np.diff(ft_time)):.4f}s p99={np.percentile(np.diff(ft_time), 99):.4f}s max={np.max(np.diff(ft_time)):.4f}s")
+    print(f"  cmd dt: median={np.median(np.diff(cmd_time)):.4f}s p99={np.percentile(np.diff(cmd_time), 99):.4f}s max={np.max(np.diff(cmd_time)):.4f}s")
+
+    for state in (STATE_ARC, STATE_UNARC):
+        mask = cmd_state == state
+        if not np.any(mask):
+            continue
+        name = _state_name(state)
+        print(
+            f"  {name}: n={int(mask.sum())} "
+            f"angle=[{np.rad2deg(data['cmd_arc_angle_rad'][mask]).min():.2f}, {np.rad2deg(data['cmd_arc_angle_rad'][mask]).max():.2f}] deg "
+            f"radial_corr=[{data['cmd_radial_corr'][mask].min():+.5f}, {np.median(data['cmd_radial_corr'][mask]):+.5f}, {data['cmd_radial_corr'][mask].max():+.5f}] m/s "
+            f"vx=[{data['cmd_vx'][mask].min():+.5f}, {data['cmd_vx'][mask].max():+.5f}] "
+            f"vz=[{data['cmd_vz'][mask].min():+.5f}, {data['cmd_vz'][mask].max():+.5f}]"
+        )
+
+    if len(cmd_time) > 3:
+        fz_on_cmd = np.interp(cmd_time, ft_time, data["fz"])
+        corr = np.corrcoef(data["cmd_radial_corr"], fz_on_cmd)[0, 1]
+        print(f"  corr(radial_corr, f_z at cmd times)={corr:+.3f}")
+        low = np.argsort(fz_on_cmd)[:5]
+        print("  lowest f_z at command times:")
+        for i in low:
+            print(
+                f"    t={cmd_t[i]:.3f}s state={_state_name(cmd_state[i])} "
+                f"angle={np.rad2deg(data['cmd_arc_angle_rad'][i]):.2f}deg "
+                f"fz={fz_on_cmd[i]:.3f}N radial_corr={data['cmd_radial_corr'][i]:+.5f}m/s "
+                f"vx={data['cmd_vx'][i]:+.5f} vz={data['cmd_vz'][i]:+.5f}"
+            )
+
+
 def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     
     ## HERE WE CAN REDEFINE THE r0 lever arm
@@ -103,6 +210,9 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         # r0 = np.array([0.055, 0.0, 0.3]) # 0.055
         COM_GT = np.array([0.055, 0.0, 0.15])
         MASS_GT = 2.05
+
+    raw_data = np.load(squash_file)
+    plot_force_command_debug(raw_data, obj, base_dir)
 
     time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id = load_and_preprocess(squash_file)
 
