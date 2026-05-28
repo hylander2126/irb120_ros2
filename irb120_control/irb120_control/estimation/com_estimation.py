@@ -1,6 +1,18 @@
 import numpy as np
 from irb120_control.estimation.helper_fns import axisangle2rot, rotvec_to_rot, Adjoint, TransInv, quat_to_rotvec
 
+def rotvec_between(a, b):
+    # rotation taking unit(a) -> unit(b), as a rotation vector (axis*angle)
+    # a: (3,) reference vector; b: (N,3) query vectors
+    a = np.atleast_2d(a) / np.linalg.norm(a)
+    b = b / np.linalg.norm(b, axis=-1, keepdims=True)
+    axis = np.cross(a, b)
+    s = np.linalg.norm(axis, axis=-1)
+    c = np.einsum('ni,ni->n', np.broadcast_to(a, b.shape), b)
+    ang = np.arctan2(s, c)
+    axis = axis / np.where(s[:, None] > 1e-9, s[:, None], 1.0)
+    return axis * ang[:, None]  # (N,3) rotation vector
+
 def construct_T(p, quat=None, rv=None):
     """Construct homogeneous transformation matrix from position and quaternion."""
     if quat is not None:
@@ -14,6 +26,7 @@ def construct_T(p, quat=None, rv=None):
     T[:, :3, 3] = p
     T[:, 3, 3] = 1.0
     return T
+
 
 def model_bkwd_wrench(
     w_meas_S: np.ndarray,
