@@ -142,7 +142,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
     fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
     time_plot = time[contact_mask] - time[contact_mask][0]
-    plot_raw_forces(time_plot, f_meas_S[contact_mask], title="Measured Force (Sensor Frame)", show=False) # On it's own
+    # plot_raw_forces(time_plot, f_meas_S[contact_mask], title="Measured Force (Sensor Frame)", show=False) # On it's own
     plot_wrench_and_tipping(time_plot, w_app_O[:, 3:], w_app_O[:, :3],
                             ax=axes_obj[0],
                             pitch_rad=rot_vec_obj[contact_mask, 1], torque_label="τ",
@@ -182,8 +182,10 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         rv_ph = rot_vec_during_contact[phase_sel]
         tau_meas = w_app_O[phase_sel, :3] @ TIP_AXIS
 
-        # Method A
-        fx_coeffs = np.polyfit(y_pitch_deg, w_app_O[phase_sel, 3], 1)
+        # Method A — use torque-corrected signal: g_x = f_x - (r0_x/r0_z)*f_z
+        # This zeros at theta* for any contact geometry, not just r0_x=0
+        gx = w_app_O[phase_sel, 3] - (r0[0] / r0[2]) * w_app_O[phase_sel, 5]
+        fx_coeffs = np.polyfit(y_pitch_deg, gx, 1)
         theta_fx_deg = -fx_coeffs[1] / fx_coeffs[0]
         com_z_fx = COM_GT[0] / np.tan(np.deg2rad(abs(theta_fx_deg)))
         mass_fx = least_squares(
@@ -233,8 +235,9 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     extrap_bounds.append(theta_fx_retract_deg)
     theta_extrap = np.linspace(min(extrap_bounds) - 1.0, max(extrap_bounds) + 1.0, 200)
 
-    # Plot f_x data and extrapolated line (Method A)
-    axes_obj[1].plot(np.rad2deg(y_pitch_during_contact[tip_sel]), w_app_O[tip_sel, 3], 'o', markersize=3, label="f_x (object frame)")
+    # Plot g_x = f_x - (r0_x/r0_z)*f_z data and extrapolated line (Method A)
+    gx_plot = w_app_O[tip_sel, 3] - (r0[0] / r0[2]) * w_app_O[tip_sel, 5]
+    axes_obj[1].plot(np.rad2deg(y_pitch_during_contact[tip_sel]), gx_plot, 'o', markersize=3, label="g_x (corrected)")
     axes_obj[1].plot(theta_extrap, np.polyval(fx_coeffs_push, theta_extrap), color='tab:blue', linestyle='--', label="linear fit (ARC)")
     axes_obj[1].axvline(theta_fx_push_deg, color='tab:blue', linestyle=':', label=f"ARC A θ*={theta_fx_push_deg:.2f}°")
     axes_obj[1].axvline(theta_tau_push_deg, color='tab:blue', linestyle='-', linewidth=1.5, label=f"ARC B θ*={theta_tau_push_deg:.2f}°")
@@ -244,8 +247,8 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     axes_obj[1].axvline(theta_gt_deg, color='green', linestyle=':', label=f"theta* GT = {theta_gt_deg:.1f}deg")
     axes_obj[1].axhline(0, color='k', linewidth=0.8)
     axes_obj[1].set_xlabel("Pitch angle (degrees)")
-    axes_obj[1].set_ylabel("f_x in object frame (N)")
-    axes_obj[1].set_title("f_x zero-crossing (A: dashed) vs joint τ (B: solid)")
+    axes_obj[1].set_ylabel("g_x = f_x − (r0_x/r0_z)·f_z  (N)")
+    axes_obj[1].set_title("g_x zero-crossing (A: dashed) vs joint τ (B: solid)")
     axes_obj[1].legend()
     axes_obj[1].grid(True)
     
