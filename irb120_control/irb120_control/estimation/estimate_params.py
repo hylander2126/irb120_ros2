@@ -9,9 +9,9 @@ from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkw
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 
-# ALL_OBJECTS = ["box", "heart", "flashlight"]#, "soda"] #, "monitor"]
+ALL_OBJECTS = ["box", "heart", "flashlight"]#, "soda"]#, "monitor"]
 # ALL_OBJECTS = ["flashlight"]
-ALL_OBJECTS = ["soda"]
+# ALL_OBJECTS = ["soda"]
 
 STATE_SQUASH = 1
 STATE_LULL = 2
@@ -371,14 +371,40 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     print(f"\n[{obj}] FORCING TIP AXIS TO: {TIP_AXIS}")
     print(f"[{obj}] And testing p_pivot_B at: {p_pivot_B}\n")
 
-    def _fit_phase(phase_sel, label, COM_GT):
+    # --- f_x zero-crossing extrapolation ---
+    # Estimate theta* from the tangential applied force first. With x_c known
+    # from the object geometry, that directly gives z_c, leaving mass as the
+    # only fitted parameter in the torque model.
+    pitch_push_deg = np.rad2deg(pitch_contact[push_tip_sel])
+    fx_push        = w_app_O[push_tip_sel, 3]  # f_x in object frame
+
+    if len(pitch_push_deg) < 3:
+        print(f"[{obj}] Too few push samples ({len(pitch_push_deg)}) for f_x zero-crossing — skipping fit.")
+        return
+
+    fx_coeffs = np.polyfit(pitch_push_deg, fx_push, 1)  # linear fit: f_x = a*theta + b
+    theta_fx_zero_deg = -fx_coeffs[1] / fx_coeffs[0]   # zero crossing: theta = -b/a
+    theta_fx_zero_abs_rad = np.deg2rad(abs(theta_fx_zero_deg))
+    if theta_fx_zero_abs_rad < 1e-6:
+        print(f"[{obj}] f_x zero-crossing is too close to zero degrees — skipping mass fit.")
+        return
+
+    com_z_fx = COM_GT[0] / np.tan(theta_fx_zero_abs_rad)
+    theta_gt_deg = np.degrees(np.arctan2(COM_GT[0], COM_GT[2]))
+    print(
+        f"  [{obj}] f_x zero-crossing — theta*={theta_fx_zero_deg:.2f}deg  "
+        f"zc_from_theta={com_z_fx:.4f} m  (GT theta={theta_gt_deg:.1f}deg, GT zc={COM_GT[2]:.4f} m)"
+    )
+
+    def _fit_phase(phase_sel, label, COM_GT, com_z_fixed):
         if phase_sel.sum() < 10:
             print(f"[{obj}] Too few {label} samples ({phase_sel.sum()}) — skipping.")
             return None, None
         rv_ph = rv_contact[phase_sel]  # (N,3) full rotation vectors for this phase
 
         def _residual(params):
-            w_grav = model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, params[0]]), params[1])
+            mass = params[0]
+            w_grav = model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, com_z_fixed]), mass)
                 
             tau_grav_axis = w_grav[:, :3] @ TIP_AXIS
             tau_meas_axis = w_app_O[phase_sel, :3] @ TIP_AXIS
@@ -386,16 +412,17 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
             # return (w_grav[:, :3] - w_app_O[phase_sel, :3]).ravel()
             return (tau_grav_axis - tau_meas_axis).ravel()
         
-        res = least_squares(_residual, x0=[0.1, 0.1],
-                            bounds=([1e-6, 1e-6], [np.inf, np.inf]), method='trf')
-        com_z, mass = res.x
-        print(f"  [{obj}] {label:>7s} fit — COM_z={com_z:.4f} m  Mass={mass:.4f} kg  θ*={np.degrees(np.arctan2(COM_GT[0], com_z)):.1f}°")
-        return com_z, mass
+        res = least_squares(_residual, x0=[MASS_GT],
+                            bounds=([1e-6], [np.inf]), method='trf')
+        mass = res.x[0]
+        theta_fixed_deg = np.degrees(np.arctan2(COM_GT[0], com_z_fixed))
+        print(f"  [{obj}] {label:>7s} fit — COM_z={com_z_fixed:.4f} m  Mass={mass:.4f} kg  theta*={theta_fixed_deg:.1f}deg")
+        return com_z_fixed, mass
 
-    print(f"\n--- [{obj}] PHASE ESTIMATES (full torque) ---")
-    com_z_push,    mass_push    = _fit_phase(push_tip_sel,    "push", COM_GT)
-    com_z_retract, mass_retract = _fit_phase(retract_tip_sel, "retract", COM_GT)
-    print(f"  [{obj}] Ground truth — COM_z={COM_GT[2]:.4f} m  Mass={MASS_GT:.4f} kg  θ*={np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
+    print(f"\n--- [{obj}] PHASE ESTIMATES (theta* from f_x, mass-only torque fit) ---")
+    com_z_push,    mass_push    = _fit_phase(push_tip_sel,    "push", COM_GT, com_z_fx)
+    com_z_retract, mass_retract = _fit_phase(retract_tip_sel, "retract", COM_GT, com_z_fx)
+    print(f"  [{obj}] Ground truth — COM_z={COM_GT[2]:.4f} m  Mass={MASS_GT:.4f} kg  theta*={theta_gt_deg:.1f}deg")
 
     rv_fit        = rv_contact[tip_sel]        # (N,3) full rotation vectors for fit window
     push_sel_plot = push_phase[tip_sel]
@@ -427,16 +454,6 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     #     show=False,
     # )
 
-    # --- f_x zero-crossing extrapolation ---
-    # Fit a line to f_x vs pitch over the push phase, then find the angle where f_x = 0.
-    # That angle is an independent estimate of θ* (tipping point) without relying on the torque model.
-    pitch_push_deg = np.rad2deg(pitch_contact[push_tip_sel])
-    fx_push        = w_app_O[push_tip_sel, 3]  # f_x in object frame
-
-    fx_coeffs = np.polyfit(pitch_push_deg, fx_push, 1)  # linear fit: f_x = a*θ + b
-    theta_fx_zero_deg = -fx_coeffs[1] / fx_coeffs[0]   # zero crossing: θ = -b/a
-    print(f"  [{obj}] f_x zero-crossing — θ*={theta_fx_zero_deg:.2f}°  (GT={np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°)")
-
     # Extrapolation range: span observed data plus padding toward zero crossing
     theta_extrap = np.linspace(
         min(pitch_push_deg.min(), theta_fx_zero_deg) - 1.0,
@@ -448,8 +465,8 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     # Plot f_x data and extrapolated line
     axes_obj[1].plot(np.rad2deg(pitch_contact[tip_sel]), w_app_O[tip_sel, 3], 'o', markersize=3, label="f_x (object frame)")
     axes_obj[1].plot(theta_extrap, fx_extrap, '--', label=f"linear fit (push)")
-    axes_obj[1].axvline(theta_fx_zero_deg, color='red', linestyle=':', label=f"θ* = {theta_fx_zero_deg:.2f}°")
-    axes_obj[1].axvline(np.degrees(np.arctan2(COM_GT[0], COM_GT[2])), color='green', linestyle=':', label=f"θ* GT = {np.degrees(np.arctan2(COM_GT[0], COM_GT[2])):.1f}°")
+    axes_obj[1].axvline(theta_fx_zero_deg, color='red', linestyle=':', label=f"theta* = {theta_fx_zero_deg:.2f}deg")
+    axes_obj[1].axvline(theta_gt_deg, color='green', linestyle=':', label=f"theta* GT = {theta_gt_deg:.1f}deg")
     axes_obj[1].axhline(0, color='k', linewidth=0.8)
     axes_obj[1].set_xlabel("Pitch angle (degrees)")
     axes_obj[1].set_ylabel("f_x in object frame (N)")
@@ -483,7 +500,11 @@ def run_object(obj: str, workspace_root: str) -> None:
         print(f"\n[{obj}] No squash log — skipping.")
         return
     print(f"\n{'='*60}\n  OBJECT: {obj}\n{'='*60}")
-    _run_estimation(obj, os.path.join(workspace_root, "runtime_logs", obj), squash_file)
+    try:
+        _run_estimation(obj, os.path.join(workspace_root, "runtime_logs", obj), squash_file)
+    except (KeyError, ValueError) as exc:
+        print(f"[{obj}] Incompatible or incomplete arc_squash log — skipping.")
+        print(f"[{obj}] {exc}")
 
 
 def main():
