@@ -16,6 +16,7 @@ from vision_msgs.msg import Detection3DArray
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.motion_geometry import arc_angle_xz, arc_velocity_xz, clamp, quat_to_pitch
 from irb120_control.util.runtime_log_dir import load_object_params, save_ft_pose_log, set_recorder_output_dir
 
@@ -283,6 +284,9 @@ def main(args=None) -> int:
     node = ArcTest()
     recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
+        if not tare_netft(node):
+            return 1
+
         set_recorder_output_dir(node, LOG_SUBDIR)
         if recorder_client.wait_for_service(timeout_sec=5.0):
             future = recorder_client.call_async(SetBool.Request(data=True))

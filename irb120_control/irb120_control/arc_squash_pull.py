@@ -29,6 +29,7 @@ from irb120_control.controllers.force_controller import PIDForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
     arc_velocity_xz,
@@ -71,13 +72,13 @@ LULL_SETTLE_TIMEOUT_SEC = 8.0 # bail to ARC anyway after this long even if not s
 RETRACT_SPEED = 0.008       # m/s
 RETRACT_DURATION_SEC = 3.0
 
-KP_FORCE = 0.0007
-KI_FORCE = 0.00003
+KP_FORCE = 0.00035
+KI_FORCE = 0.000005
 KD_FORCE = 0.0
-MAX_NORMAL_SPEED = 0.010
-FORCE_DEADBAND_N = 0.15
-FORCE_FILTER_ALPHA = 0.25
-FORCE_OUTPUT_SLEW_RATE = 0.05  # m/s^2
+MAX_NORMAL_SPEED = 0.006
+FORCE_DEADBAND_N = 0.25
+FORCE_FILTER_ALPHA = 0.12
+FORCE_OUTPUT_SLEW_RATE = 0.02  # m/s^2
 
 KP_ORIENT = 1.0         # rad/s per rad of pitch error — tune up if sluggish
 MAX_ORIENT_SPEED = 0.5  # rad/s clamp
@@ -565,6 +566,9 @@ def main(args=None) -> int:
     node = ArcSquashPull()
     recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
+        if not tare_netft(node):
+            return 1
+
         set_recorder_output_dir(node, node._log_subdir)
         if recorder_client.wait_for_service(timeout_sec=5.0):
             future = recorder_client.call_async(SetBool.Request(data=True))
