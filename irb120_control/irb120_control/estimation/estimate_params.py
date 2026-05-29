@@ -21,12 +21,10 @@ STATE_RETRACT = 5
 
 FT_WRENCH_ORIGIN_OFFSET_X = 0.08225
 
-# _LPF_B,      _LPF_A      = butter(4, 6,   fs=500, btype='low')  # 4, 6 Hz — removes high-freq sensor noise
-# _LPF_SLOW_B, _LPF_SLOW_A = butter(2, 0.5, fs=500, btype='low')  # 2, 0.5 Hz — removes force-controller hunting
-# def _lpf(x, axis=0):
-#     return filtfilt(_LPF_B, _LPF_A, x, axis=axis) if x.shape[0] > 20 else x
-# def _lpf_slow(x, axis=0):
-#     return filtfilt(_LPF_SLOW_B, _LPF_SLOW_A, x, axis=axis) if x.shape[0] > 20 else x
+_LPF_B, _LPF_A = butter(4, 6, fs=500, btype='low')
+
+def _lpf(x, axis=0):
+    return filtfilt(_LPF_B, _LPF_A, x, axis=axis) if x.shape[0] > 20 else x
 
 
 def load_and_preprocess(filepath):
@@ -90,8 +88,27 @@ def load_and_preprocess(filepath):
     return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id
 
 
-def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
-    
+def estimate_friction(push_log_path: str, mass_est: float, mass_gt: float) -> tuple:
+    """
+    Estimate mu_t from slip-onset tangential force in the push log.
+    Returns (mu_est, mu_gt) where mu_gt uses the known ground-truth mass.
+    """
+    data = np.load(push_log_path)
+    fx = _lpf(data["fx"])
+    fy = _lpf(data["fy"])
+    f_tan = np.sqrt(fx**2 + fy**2)
+
+    # Use the steady kinetic-sliding window (50%-85% of the signal) as the slip force
+    n = len(f_tan)
+    f_slip = float(np.median(f_tan[int(0.50 * n):int(0.85 * n)]))
+
+    mu_est = f_slip / (mass_est * 9.81)
+    mu_gt  = f_slip / (mass_gt  * 9.81)
+    return mu_est, mu_gt
+
+
+def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | None) -> dict | None:
+
     ## HERE WE CAN REDEFINE THE r0 lever arm
     if obj == "box":
         # r0 = np.array([0.01, 0.0, 0.3]) # 0.026 old value, new is ~1.4 cm
@@ -115,7 +132,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         THETA_GT_DEG = 20.126
 
     time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id = load_and_preprocess(squash_file)
- 
+
     p_pivot_B = np.array([0.61, 0, 0])# -0.021]) # 0.6 Near-exact pivot from pre-defined object frame (I reset obj to known pose)s
 
     # Bootstrap from controller state timing rather than inferring contact/release.
@@ -138,7 +155,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
                                 T_B_sensor[contact_mask],
                                 T_B_obj[contact_mask])
 
-    ## ======== One figure per object: 2 subplots side-by-side =========
+    ## ======== One figure per object: 3 subplots side-by-side =========
     fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
     fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
     time_plot = time[contact_mask] - time[contact_mask][0]
@@ -201,17 +218,18 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
         theta_tau_deg = -np.degrees(np.arctan2(COM_GT[0], com_z_tau))
         print(f"  [{obj}] {label:>7s} [B: τ jnt ] theta*={theta_tau_deg:.2f}°  z_c={com_z_tau:.4f}m  m={mass_tau:.4f}kg")
 
-        return com_z_fx, mass_fx, theta_fx_deg, fx_coeffs, com_z_tau, mass_tau
+        return com_z_fx, mass_fx, theta_fx_deg, fx_coeffs, com_z_tau, mass_tau, theta_tau_deg
 
 
     print(f"\n--- [{obj}] PHASE ESTIMATES ---")
-    com_z_push,    mass_push,    theta_fx_push_deg,    fx_coeffs_push,    com_z_tau_push,    mass_tau_push    = _fit_phase(arc_phase_trimmed,   "ARC",   COM_GT)
-    com_z_retract, mass_retract, theta_fx_retract_deg, fx_coeffs_retract, com_z_tau_retract, mass_tau_retract = _fit_phase(unarc_phase_trimmed, "UNARC", COM_GT)
+    com_z_push,    mass_push,    theta_fx_push_deg,    fx_coeffs_push,    com_z_tau_push,    mass_tau_push,    theta_tau_push_deg    = _fit_phase(arc_phase_trimmed,   "ARC",   COM_GT)
+    com_z_retract, mass_retract, theta_fx_retract_deg, fx_coeffs_retract, com_z_tau_retract, mass_tau_retract, theta_tau_retract_deg = _fit_phase(unarc_phase_trimmed, "UNARC", COM_GT)
     print(f"  [{obj}] Ground truth — COM_z={COM_GT[2]:.4f} m  Mass={MASS_GT:.4f} kg  theta*={theta_gt_deg:.1f}deg")
 
-    # Torque-plot predictions from Method B (joint τ fit)
-    theta_tau_push_deg    = -np.degrees(np.arctan2(COM_GT[0], com_z_tau_push))
-    theta_tau_retract_deg = -np.degrees(np.arctan2(COM_GT[0], com_z_tau_retract))
+    # Average push/retract Method B estimates (hysteresis cancellation)
+    mass_est      = 0.5 * (mass_tau_push      + mass_tau_retract)
+    com_z_est     = 0.5 * (com_z_tau_push     + com_z_tau_retract)
+    theta_est_deg = 0.5 * (theta_tau_push_deg + theta_tau_retract_deg)
     tau_pred_arc   = model_fwd_wrench(rot_vec_during_contact[tip_sel], np.array([COM_GT[0], 0.0, com_z_tau_push]),    mass_tau_push)[:, 1]
     tau_pred_unarc = model_fwd_wrench(rot_vec_during_contact[tip_sel], np.array([COM_GT[0], 0.0, com_z_tau_retract]), mass_tau_retract)[:, 1]
 
@@ -251,38 +269,147 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str) -> None:
     axes_obj[1].set_title("g_x zero-crossing (A: dashed) vs joint τ (B: solid)")
     axes_obj[1].legend()
     axes_obj[1].grid(True)
-    
+
     # fig_obj.tight_layout()
     fig_obj.savefig(os.path.join(base_dir, "estimation_summary.png"), dpi=150, bbox_inches="tight")
 
+    # Friction estimation from push log
+    mu_est = mu_gt = None
+    if push_file and os.path.exists(push_file):
+        mu_est, mu_gt = estimate_friction(push_file, mass_est, MASS_GT)
+        print(f"  [{obj}] Friction: mu_est={mu_est:.3f}  mu_gt={mu_gt:.3f}")
+    else:
+        print(f"  [{obj}] No push log — friction skipped.")
 
-# def estimate_friction(push_log_path: str, mass_est: float) -> tuple:
-#     data = np.load(push_log_path)
-#     f_planar = np.sqrt(_lpf(data["fx"])**2 + _lpf(data["fy"])**2)
-
-#     active  = f_planar > 0.3
-#     first_a = np.argmax(active)
-#     last_a  = len(f_planar) - np.argmax(active[::-1])
-#     span    = last_a - first_a
-#     f_planar = f_planar[first_a + int(0.15 * span) : first_a + int(0.85 * span)]
-
-#     mu_t   = f_planar / (mass_est * 9.81)
-#     med    = np.median(f_planar)
-#     steady = np.abs(f_planar - med) <= np.median(np.abs(f_planar - med))
-#     return float(np.median(mu_t[steady])), float(np.std(mu_t[steady]))
+    return {
+        "obj":          obj,
+        "mass_est":     mass_est,
+        "mass_gt":      MASS_GT,
+        "com_z_est":    com_z_est,
+        "com_z_gt":     COM_GT[2],
+        "theta_est_deg": abs(theta_est_deg),   # store as positive tipping angle
+        "theta_gt_deg":  THETA_GT_DEG,
+        "mu_est":       mu_est,
+        "mu_gt":        mu_gt,
+    }
 
 
-def run_object(obj: str, workspace_root: str) -> None:
+def plot_results_summary(results: list, save_dir: str) -> None:
+    """
+    Two-figure results summary (2×2 layout for single-column papers):
+      Fig 1 — grouped bar chart: estimated vs GT for m, z_c, θ*, µ_t
+      Fig 2 — absolute error bar chart for the same four parameters
+    """
+    objs   = [r["obj"] for r in results]
+    n      = len(objs)
+    x      = np.arange(n)
+    labels = [o.capitalize() for o in objs]
+
+    mass_est    = np.array([r["mass_est"]      for r in results])
+    mass_gt     = np.array([r["mass_gt"]       for r in results])
+    com_z_est   = np.array([r["com_z_est"]     for r in results]) * 100   # m → cm
+    com_z_gt    = np.array([r["com_z_gt"]      for r in results]) * 100
+    theta_est   = np.array([r["theta_est_deg"] for r in results])
+    theta_gt    = np.array([r["theta_gt_deg"]  for r in results])
+    mu_mask     = np.array([r["mu_est"] is not None for r in results])
+    mu_est      = np.array([r["mu_est"] if r["mu_est"] is not None else 0.0 for r in results])
+    mu_gt       = np.array([r["mu_gt"]  if r["mu_gt"]  is not None else 0.0 for r in results])
+
+    bar_w   = 0.35
+    col_est = "#2196F3"
+    col_gt  = "#4CAF50"
+    err_col = "#E53935"
+    fs_tick  = 12
+    fs_label = 13
+    fs_title = 13
+    fs_leg   = 11
+
+    mass_err  = np.abs(mass_est  - mass_gt)
+    com_z_err = np.abs(com_z_est - com_z_gt)
+    theta_err = np.abs(theta_est - theta_gt)
+    mu_err    = np.where(mu_mask, np.abs(mu_est - mu_gt), np.nan)
+
+    mass_rel  = mass_err  / mass_gt  * 100
+    com_z_rel = com_z_err / com_z_gt * 100
+    theta_rel = theta_err / theta_gt * 100
+    mu_rel    = np.where(mu_mask, mu_err / mu_gt * 100, np.nan)
+
+    # ── Figure 1: estimated vs GT (2×2) ────────────────────────────────────────
+    fig1, axes = plt.subplots(2, 2, figsize=(9, 8))
+
+    def _bar_pair(ax, est_vals, gt_vals, ylabel, title, mask=None):
+        b1 = ax.bar(x - bar_w/2, est_vals, bar_w, label="Estimated",    color=col_est, alpha=0.85)
+        ax.bar(     x + bar_w/2, gt_vals,  bar_w, label="Ground Truth", color=col_gt,  alpha=0.85)
+        if mask is not None:
+            for i, m in enumerate(mask):
+                if not m:
+                    b1[i].set_color("#BDBDBD")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=fs_tick)
+        ax.set_ylabel(ylabel, fontsize=fs_label)
+        ax.set_title(title, fontsize=fs_title)
+        ax.tick_params(axis='y', labelsize=fs_tick)
+        ax.legend(fontsize=fs_leg)
+        ax.grid(axis='y', alpha=0.4)
+        ax.set_ylim(bottom=0)
+
+    _bar_pair(axes[0, 0], mass_est,  mass_gt,  "Mass (kg)",         "Mass $m$")
+    _bar_pair(axes[0, 1], com_z_est, com_z_gt, "CoM height (cm)",   "CoM Height $z_c$")
+    _bar_pair(axes[1, 0], theta_est, theta_gt, "Tipping angle (°)", "Tipping Angle $\\theta^*$")
+    _bar_pair(axes[1, 1], mu_est,    mu_gt,    "Friction coeff.",   "Friction $\\mu_t$", mask=mu_mask)
+
+    fig1.tight_layout()
+    fig1.savefig(os.path.join(save_dir, "results_bar.png"), dpi=150, bbox_inches="tight")
+    print("Saved results_bar.png")
+
+    # ── Figure 2: relative errors % (2×2) ──────────────────────────────────────
+    fig2, axes2 = plt.subplots(2, 2, figsize=(9, 8))
+
+    def _err_bars(ax, errs, ylabel, title, mask=None):
+        colors = [err_col if (mask is None or mask[i]) else "#BDBDBD" for i in range(n)]
+        ax.bar(x, np.where(np.isnan(errs), 0, errs), color=colors, alpha=0.85)
+        if mask is not None:
+            for i, m in enumerate(mask):
+                if not m:
+                    ax.text(x[i], 0.1, "N/A", ha='center', va='bottom', fontsize=fs_tick, color='gray')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=fs_tick)
+        ax.set_ylabel(ylabel, fontsize=fs_label)
+        ax.set_title(title, fontsize=fs_title)
+        ax.tick_params(axis='y', labelsize=fs_tick)
+        ax.grid(axis='y', alpha=0.4)
+        ax.set_ylim(bottom=0)
+
+    _err_bars(axes2[0, 0], mass_rel,  "Relative error (%)", "|Δm| / m  (%)")
+    _err_bars(axes2[0, 1], com_z_rel, "Relative error (%)", "|Δz_c| / z_c  (%)")
+    _err_bars(axes2[1, 0], theta_rel, "Relative error (%)", "|Δθ*| / θ*  (%)")
+    _err_bars(axes2[1, 1], mu_rel,    "Relative error (%)", "|Δμ_t| / μ_t  (%)", mask=mu_mask)
+
+    fig2.tight_layout()
+    fig2.savefig(os.path.join(save_dir, "results_error.png"), dpi=150, bbox_inches="tight")
+    print("Saved results_error.png")
+
+    # ── Print summary table ─────────────────────────────────────────────────────
+    print(f"\n{'Object':<12} {'|Δm|%':>8} {'|Δzc|%':>8} {'|Δθ*|%':>8} {'|Δμt|%':>8}")
+    print("-" * 48)
+    for r, mr, cr, tr, mur in zip(results, mass_rel, com_z_rel, theta_rel, mu_rel):
+        mu_str = f"{mur:>7.1f}" if not np.isnan(mur) else "    N/A"
+        print(f"  {r['obj']:<10} {mr:>7.1f}% {cr:>7.1f}% {tr:>7.1f}% {mu_str}%")
+
+
+def run_object(obj: str, workspace_root: str) -> dict | None:
     squash_file = os.path.join(workspace_root, "runtime_logs", obj, "arc_squash", "most_recent.npz")
+    push_file   = os.path.join(workspace_root, "runtime_logs", obj, "push",       "most_recent.npz")
     if not os.path.exists(squash_file):
         print(f"\n[{obj}] No squash log — skipping.")
-        return
+        return None
     print(f"\n{'='*60}\n  OBJECT: {obj}\n{'='*60}")
     try:
-        _run_estimation(obj, os.path.join(workspace_root, "runtime_logs", obj), squash_file)
+        return _run_estimation(obj, os.path.join(workspace_root, "runtime_logs", obj), squash_file, push_file)
     except (KeyError, ValueError) as exc:
         print(f"[{obj}] Incompatible or incomplete arc_squash log — skipping.")
         print(f"[{obj}] {exc}")
+        return None
 
 
 def main():
@@ -292,8 +419,15 @@ def main():
     args = parser.parse_args()
 
     workspace_root = args.workspace or os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
+    results = []
     for obj in ([args.object] if args.object else ALL_OBJECTS):
-        run_object(obj, workspace_root)
+        r = run_object(obj, workspace_root)
+        if r is not None:
+            results.append(r)
+
+    if len(results) > 1:
+        plot_results_summary(results, workspace_root)
+
     plt.show()
 
 
