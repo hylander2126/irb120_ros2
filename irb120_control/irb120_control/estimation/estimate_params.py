@@ -9,7 +9,7 @@ from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkw
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 
-ALL_OBJECTS = ["box", "heart", "flashlight", "soda"]#, "monitor"]
+ALL_OBJECTS = ["box", "heart", "flashlight", "soda", "monitor"]
 # ALL_OBJECTS = ["flashlight"]
 # ALL_OBJECTS = ["soda"]
 
@@ -130,6 +130,11 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
         COM_GT = np.array([0.055, 0.0, 0.15])
         MASS_GT = 2.057
         THETA_GT_DEG = 20.126
+    elif obj == "monitor":
+        # r0 = np.array([0.055, 0.0, 0.3]) # 0.055
+        COM_GT = np.array([0.06, 0.0, 0.232]) # CoM are approximate. +- 1cm
+        MASS_GT = 5.04
+        THETA_GT_DEG = 14.5 # Theta star is approximate. +- 0.2 deg
 
     time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id = load_and_preprocess(squash_file)
 

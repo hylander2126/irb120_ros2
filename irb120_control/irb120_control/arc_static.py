@@ -63,6 +63,8 @@ ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
 ARC_FX_FLIP_STABLE_SAMPLES = 5
+ARC_FX_LOW_THRESH_N = 0.1 # 0.5 for monitor...        # stop ARC when tangent force drops below this (before sign flip)
+ARC_FX_LOW_STABLE_SAMPLES = 5    # number of consecutive ticks below threshold required
 
 SQUASH_TIMEOUT_SEC = 30.0
 ARC_TIMEOUT_SEC = 30.0
@@ -90,7 +92,7 @@ MAX_Y_SPEED = 0.015     # m/s clamp on Y correction output
 CONTROL_HZ = 100.0
 REQUIRE_OPERATOR_CONFIRM = True
 
-LOST_CONTACT_FORCE_THRESH_N = 0.5
+LOST_CONTACT_FORCE_THRESH_N = 0.3
 LOST_CONTACT_STEPS = 20
 
 class ArcStatic(Node):
@@ -159,6 +161,7 @@ class ArcStatic(Node):
         self._arc_fx_neg_count = 0
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign: int | None = None
+        self._arc_fx_low_count = 0
 
         self._pause_servo_client   = self.create_client(SetBool, "/servo_node/pause_servo")
 
@@ -346,6 +349,7 @@ class ArcStatic(Node):
         self._arc_fx_neg_count = 0
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign = None
+        self._arc_fx_low_count = 0
         self.get_logger().info(
             f"Arc init: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})  "
             f"r={radius:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
@@ -551,14 +555,30 @@ class ArcStatic(Node):
             if not ok: return
 
             angle_deg = math.degrees(angle)
+            f_tangent = self._tangent_force(angle)
             if t - self._last_arc_log_time > 0.2:
                 self._last_arc_log_time = t
-                f_tangent = self._tangent_force(angle)
                 self.get_logger().info(
                     f"{angle_deg:.1f} / {ARC_MAX_ANGLE_DEG:.1f} deg  "
                     f"pitch(static): {math.degrees(current_pitch):.1f} deg  "
-                    f"f_tangent: {f_tangent:.2f} N  f_radial: {f_radial:.2f} N"
+                    f"f_tangent: {f_tangent:.2f} N  f_radial: {f_radial:.2f} N  "
+                    f"fx_low_count: {self._arc_fx_low_count}"
                 )
+            swept = abs(self._arc_start_angle - angle) if self._arc_start_angle is not None else 0.0
+            if swept >= math.radians(ARC_FX_SIGN_MIN_SWEEP_DEG) and f_tangent < ARC_FX_LOW_THRESH_N:
+                self._arc_fx_low_count += 1
+                if self._arc_fx_low_count >= ARC_FX_LOW_STABLE_SAMPLES:
+                    self._lull_next = "UNARC"
+                    self.get_logger().info(
+                        f"tangent force below threshold ({ARC_FX_LOW_THRESH_N:.2f} N) for "
+                        f"{ARC_FX_LOW_STABLE_SAMPLES} ticks: f_tangent={f_tangent:.2f} N "
+                        f"at arc_angle={math.degrees(angle):.1f} deg; entering LULL"
+                    )
+                    self._transition("LULL")
+                    return
+            else:
+                self._arc_fx_low_count = 0
+
             if self._arc_fx_flipped(angle):
                 self._lull_next = "UNARC"
                 self.get_logger().info(

@@ -13,6 +13,16 @@ radial component to maintain the target normal force against the surface.
 UNARC reverses the arc back to the squash angle.
 """
 
+
+# ============================================================================= 
+
+# THIS IS DEPRECATED IN FAVOR OF ARC_STATIC WHICH DOES NOT CHANGE THE WRIST ANGLE WITH THE OBJECT.
+# THIS CONTROLLER WAS TOO DIFFICULT AND NOISY FOR THE HYBRID FORCE CONTROLLER TO HANDLE.
+
+# =============================================================================
+
+
+
 import math
 import sys
 

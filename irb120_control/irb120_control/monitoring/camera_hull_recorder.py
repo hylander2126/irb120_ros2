@@ -50,6 +50,11 @@ class CameraHullRecorder(Node):
         self.declare_parameter("auto_start_recording", False)
         self.declare_parameter("ft_topic", "/netft_data_monitor")
         self.declare_parameter("ft_hard_limit_n", 10.0)
+        self.declare_parameter("show_hull", False)
+        self.declare_parameter("show_rpy_hud", False)
+        # "h264" = good quality, small files (default)
+        # "lossless" = PNG-in-AVI, pixel-perfect, large files — re-encode before submission
+        self.declare_parameter("video_quality", "lossless")
 
         self._image_topic = str(self.get_parameter("image_topic").value)
         self._camera_info_topic = str(self.get_parameter("camera_info_topic").value)
@@ -66,6 +71,8 @@ class CameraHullRecorder(Node):
         self._whitelist = {str(x) for x in self.get_parameter("object_id_whitelist").value}
         self._auto_start = bool(self.get_parameter("auto_start_recording").value)
         self._ft_hard_limit = float(self.get_parameter("ft_hard_limit_n").value)
+        self._show_hull = bool(self.get_parameter("show_hull").value)
+        self._show_rpy_hud = bool(self.get_parameter("show_rpy_hud").value)
 
         self._ft_fx: float = 0.0
         self._ft_fy: float = 0.0
@@ -191,10 +198,11 @@ class CameraHullRecorder(Node):
             return
 
         annotated = frame.copy()
-        self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
+        if self._show_hull:
+            self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
         if self._ft_received:
             self._draw_ft_hud(annotated)
-        if self._obj_pose_received:
+        if self._show_rpy_hud and self._obj_pose_received:
             self._draw_obj_rpy_hud(annotated)
 
         try:
@@ -212,13 +220,20 @@ class CameraHullRecorder(Node):
         output_dir = self._resolve_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._output_path = output_dir / f"camera_hull_overlay_{ts}.mp4"
-        self._writer = cv2.VideoWriter(
-            str(self._output_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            self._output_fps,
-            (width, height),
-        )
+        quality_mode = str(self.get_parameter("video_quality").value)
+
+        if quality_mode == "lossless":
+            # PNG-in-AVI: truly lossless, large files — re-encode with ffmpeg before submission
+            self._output_path = output_dir / f"camera_hull_overlay_{ts}.avi"
+            fourcc = cv2.VideoWriter_fourcc(*"png ")
+        else:
+            # H.264: excellent quality, small files
+            self._output_path = output_dir / f"camera_hull_overlay_{ts}.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+
+        self._writer = cv2.VideoWriter(str(self._output_path), fourcc, self._output_fps, (width, height))
+        if quality_mode != "lossless":
+            self._writer.set(cv2.VIDEOWRITER_PROP_QUALITY, 100)
         if not self._writer.isOpened():
             self.get_logger().error(f"Failed to open writer: {self._output_path}")
             self._writer = None

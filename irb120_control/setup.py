@@ -41,6 +41,7 @@ setup(
             'arc_squash_pull = irb120_control.arc_squash_pull:main',
             'arc_test = irb120_control.arc_test:main',
             'arc_static = irb120_control.arc_static:main',
+            'adaptive_press = irb120_control.adaptive_press:main',
             'push = irb120_control.push:main',
             'camera_hull_recorder = irb120_control.monitoring.camera_hull_recorder:main',
             'estimate_params = irb120_control.estimation.estimate_params:main',
