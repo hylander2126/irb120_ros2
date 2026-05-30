@@ -112,28 +112,28 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
     ## HERE WE CAN REDEFINE THE r0 lever arm
     if obj == "box":
         # r0 = np.array([0.01, 0.0, 0.3]) # 0.026 old value, new is ~1.4 cm
-        COM_GT = np.array([0.05, 0.0, 0.15])
         MASS_GT = 0.676
+        COM_GT = np.array([0.05, 0.0, 0.15])
         THETA_GT_DEG = 17.532
     elif obj == "heart":
         # r0 = np.array([0.01, 0.0, 0.2]) # 0.026
+        MASS_GT = 0.239
         COM_GT = np.array([0.0458, 0.0, 0.10])
-        MASS_GT = 0.295
         THETA_GT_DEG = 23.984
     elif obj == "flashlight":
         # r0 = np.array([0.028, 0.0, 0.2]) # 0.028
-        COM_GT = np.array([0.028, 0.0, 0.0938])
         MASS_GT = 0.387
+        COM_GT = np.array([0.028, 0.0, 0.0938])
         THETA_GT_DEG = 15.126
     elif obj == "soda":
         # r0 = np.array([0.055, 0.0, 0.3]) # 0.055
-        COM_GT = np.array([0.055, 0.0, 0.15])
-        MASS_GT = 2.057
-        THETA_GT_DEG = 20.126
+        MASS_GT = 2.054
+        COM_GT = np.array([0.0525, 0.0, 0.15])
+        THETA_GT_DEG = 21.801 #20.126
     elif obj == "monitor":
         # r0 = np.array([0.055, 0.0, 0.3]) # 0.055
-        COM_GT = np.array([0.06, 0.0, 0.232]) # CoM are approximate. +- 1cm
         MASS_GT = 5.04
+        COM_GT = np.array([0.06, 0.0, 0.232]) # CoM are approximate. +- 1cm
         THETA_GT_DEG = 14.5 # Theta star is approximate. +- 0.2 deg
 
     time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id = load_and_preprocess(squash_file)

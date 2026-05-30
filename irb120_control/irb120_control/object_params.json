@@ -15,7 +15,7 @@
             "force_ref_n": 5.0
         },
         "heart": {
-            "mass_gt": 0.295,
+            "mass_gt": 0.239,
             "com_gt":  [0.0458, 0.0, 0.1000],
             "theta_star": 23.984,
             "pre_squash": {
@@ -57,8 +57,8 @@
             "force_ref_n": 10.0
         },
         "soda": {
-            "mass_gt": 2.057,
-            "com_gt":  [0.0525, 0.0, 0.116],
+            "mass_gt": 2.054,
+            "com_gt":  [0.0525, 0.0, 0.15],
             "theta_star": 20.126,
             "pre_squash": {
                 "x": 0.645, "y": 0.00, "z": 0.333,
