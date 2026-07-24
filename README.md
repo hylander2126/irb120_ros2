@@ -10,11 +10,13 @@ Three terminal groups run at different lifetimes:
 
 | Terminal | What runs | Lifetime |
 |---|---|---|
-| **T1 — RWS client** | `abb_rws_client` | Always-on. Never kill unless rebooting the controller. |
-| **T2 — ABB hardware** | `abb_control` (ros2_control + EGM handler) | Always-on during a session. |
-| **T3 — MoveIt stack** | `bringup_stack` (move_group, perception, Servo, etc.) | Restart freely during development. |
+| **T1 — RWS client** | `irb120_control/abb_rws.launch.py` | Always-on. Never kill unless rebooting the controller. |
+| **T2 — ABB hardware** | `irb120_control/abb_control.launch.py` (ros2_control + EGM handler) | Always-on during a session. |
+| **T3 — MoveIt stack** | `irb120_control/bringup_stack.launch.py` (move_group, perception, Servo, etc.) | Restart freely during development. |
 
 **T1 and T2 must stay up** so that EGM shutdown is sent cleanly on Ctrl+C. Killing T1 (rws_client) before T2 means `stop_egm` cannot reach the IRC5, which causes the FlexPendant to crash/reboot.
+
+The launch files in this repository are the supported entry points for the robot. They include and configure components from ABB and other third-party ROS 2 packages internally; those packages are still runtime dependencies, but their launch files should not be invoked directly for this setup.
 
 ---
 
@@ -23,18 +25,18 @@ Three terminal groups run at different lifetimes:
 ### Terminal 1 — RWS client (run once, leave running)
 
 ```bash
-ros2 launch abb_bringup abb_rws_client.launch.py \
-    robot_ip:=192.168.125.1 \
-    robot_nickname:=IRB120
+ros2 launch irb120_control abb_rws.launch.py
 ```
 
-Leave this running indefinitely. It manages the Robot Web Services connection to the IRC5 and must outlive everything else so EGM can be stopped cleanly on shutdown.
+This local launch file configures the Robot Web Services connection for the IRC5 at `192.168.125.1` and includes the required ABB RWS implementation. Leave it running indefinitely; it must outlive everything else so EGM can be stopped cleanly on shutdown.
 
 ### Terminal 2 — ABB hardware bringup (run once per session)
 
 ```bash
 ros2 launch irb120_control abb_control.launch.py
 ```
+
+This local launch file is the entry point for the cell-specific hardware configuration. It includes the required ABB bringup components with this repository's URDF, controller configuration, MoveIt configuration, and hardware settings.
 
 This starts:
 - `ros2_control_node` with the ABB hardware interface
