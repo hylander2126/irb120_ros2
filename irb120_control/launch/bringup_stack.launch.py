@@ -109,14 +109,20 @@ def generate_launch_description():
             "camera_namespace": "",
             "pointcloud.enable": "true",
             "colorizer.enable": "false",
-            "depth_module.depth_profile": "640x480x30",
+            "depth_module.depth_profile": "1280x720x30",
             "align_depth.enable": "true",
-            "rgb_camera.color_profile": "640x480x30",
-            "decimation_filter.enable": "true",
-            "decimation_filter.filter_magnitude": "2",
-            "spatial_filter.enable": "false",
-            "temporal_filter.enable": "false",
-            "clip_distance": "2.2",
+            "rgb_camera.color_profile": "1280x720x30",
+            "decimation_filter.enable": "false",
+            "depth_module.hdr_enabled": "true",
+            "hdr_merge.enable": "true",
+            "spatial_filter.enable": "true",
+            "temporal_filter.enable": "true",
+            "clip_distance": "1.4",
+            "config_file": os.path.join(
+                get_package_share_directory("irb120_control"),
+                "config",
+                "realsense_filters.yaml",
+            ),
         }.items(),
     )
 
@@ -124,7 +130,7 @@ def generate_launch_description():
     handeye_to_realsense_tf = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [get_package_share_directory("irb120_handeye"), "launch", "cam_tf_12mm.launch.py"]
+                [get_package_share_directory("irb120_handeye"), "launch", "cam_tf_6mm.launch.py"]
             )
         )
     )

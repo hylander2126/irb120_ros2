@@ -1,0 +1,25 @@
+# Depth post-processing tuned by hand in the RealSense Viewer (2026-07-27).
+# Not exposed as top-level rs_launch.py launch arguments, so passed via
+# rs_launch.py's `config_file` argument instead. See bringup_stack.launch.py.
+#
+# depth_module.visual_preset ("High Density" = index 4) is intentionally
+# omitted: verified live against the D435 that setting it while
+# depth_module.hdr_enabled/hdr_merge.enable are on throws
+# "The control - UVC image gain - is locked while HDR mode is active" and
+# the camera fails to start. HDR and a visual preset can't both own
+# exposure/gain at once on this device — see bringup_stack.launch.py.
+#
+# Types below matter: the underlying rs2 options are declared as integer
+# ROS params where librealsense's range/step are whole numbers (magnitude,
+# smooth_delta, holes_fill) and double where they aren't (smooth_alpha).
+# Passing a float (e.g. "2.0") where an int is expected is silently
+# rejected by the node with a "Could not set param" warning and the
+# camera-side default is kept instead — verified live, not from docs.
+spatial_filter.filter_magnitude: 2
+spatial_filter.filter_smooth_alpha: 0.5
+spatial_filter.filter_smooth_delta: 4
+spatial_filter.holes_fill: 0          # Persistency mode: Disabled
+
+temporal_filter.filter_smooth_alpha: 0.02
+temporal_filter.filter_smooth_delta: 35
+temporal_filter.holes_fill: 3         # Persistency mode: Valid in 2/last 4

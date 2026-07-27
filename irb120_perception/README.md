@@ -273,21 +273,36 @@ Markers expire after 3 s so they disappear cleanly if detection stops.
 
 ## RealSense configuration
 
-Configured in [`bringup_irb120_moveit.launch.py`](../irb120_control/launch/bringup_irb120_moveit.launch.py).
+Configured in [`bringup_stack.launch.py`](../irb120_control/launch/bringup_stack.launch.py).
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| `depth_module.depth_profile` | `640x480x30` | Matched to color resolution — avoids scaling artefacts in aligned depth |
-| `rgb_camera.color_profile` | `640x480x30` | |
+| `depth_module.depth_profile` | `1280x720x30` | Max depth resolution on the D435 (top res caps at 30fps) |
+| `rgb_camera.color_profile` | `1280x720x30` | Matched to depth resolution — avoids scaling artefacts in aligned depth |
 | `align_depth.enable` | `true` | Depth pixels aligned to color image frame |
-| `decimation_filter.enable` | `true` | 2×2 hardware averaging before output — reduces depth noise with negligible latency |
-| `spatial_filter.enable` | `false` | Would improve edge quality but adds pipeline lag; replaced by software median blur |
-| `temporal_filter.enable` | `false` | Would reduce temporal noise but adds lag; replaced by software EMA smoothing |
+| `decimation_filter.enable` | `false` | Disabled to preserve full native resolution |
+| `depth_module.hdr_enabled` / `hdr_merge.enable` | `true` | On-sensor HDR merge (alternating exposure/gain pairs) — see gotcha below |
+| `disparity_filter.enable` | `true` | Wraps spatial/temporal in the disparity domain (Intel-recommended for filter quality) |
+| `spatial_filter.enable` | `true` | Magnitude 2, smooth alpha 0.5, smooth delta 4, persistency disabled — tuned by hand in the RealSense Viewer |
+| `temporal_filter.enable` | `true` | Smooth alpha 0.02, smooth delta 99, persistency "Valid in 2/last 4" — tuned by hand in the RealSense Viewer |
 
-The RealSense spatial and temporal post-processing filters were found to introduce
-significant latency. Equivalent denoising is applied in software:
-- **Spatial noise** → `cv2.medianBlur` on the raw depth image (configurable via `depth_median_ksize`)
-- **Temporal noise** → EMA smoothing on the detected centroid across frames (configurable via `smooth_alpha`)
+Fine-grained filter numbers live in [`realsense_filters.yaml`](../irb120_control/config/realsense_filters.yaml)
+(passed via `rs_launch.py`'s `config_file` arg, since they aren't exposed as
+top-level launch arguments in this realsense2_camera version).
+
+Note: the D435 cannot exceed 30fps at this resolution — higher framerates (60/90fps) are only
+available at 848x480 or lower. This config prioritizes resolution/accuracy over framerate.
+
+**Gotcha (verified live against the D435):** HDR merge and a `visual_preset`
+(e.g. "High Density") cannot both be active — the sensor throws "gain is
+locked while HDR is active" and fails to start if you try. `visual_preset`
+is intentionally omitted from `realsense_filters.yaml` for this reason.
+
+Spatial and temporal filtering are now done on-device rather than in
+software. `object_detector.py` still applies its own `cv2.medianBlur`
+(`depth_median_ksize`) and EMA smoothing (`smooth_alpha`) on top of this —
+worth checking whether that's now double-filtering before tuning either
+side further.
 
 ---
 

@@ -14,7 +14,7 @@ def generate_launch_description():
     bringup_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [get_package_share_directory("irb120_control"), "launch", "test_bringup.launch.py"]
+                [get_package_share_directory("irb120_control"), "launch", "abb_control.launch.py"]
             )
         )
     )

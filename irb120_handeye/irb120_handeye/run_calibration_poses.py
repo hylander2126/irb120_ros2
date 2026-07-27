@@ -145,7 +145,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run saved hand-eye calibration poses with manual sampling.")
     p.add_argument(
         "--pose-file",
-        default="joints_20_14mm.yaml",
+        default="joints_5_6mm.yaml",
         help="Pose YAML filename under share/irb120_handeye/calibrations/",
     )
     p.add_argument(

@@ -4,6 +4,86 @@ ROS2 driver and application stack for the ABB IRB120 with IRC5 controller, RealS
 
 ---
 
+## Install guide
+
+These instructions assume Ubuntu 24.04 with ROS 2 Jazzy installed and that only this
+Git repository was downloaded. Do not copy `build/`, `install/`, or `log/` from
+another computer; those directories contain generated files and must be recreated
+locally.
+
+The expected workspace layout is:
+
+```text
+irb120_ws/
+└── src/
+    ├── irb120_ros2/               # this repository
+    └── ...                        # dependency repositories cloned below
+```
+
+### 1. Clone this repository
+
+```bash
+mkdir -p ~/Documents/irb120_ws/src
+cd ~/Documents/irb120_ws/src
+git clone https://github.com/hylander2126/irb120_ros2.git
+```
+
+If the repository is already downloaded, place it at
+`~/Documents/irb120_ws/src/irb120_ros2`, or adjust the workspace path in the
+remaining commands.
+
+### 2. Clone the source dependencies
+
+Clone these repositories beside `irb120_ros2`, not inside it:
+
+```bash
+cd ~/Documents/irb120_ws/src
+
+git clone -b rolling https://github.com/PickNikRobotics/abb_ros2.git
+git clone -b rolling https://github.com/gbartyzel/abb_ros2_msgs.git
+git clone https://github.com/ros-industrial/abb_egm_rws_managers.git
+git clone https://github.com/ros-industrial/abb_libegm.git
+git clone https://github.com/ros-industrial/abb_librws.git
+git clone -b ros2 https://github.com/UTNuclearRoboticsPublic/netft_utils.git
+git clone -b ros2 https://github.com/ros-planning/moveit_calibration.git
+```
+
+`abb_ros2` and `abb_ros2_msgs` use their `rolling` branches in this Jazzy
+workspace.
+
+### 3. Install dependencies
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd ~/Documents/irb120_ws
+sudo apt update
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y --rosdistro jazzy
+sudo apt install python3-sklearn
+```
+
+`python3-sklearn` is required by the DBSCAN perception node. It is listed
+separately because it is not currently represented by a rosdep dependency in
+`irb120_perception`.
+
+### 4. Build and source the workspace
+
+```bash
+cd ~/Documents/irb120_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+Source both setup files in every new terminal before running this stack:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/Documents/irb120_ws/install/setup.bash
+```
+
+Optionally add those two lines to `~/.bashrc`.
+
 ## Architecture overview
 
 Three terminal groups run at different lifetimes:
@@ -168,9 +248,56 @@ ros2 run controller_manager spawner joint_trajectory_controller -c /controller_m
 
 ---
 
-## Network addresses
 
-| Device | IP |
+## Networking
+
+The IRC5 uses two different network paths for robot bringup:
+
+- Robot Web Services (RWS) is TCP communication with the controller at
+  `192.168.125.1:80`.
+- Externally Guided Motion (EGM) is UDP traffic sent **from the controller to
+  the robot-facing network adapter on the ROS computer** at port `6511`.
+
+Configure the robot network as follows:
+
+| Endpoint | Address |
 |---|---|
-| IRC5 controller (RWS) | `192.168.125.1` |
-| ATI net/ft sensor | `192.168.126.125` |
+| IRC5 controller | `192.168.125.1/24` |
+| ROS computer's robot-facing Ethernet adapter | `192.168.125.208/24` |
+| IRC5 `ROB_1` UDPUC remote address | `192.168.125.208` |
+| IRC5 `ROB_1` UDPUC remote port | `6511` |
+
+The adapter and the `ROB_1` UDPUC remote address must match. The UDPUC address
+is the destination ROS computer, **not** the controller's own address. A gateway
+and DNS server are not needed on this dedicated robot connection.
+
+After configuring the adapter, verify the address and controller connectivity:
+
+```bash
+ip -brief address
+ip route
+ping -c 3 192.168.125.1
+```
+
+Successful RWS communication alone does not prove that EGM is configured
+correctly. If bringup identifies the controller but repeatedly prints
+`ABBSystemHardware: Not connected to robot...`, check whether EGM packets are
+arriving:
+
+```bash
+sudo tcpdump -ni <robot-interface> udp port 6511
+```
+
+Replace `<robot-interface>` with the adapter name shown by `ip -brief address`.
+If no packets arrive after EGM is started, recheck the UDPUC remote address. If
+packets arrive but ROS does not connect, check the host firewall and allow UDP
+port `6511` from `192.168.125.1`.
+
+The ATI Net/F/T sensor is on a separate subnet:
+
+| Device | Address |
+|---|---|
+| ATI Net/F/T sensor | `192.168.126.125` |
+
+The computer needs an interface or route on `192.168.126.0/24` to receive
+`/netft_data`.
