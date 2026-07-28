@@ -271,6 +271,147 @@ Markers expire after 3 s so they disappear cleanly if detection stops.
 
 ---
 
+## All topics at a glance
+
+| Topic | Type | Produced by | QoS | Notes |
+|-------|------|-------------|-----|-------|
+| `/robot_mask_filter/points_masked_dbscan` | PointCloud2 | `robot_mask_filter` | **Reliable** | DBSCAN input, robot body removed |
+| `/robot_mask_filter/depth_masked_sam` | Image | `robot_mask_filter` | **Reliable** | SAM input, robot body removed |
+| `/object_detector/detections` | Detection3DArray | `object_detector` | Reliable | Both backends |
+| `/object_detector/markers` | MarkerArray | `object_detector` | Reliable | Both backends |
+| `/object_detector/object_points` | PointCloud2 (x,y,z,label) | `object_detector` | Reliable | Both backends; input to `press_point_selector` |
+| `/press_point_selector/press_pose` | PoseStamped | `press_point_selector` | Reliable | On-demand, see [Press point selection](#press-point-selection) |
+| `/press_point_selector/press_marker` | MarkerArray | `press_point_selector` | Reliable | On-demand |
+| `/object_detector/debug/sam_mask_overlay` | Image | `object_detector` | Reliable | **SAM only**, on-demand |
+| `/object_detector/debug/sam_pts_camera` | PointCloud2 | `object_detector` | Reliable | **SAM only**, on-demand |
+| `/object_detector/debug/sam_pts_after_roi` | PointCloud2 | `object_detector` | Reliable | **SAM only**, on-demand |
+| `/object_detector/debug/sam_pts_after_clean` | PointCloud2 | `object_detector` | Reliable | **SAM only**, on-demand |
+
+The "SAM only" topics have a publisher registered from startup regardless of
+backend, but nothing is ever actually published to them unless
+`segmentation_method: 'sam'` is active **and** a snapshot is triggered:
+
+```bash
+ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty '{}'
+```
+
+Under DBSCAN they show up in `ros2 topic list` (the publisher exists) but
+will never carry data — that's expected, not broken.
+
+### Troubleshooting: topic is in `ros2 topic list`, but RViz shows nothing
+
+Two independent causes, both look identical from RViz:
+
+1. **It's a SAM-only debug topic and you're running DBSCAN** — see above.
+2. **QoS mismatch (Best Effort vs Reliable).** RViz's default PointCloud2/Image
+   display requests `Reliable` unless you override it. If the publisher is
+   `Best Effort`, the subscription is incompatible and silently receives
+   nothing — no error dialog, just a permanently empty display. Check with:
+   ```bash
+   ros2 topic info <topic> --verbose   # look at "Reliability:" under QoS profile
+   ```
+   Fix: either set the display's **Topic → Reliability Policy** to `Best Effort`
+   in RViz, or (better, so it's not a manual step every time) make the
+   publisher `Reliable` if nothing about it needs Best Effort's tradeoffs —
+   that's exactly what was done for `robot_mask_filter`'s two output topics.
+
+**Reliable vs. Best Effort, briefly:** Reliable is like TCP — the publisher
+keeps a message around and retries until the subscriber acks it, so nothing
+is ever silently dropped. Best Effort is like UDP — fire-and-forget, no
+retry; if a message doesn't make it, it's just gone. Best Effort exists for
+high-rate sensor firehoses (e.g. the RealSense driver's raw 30 Hz streams)
+where retrying a stale frame is pointless — the next frame is only ~33ms
+away regardless, and retry/ack bookkeeping under load risks a growing
+backlog, which is *worse* for latency than just dropping the occasional
+frame. That's a real cost of Reliable, not a myth — but it only bites when
+messages are large *and* frequent *and* something is otherwise struggling to
+keep up. `robot_mask_filter`'s inputs stay Best Effort to match the camera
+driver they subscribe to; its outputs (`points_masked_dbscan`,
+`depth_masked_sam`) were switched to Reliable, which is safe here because a
+Best-Effort subscriber (like `object_detector`) can always read from a
+Reliable publisher — the incompatibility only runs the other direction
+(Reliable subscriber vs. Best-Effort publisher).
+
+If Reliable seemed "faster" when you tried it, that wasn't really a speed
+comparison — Best Effort with a mismatched Reliable subscriber delivers
+*zero* messages, so switching to Reliable went from "nothing arrives" to
+"everything arrives," which will always look like a win over doing nothing.
+On this same machine, at this data rate, there's no meaningful per-message
+latency difference between the two once QoS is actually compatible.
+
+---
+
+## Press point selection
+
+`press_point_selector` picks a single 3D "press point" on the detected
+object: the highest, closest-to-camera point, biased toward the lateral
+middle of the object rather than an extreme corner. Useful for a
+single-finger poke/press action.
+
+**Heuristic** (per point of the target object, higher = better):
+
+```
+score = w_height * height_score      (higher Z = better)
+      + w_camera * camera_score      (closer to the camera = better)
+      + w_center * center_score      (closer to the object's lateral
+                                       centroid, measured in the plane
+                                       perpendicular to the camera's
+                                       view direction = better)
+```
+
+The final point is the mean of the top `top_fraction` scoring points (not
+a single raw point) — this smooths sensor noise and lands near the middle
+of the qualifying near-top region instead of on one noisy outlier point.
+
+**On-demand only.** The node continuously caches the latest
+`~/object_points` message but does **not** recompute every frame — it only
+runs the heuristic when its service is called, so the target doesn't
+drift while the arm is mid-approach:
+
+```bash
+ros2 service call /press_point_selector/compute_press_point std_srvs/srv/Trigger {}
+```
+
+The last computed result is re-published at `publish_rate_hz` (default
+5 Hz) purely to keep RViz's preview fresh between triggers — that
+republish does not touch the point cloud or recompute anything.
+
+**Multi-object scenes:** `target_object_id` defaults to `-1` (auto-select
+the object with the highest mean Z, i.e. the "prominent" object, same
+convention as `sam_prominent_only`). Set it to a specific detection id to
+target a different object instead.
+
+### Outputs
+
+| Topic/Frame | Type | Content |
+|---|---|---|
+| `~/press_pose` | `geometry_msgs/PoseStamped` | Position = press point in `base_frame`. Orientation Z axis = approach direction (camera → point). |
+| `~/press_marker` | `visualization_msgs/MarkerArray` | Magenta sphere at the point + arrow along the approach direction. |
+| TF: `base_frame` → `press_frame_id` | — | Broadcast continuously (from cached result) so it stays lookup-able in RViz/MoveIt between triggers. |
+
+### Parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `input_points` | `/object_detector/object_points` | Labeled per-object cloud consumed (see below). |
+| `camera_frame` | `realsense_color_optical_frame` | TF frame used to compute "closest to camera". |
+| `target_object_id` | `-1` | `-1` = auto-select prominent object; else a specific detection id. |
+| `top_fraction` | `0.12` | Fraction of best-scoring points averaged into the final point. |
+| `min_top_points` | `5` | Floor on how many points are averaged, even for small objects. |
+| `w_height` / `w_camera` / `w_center` | `1.0` / `1.0` / `0.5` | Heuristic term weights. |
+| `publish_rate_hz` | `5.0` | Rate at which the cached result is re-published for RViz. |
+
+### New `object_detector` output this depends on
+
+`object_detector` now also publishes `~/object_points`
+(`sensor_msgs/PointCloud2`, fields `x,y,z,label:int32`) — every detected
+object's raw cluster points in one cloud, tagged with the same integer id
+used for `Detection3D.id`. This lets `press_point_selector` (or any other
+consumer) recover per-object geometry from one topic without redoing
+segmentation.
+
+---
+
 ## RealSense configuration
 
 Configured in [`bringup_stack.launch.py`](../irb120_control/launch/bringup_stack.launch.py).

@@ -17,8 +17,8 @@ SAM:    runs under the venv python (~/.venvs/.venv_torch_SAM/bin/python3),
 Pipeline topology:
 
   RealSense ──▶ robot_mask_filter ──▶ object_detector
-                    │ ~/points_masked   (DBSCAN input)
-                    └ ~/depth_masked    (SAM input)
+                    │ ~/points_masked_dbscan   (DBSCAN input)
+                    └ ~/depth_masked_sam       (SAM input)
 """
 
 import os
@@ -35,8 +35,8 @@ VENV_SITE_PKGS = os.path.expanduser(
     '~/.venvs/.venv_torch_SAM/lib/python3.12/site-packages')
 
 # Masked topic names published by robot_mask_filter
-MASKED_CLOUD = '/robot_mask_filter/points_masked'
-MASKED_DEPTH = '/robot_mask_filter/depth_masked'
+MASKED_CLOUD = '/robot_mask_filter/points_masked_dbscan'
+MASKED_DEPTH = '/robot_mask_filter/depth_masked_sam'
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -89,7 +89,7 @@ def generate_launch_description() -> LaunchDescription:
         'roi_x_max':  0.80,
         'roi_y_min': -0.25,
         'roi_y_max':  0.25,
-        'roi_z_min': -0.01,  # Table at Z≈-0.02; objects start above -0.01
+        'roi_z_min': -0.02,  # Table at Z≈-0.02;
         'roi_z_max':  0.50,
         'voxel_size':      0.005,
         'dbscan_eps':      0.02,
@@ -155,6 +155,30 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration('debug_perception')),
     )
 
+    # ---- Press point selector (always running, both backends) --------------
+    # On-demand only: call
+    #   ros2 service call /press_point_selector/compute_press_point std_srvs/srv/Trigger {}
+    # to select and publish a press point for the current detections.
+    press_point_node = Node(
+        package='irb120_perception',
+        executable='press_point_selector',
+        name='press_point_selector',
+        output='screen',
+        parameters=[{
+            'input_points':   '/object_detector/object_points',
+            'base_frame':     'base_link',
+            'camera_frame':   'realsense_color_optical_frame',
+            'press_frame_id': 'press_point',
+            'target_object_id': -1,
+            'top_fraction':      0.12,
+            'min_top_points':    5,
+            'w_height':          1.0,
+            'w_camera':          1.0,
+            'w_center':          0.5,
+            'publish_rate_hz':   5.0,
+        }],
+    )
+
     return LaunchDescription([
         method_arg,
         debug_arg,
@@ -162,4 +186,5 @@ def generate_launch_description() -> LaunchDescription:
         dbscan_node,
         sam_node,
         debugger_node,
+        press_point_node,
     ])

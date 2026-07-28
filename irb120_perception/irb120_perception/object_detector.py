@@ -207,6 +207,52 @@ def convex_hull_scipy(pts: np.ndarray):
         return None, None
 
 
+def xyzl_to_pointcloud2(clusters: list, frame_id: str, stamp) -> PointCloud2:
+    """Pack a list of per-object (Ni,3) float arrays into one labeled PointCloud2.
+
+    Fields: x, y, z, label (int32 = index into `clusters`, i.e. the same
+    obj_id used for Detection3D.id). Lets downstream nodes (e.g.
+    press_point_selector) recover per-object raw points from a single topic
+    without redoing segmentation.
+    """
+    if clusters:
+        pts = np.concatenate([c.astype(np.float32) for c in clusters], axis=0)
+        labels = np.concatenate([
+            np.full(len(c), i, dtype=np.int32) for i, c in enumerate(clusters)
+        ])
+    else:
+        pts = np.zeros((0, 3), dtype=np.float32)
+        labels = np.zeros((0,), dtype=np.int32)
+
+    n = len(pts)
+    dtype = np.dtype({
+        'names': ['x', 'y', 'z', 'label'],
+        'formats': ['<f4', '<f4', '<f4', '<i4'],
+        'offsets': [0, 4, 8, 12],
+        'itemsize': 16,
+    })
+    buf = np.empty((n,), dtype=dtype)
+    buf['x'], buf['y'], buf['z'], buf['label'] = pts[:, 0], pts[:, 1], pts[:, 2], labels
+
+    msg = PointCloud2()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = stamp
+    msg.height = 1
+    msg.width = n
+    msg.is_dense = False
+    msg.is_bigendian = False
+    msg.point_step = 16
+    msg.row_step = msg.point_step * n
+    msg.fields = [
+        PointField(name='x',     offset=0,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='y',     offset=4,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='z',     offset=8,  datatype=PointField.FLOAT32, count=1),
+        PointField(name='label', offset=12, datatype=PointField.INT32,   count=1),
+    ]
+    msg.data = buf.tobytes()
+    return msg
+
+
 def xyz_to_pointcloud2(pts: np.ndarray, frame_id: str, stamp) -> PointCloud2:
     """Pack an (N,3) float32 array into a PointCloud2 message."""
     pts = pts.astype(np.float32)
@@ -337,17 +383,18 @@ class ObjectDetector(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # ---- Publishers -------------------------------------------------------
-        self.pub_det = self.create_publisher(Detection3DArray, '~/detections', 10)
-        self.pub_mk  = self.create_publisher(MarkerArray,      '~/markers',    10)
+        self.pub_det = self.create_publisher(Detection3DArray, '~/detections',    10)
+        self.pub_mk  = self.create_publisher(MarkerArray,      '~/markers',      10)
+        self.pub_pts = self.create_publisher(PointCloud2,      '~/object_points', 10)
 
-        # ---- Debug snapshot (on-demand, consumed by perception_debugger node) --
-        # Trigger: ros2 topic pub --once /object_detector/debug_snapshot std_msgs/Empty '{}'
+        # ---- Debug snapshot (SAM-only, on-demand, consumed by perception_debugger node) --
+        # Trigger: ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/Empty '{}'
         self._debug_requested = False
-        self.create_subscription(Empty, '~/debug_snapshot', self._debug_trigger_cb, 10)
-        self._pub_dbg_mask_img  = self.create_publisher(Image,       '~/debug/mask_overlay',    1)
-        self._pub_dbg_pts_cam   = self.create_publisher(PointCloud2, '~/debug/pts_camera',      1)
-        self._pub_dbg_pts_roi   = self.create_publisher(PointCloud2, '~/debug/pts_after_roi',   1)
-        self._pub_dbg_pts_clean = self.create_publisher(PointCloud2, '~/debug/pts_after_clean', 1)
+        self.create_subscription(Empty, '~/sam_debug_snapshot', self._debug_trigger_cb, 10)
+        self._pub_dbg_mask_img  = self.create_publisher(Image,       '~/debug/sam_mask_overlay',    1)
+        self._pub_dbg_pts_cam   = self.create_publisher(PointCloud2, '~/debug/sam_pts_camera',      1)
+        self._pub_dbg_pts_roi   = self.create_publisher(PointCloud2, '~/debug/sam_pts_after_roi',   1)
+        self._pub_dbg_pts_clean = self.create_publisher(PointCloud2, '~/debug/sam_pts_after_clean', 1)
 
         # ---- QoS --------------------------------------------------------------
         sensor_qos = QoSProfile(
@@ -847,6 +894,7 @@ class ObjectDetector(Node):
 
         self.pub_det.publish(detections)
         self.pub_mk.publish(markers)
+        self.pub_pts.publish(xyzl_to_pointcloud2(clusters, self.base_frame, header.stamp))
 
     def _publish_empty(self, header):
         # Publish zero-detection array and a DELETEALL marker to clear RViz
@@ -859,6 +907,7 @@ class ObjectDetector(Node):
         clr.action = Marker.DELETEALL
         mk.markers.append(clr)
         self.pub_mk.publish(mk)
+        self.pub_pts.publish(xyzl_to_pointcloud2([], self.base_frame, header.stamp))
 
     # -------------------------------------------------------------------------
     # Marker builders

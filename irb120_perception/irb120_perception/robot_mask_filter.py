@@ -22,11 +22,11 @@ Operates on both streams in parallel:
 
   PointCloud2 path  (for DBSCAN):
     in:  /realsense/depth/color/points
-    out: ~/points_masked
+    out: ~/points_masked_dbscan
 
   Aligned depth image path  (for SAM):
     in:  /realsense/aligned_depth_to_color/image_raw  +  color/camera_info
-    out: ~/depth_masked   (16UC1, masked pixels set to 0)
+    out: ~/depth_masked_sam   (16UC1, masked pixels set to 0)
 
 Tune radius live — no rebuild:
   ros2 param set /robot_mask_filter robot_mask_padding 0.10
@@ -142,14 +142,6 @@ def _capsule_inside_mask(pts: np.ndarray,
     return (diff * diff).sum(axis=1) <= radius ** 2
 
 
-def _tf_origin(tf_buffer, base_frame: str, link: str) -> np.ndarray | None:
-    result = _get_tf(tf_buffer, base_frame, link)
-    if result is None:
-        return None
-    _, t = result
-    return t  # origin = translation only
-
-
 # ---------------------------------------------------------------------------
 # PointCloud2 helpers
 # ---------------------------------------------------------------------------
@@ -231,11 +223,22 @@ class RobotMaskFilter(Node):
         self.declare_parameter('input_cloud',  '/realsense/depth/color/points')
         self.declare_parameter('input_depth',  '/realsense/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info',  '/realsense/color/camera_info')
+        self.declare_parameter('tf_cache_rate_hz', 20.0)
 
         p = self.get_parameter
         self.base_frame     = p('base_frame').value
         self.mesh_padding   = p('robot_mask_padding').value
         self.capsule_radius = p('capsule_radius').value
+
+        # Transforms barely change between one depth frame and the next, so
+        # look them up on a slow timer instead of ~14x per point-cloud
+        # callback (7 mesh links + 3 capsule segments x2 endpoints + camera
+        # frame) — that serial TF round-tripping was the dominant cost, not
+        # the (already-vectorised) mask math itself.
+        self._tf_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._cloud_frame: str | None = None
+        self._depth_frame: str | None = None
+        self._capsule_links = sorted({link for pair in self.CAPSULE_SEGMENTS for link in pair})
 
         # Load all collision meshes at startup
         mesh_dir = os.path.join(
@@ -257,8 +260,20 @@ class RobotMaskFilter(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self._cam_info: CameraInfo | None = None
 
+        # Best Effort matches the RealSense driver's own output — required to
+        # subscribe to it at all without deliberately overriding QoS.
         sensor_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        # Reliable so RViz's default PointCloud2 display (which requests
+        # Reliable unless you override it) picks these up with no extra
+        # per-display QoS fiddling. Safe here: downstream consumers
+        # (object_detector) already request Best Effort, and a Best-Effort
+        # subscriber can always read a Reliable publisher.
+        output_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
@@ -270,8 +285,11 @@ class RobotMaskFilter(Node):
         self.create_subscription(
             Image, p('input_depth').value, self._depth_cb, sensor_qos)
 
-        self._pub_cloud = self.create_publisher(PointCloud2, '~/points_masked', sensor_qos)
-        self._pub_depth = self.create_publisher(Image,       '~/depth_masked',  sensor_qos)
+        self._pub_cloud = self.create_publisher(PointCloud2, '~/points_masked_dbscan', output_qos)
+        self._pub_depth = self.create_publisher(Image,       '~/depth_masked_sam',     output_qos)
+
+        cache_period = 1.0 / max(1.0, float(p('tf_cache_rate_hz').value))
+        self.create_timer(cache_period, self._refresh_tf_cache)
 
         self.get_logger().info(
             f'robot_mask_filter ready — '
@@ -286,6 +304,23 @@ class RobotMaskFilter(Node):
     def _cam_info_cb(self, msg: CameraInfo):
         self._cam_info = msg
 
+    def _refresh_tf_cache(self):
+        """Look up every link/frame transform we need, once, on a slow timer.
+
+        Runs off the point-cloud/depth hot path entirely. A failed lookup
+        just leaves the previous cached value in place (better than flapping
+        back to fail-open every tick if TF hiccups for one cycle).
+        """
+        links = self.MESH_LINKS + self._capsule_links
+        if self._cloud_frame is not None:
+            links = links + [self._cloud_frame]
+        if self._depth_frame is not None:
+            links = links + [self._depth_frame]
+        for link in set(links):
+            tf = _get_tf(self.tf_buffer, self.base_frame, link)
+            if tf is not None:
+                self._tf_cache[link] = tf
+
     def _build_robot_mask(self, pts: np.ndarray) -> np.ndarray:
         """Return boolean keep-mask (True = not robot) for (N,3) points in base_link."""
         mask_out = np.zeros(len(pts), dtype=bool)  # True = masked (robot)
@@ -295,7 +330,7 @@ class RobotMaskFilter(Node):
             candidates = ~mask_out
             if not candidates.any():
                 break
-            tf = _get_tf(self.tf_buffer, self.base_frame, link)
+            tf = self._tf_cache.get(link)
             if tf is None:
                 continue
             R, t = tf
@@ -307,10 +342,11 @@ class RobotMaskFilter(Node):
             candidates = ~mask_out
             if not candidates.any():
                 break
-            A = _tf_origin(self.tf_buffer, self.base_frame, parent)
-            B = _tf_origin(self.tf_buffer, self.base_frame, child)
-            if A is None or B is None:
+            tf_a = self._tf_cache.get(parent)
+            tf_b = self._tf_cache.get(child)
+            if tf_a is None or tf_b is None:
                 continue
+            A, B = tf_a[1], tf_b[1]  # origin = translation only
             inside = _capsule_inside_mask(pts[candidates], A, B, self.capsule_radius)
             mask_out[candidates] |= inside
 
@@ -318,11 +354,14 @@ class RobotMaskFilter(Node):
 
     def _cloud_cb(self, msg: PointCloud2):
         t0 = time.monotonic()
+        if self._cloud_frame != msg.header.frame_id:
+            self._cloud_frame = msg.header.frame_id
+            self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
         xyz = _unpack_pc2(msg)
         finite = np.isfinite(xyz).all(axis=1)
         keep = finite.copy()
         if finite.any():
-            tf = _get_tf(self.tf_buffer, self.base_frame, msg.header.frame_id)
+            tf = self._tf_cache.get(msg.header.frame_id)
             if tf is not None:
                 R, t = tf
                 pts_base = _apply_tf_to_points(xyz[finite].astype(np.float32), R.astype(np.float32), t.astype(np.float32))
@@ -339,6 +378,9 @@ class RobotMaskFilter(Node):
         if self._cam_info is None:
             self._pub_depth.publish(msg)
             return
+        if self._depth_frame != msg.header.frame_id:
+            self._depth_frame = msg.header.frame_id
+            self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
 
         depth = np.frombuffer(bytes(msg.data), dtype=np.uint16).reshape(
             msg.height, msg.width).copy()
@@ -353,7 +395,7 @@ class RobotMaskFilter(Node):
              Z.ravel()], axis=1)
 
         # Transform camera points to base_link
-        tf = _get_tf(self.tf_buffer, self.base_frame, msg.header.frame_id)
+        tf = self._tf_cache.get(msg.header.frame_id)
         if tf is None:
             self.get_logger().warn('TF lookup failed for depth mask',
                                    throttle_duration_sec=5.0)

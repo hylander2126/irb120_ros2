@@ -6,13 +6,13 @@ topics that object_detector publishes when triggered, and logs a formatted
 point-count / extent report to the console.
 
 Trigger a snapshot while this node is running:
-  ros2 topic pub --once /object_detector/debug_snapshot std_msgs/msg/Empty '{}'
+  ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty '{}'
 
-Topics consumed (all latched depth=1, published once per trigger):
-  /object_detector/debug/mask_overlay    sensor_msgs/Image
-  /object_detector/debug/pts_camera      sensor_msgs/PointCloud2
-  /object_detector/debug/pts_after_roi   sensor_msgs/PointCloud2
-  /object_detector/debug/pts_after_clean sensor_msgs/PointCloud2
+Topics consumed (SAM backend only — all latched depth=1, published once per trigger):
+  /object_detector/debug/sam_mask_overlay    sensor_msgs/Image
+  /object_detector/debug/sam_pts_camera      sensor_msgs/PointCloud2
+  /object_detector/debug/sam_pts_after_roi   sensor_msgs/PointCloud2
+  /object_detector/debug/sam_pts_after_clean sensor_msgs/PointCloud2
 
 This node does NOT forward or re-publish these topics — they are consumed
 directly by RViz displays configured in moveit_debug_perception.rviz.
@@ -70,22 +70,22 @@ class PerceptionDebugger(Node):
         self._got_image  = False
 
         self.create_subscription(
-            Image, '/object_detector/debug/mask_overlay',
+            Image, '/object_detector/debug/sam_mask_overlay',
             self._mask_cb, qos)
         self.create_subscription(
-            PointCloud2, '/object_detector/debug/pts_camera',
+            PointCloud2, '/object_detector/debug/sam_pts_camera',
             self._pts_cam_cb, qos)
         self.create_subscription(
-            PointCloud2, '/object_detector/debug/pts_after_roi',
+            PointCloud2, '/object_detector/debug/sam_pts_after_roi',
             self._pts_roi_cb, qos)
         self.create_subscription(
-            PointCloud2, '/object_detector/debug/pts_after_clean',
+            PointCloud2, '/object_detector/debug/sam_pts_after_clean',
             self._pts_clean_cb, qos)
 
         self.get_logger().info(
             'perception_debugger ready.\n'
             'Trigger a snapshot with:\n'
-            '  ros2 topic pub --once /object_detector/debug_snapshot '
+            '  ros2 topic pub --once /object_detector/sam_debug_snapshot '
             'std_msgs/msg/Empty \'{}\''
         )
 
@@ -138,10 +138,10 @@ class PerceptionDebugger(Node):
             f'(< 5mm → likely flat/degenerate hull)\n'
             '╚══════════════════════════════════════════════════════════╝\n'
             'RViz topics:\n'
-            '  mask overlay  → /object_detector/debug/mask_overlay\n'
-            '  raw pts (cam) → /object_detector/debug/pts_camera\n'
-            '  ROI pts       → /object_detector/debug/pts_after_roi\n'
-            '  clean pts     → /object_detector/debug/pts_after_clean\n'
+            '  mask overlay  → /object_detector/debug/sam_mask_overlay\n'
+            '  raw pts (cam) → /object_detector/debug/sam_pts_camera\n'
+            '  ROI pts       → /object_detector/debug/sam_pts_after_roi\n'
+            '  clean pts     → /object_detector/debug/sam_pts_after_clean\n'
         )
 
 

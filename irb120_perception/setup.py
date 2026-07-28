@@ -25,6 +25,7 @@ setup(
             'object_detector = irb120_perception.object_detector:main',
             'perception_debugger = irb120_perception.perception_debugger:main',
             'robot_mask_filter = irb120_perception.robot_mask_filter:main',
+            'press_point_selector = irb120_perception.press_point_selector:main',
         ],
     },
 )

@@ -372,7 +372,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /object_detector/debug/mask_overlay
+        Value: /object_detector/debug/sam_mask_overlay
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -403,7 +403,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /object_detector/debug/pts_camera
+        Value: /object_detector/debug/sam_pts_camera
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -436,7 +436,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /object_detector/debug/pts_after_roi
+        Value: /object_detector/debug/sam_pts_after_roi
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -469,7 +469,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /object_detector/debug/pts_after_clean
+        Value: /object_detector/debug/sam_pts_after_clean
       Use Fixed Frame: true
       Use rainbow: true
       Value: true

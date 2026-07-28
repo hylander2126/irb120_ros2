@@ -17,7 +17,7 @@
 # camera-side default is kept instead — verified live, not from docs.
 spatial_filter.filter_magnitude: 2
 spatial_filter.filter_smooth_alpha: 0.5
-spatial_filter.filter_smooth_delta: 4
+spatial_filter.filter_smooth_delta: 9
 spatial_filter.holes_fill: 0          # Persistency mode: Disabled
 
 temporal_filter.filter_smooth_alpha: 0.02

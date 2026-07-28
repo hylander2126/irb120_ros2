@@ -108,22 +108,35 @@ def generate_launch_description():
             "camera_name": "realsense",
             "camera_namespace": "",
             "pointcloud.enable": "true",
-            "colorizer.enable": "false",
-            "depth_module.depth_profile": "1280x720x30",
-            "align_depth.enable": "true",
-            "rgb_camera.color_profile": "1280x720x30",
-            "decimation_filter.enable": "false",
-            "depth_module.hdr_enabled": "true",
-            "hdr_merge.enable": "true",
-            "spatial_filter.enable": "true",
-            "temporal_filter.enable": "true",
             "clip_distance": "1.4",
-            "config_file": os.path.join(
-                get_package_share_directory("irb120_control"),
-                "config",
-                "realsense_filters.yaml",
-            ),
-        }.items(),
+            "align_depth.enable": "true",
+            # "depth_module.depth_profile": "1280x720x30", # Don't want this, worse quality. Default is best.
+            # "rgb_camera.color_profile": "1280x720x30",
+            # Cuts the depth-cloud point count ~4x — speeds up robot_mask_filter
+            # and DBSCAN, independent of rgb_camera.color_profile (recording).
+            "decimation_filter.enable": "true",
+            "decimation_filter.filter_magnitude": "2",
+            }.items(),
+        #     "colorizer.enable": "false",
+        
+        #     "decimation_filter.enable": "true",
+        #     "decimation_filter.filter_magnitude": "2",
+        #     "depth_module.hdr_enabled": "false",  # IDK
+        #     "hdr_merge.enable": "false", # IDK
+        #     # "disparity_filter.enable": "true",
+        #     "spatial_filter.enable": "true", 
+        #     "temporal_filter.enable": "true",
+        #     "config_file": os.path.join(
+        #         get_package_share_directory("irb120_control"),
+        #         "config",
+        #         "realsense_filters.yaml",
+        #     ),
+        #     "json_file_path": os.path.join(
+        #         get_package_share_directory("irb120_control"),
+        #         "config",
+        #         "realsense_config.json",
+        #     ),
+        # }.items(),
     )
 
 
@@ -242,7 +255,7 @@ def generate_launch_description():
         description=(
             'Launch the perception_debugger node and the debug RViz config. '
             'Trigger a snapshot at runtime with: '
-            'ros2 topic pub --once /object_detector/debug_snapshot std_msgs/msg/Empty \'{}\''
+            'ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty \'{}\''
         ),
     )
 
