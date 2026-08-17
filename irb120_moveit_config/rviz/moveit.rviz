@@ -4,7 +4,6 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /PointCloud21
         - /DepthCloud1/Auto Size1
       Splitter Ratio: 0.5
     Tree Height: 233
