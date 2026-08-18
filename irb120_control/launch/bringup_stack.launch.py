@@ -8,35 +8,31 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
-    OpaqueFunction,
-    RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_param_builder import ParameterBuilder
 
 
 def generate_launch_description():
+    pkg_share = get_package_share_directory("irb120_control")
     moveit_cfg_pkg = get_package_share_directory("irb120_moveit_config")
-
-
+    handeye_cfg_pkg = get_package_share_directory("irb120_handeye")
+    perception_pkg = get_package_share_directory("irb120_perception")
 
     moveit_config = (
         MoveItConfigsBuilder("irb120", package_name="irb120_moveit_config")
         .robot_description(
-            file_path=os.path.join(
-                get_package_share_directory("irb120_control"),
-                "urdf",
-                "irb120_with_finger.xacro",
-            )
+            file_path=os.path.join(pkg_share, "urdf", "irb120_with_finger.xacro")
         )
         .robot_description_semantic(
             file_path=os.path.join(moveit_cfg_pkg, "config", "irb120.srdf.xacro")
         )
-        .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
+        .planning_pipelines(
+            pipelines=["ompl"], default_planning_pipeline="ompl"
+        )
         .robot_description_kinematics(
             file_path=os.path.join(moveit_cfg_pkg, "config", "kinematics.yaml")
         )
@@ -44,10 +40,13 @@ def generate_launch_description():
             file_path=os.path.join(moveit_cfg_pkg, "config", "moveit_controllers.yaml"),
             moveit_manage_controllers=False,
         )
-        .joint_limits(file_path=os.path.join(moveit_cfg_pkg, "config", "joint_limits.yaml"))
+        .joint_limits(
+            file_path=os.path.join(moveit_cfg_pkg, "config", "joint_limits.yaml")
+        )
         .to_moveit_configs()
     )
 
+    # EGM relies on whole ABB & RWS stack
     egm_handler_node = Node(
         package="irb120_control",
         executable="egm_handler",
@@ -58,7 +57,7 @@ def generate_launch_description():
             {"task": "T_ROB1"},
             {"startup_service_timeout_sec": 30.0},
             {"comm_timeout": 120.0},
-            {"cond_time": 180.0}, # 3 mins until egm shutoff...
+            {"cond_time": 180.0}, # 3 mins until egm shutoff. Very important: avoid mid-motion bail
         ],
     )
 
@@ -97,62 +96,21 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('debug_perception')),
     )
 
-    # RealSense Bringup
-    realsense_launch = IncludeLaunchDescription(
+    ## RealSense Bringup (both cameras and both TFs)
+    bringup_cam1 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [get_package_share_directory("realsense2_camera"), "launch", "rs_launch.py"]
-            )
-        ),
-        launch_arguments={
-            "camera_name": "realsense",
-            "camera_namespace": "",
-            "pointcloud.enable": "true",
-            "clip_distance": "1.4",
-            "align_depth.enable": "true",
-            # "depth_module.depth_profile": "1280x720x30", # Don't want this, worse quality. Default is best.
-            # "rgb_camera.color_profile": "1280x720x30",
-            # Cuts the depth-cloud point count ~4x — speeds up robot_mask_filter
-            # and DBSCAN, independent of rgb_camera.color_profile (recording).
-            "decimation_filter.enable": "true",
-            "decimation_filter.filter_magnitude": "2",
-            }.items(),
-        #     "colorizer.enable": "false",
-        
-        #     "decimation_filter.enable": "true",
-        #     "decimation_filter.filter_magnitude": "2",
-        #     "depth_module.hdr_enabled": "false",  # IDK
-        #     "hdr_merge.enable": "false", # IDK
-        #     # "disparity_filter.enable": "true",
-        #     "spatial_filter.enable": "true", 
-        #     "temporal_filter.enable": "true",
-        #     "config_file": os.path.join(
-        #         get_package_share_directory("irb120_control"),
-        #         "config",
-        #         "realsense_filters.yaml",
-        #     ),
-        #     "json_file_path": os.path.join(
-        #         get_package_share_directory("irb120_control"),
-        #         "config",
-        #         "realsense_config.json",
-        #     ),
-        # }.items(),
+            PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam1.launch.py"])
+        )
     )
-
-
-    handeye_to_realsense_tf = IncludeLaunchDescription(
+    bringup_cam2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [get_package_share_directory("irb120_handeye"), "launch", "cam_tf_6mm.launch.py"]
-            )
+            PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam2.launch.py"])
         )
     )
 
     perception_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [get_package_share_directory("irb120_perception"), "launch", "perception.launch.py"]
-            )
+            PathJoinSubstitution([perception_pkg, "launch", "perception.launch.py"])
         ),
         launch_arguments={
             'perception_method': LaunchConfiguration('perception_method'),
@@ -160,14 +118,10 @@ def generate_launch_description():
         }.items(),
     )
 
-    netft_node_exe = os.path.join(
-        get_package_prefix("netft_utils"),
-        "lib",
-        "netft_utils",
-        "netft_node",
-    )
+    # FT sensor nodes (REALLY wants to be run as executable, not as Node)
     net_ft_node = ExecuteProcess(
-        cmd=[netft_node_exe, "--address", "192.168.126.125", "--frame_id", "ft_link"],
+        cmd=[os.path.join(get_package_prefix("netft_utils"), "lib", "netft_utils", "netft_node",),
+             "--address", "192.168.126.125", "--frame_id", "ft_link"],
         output="screen",
     )
 
@@ -178,6 +132,7 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Just for recording video and saving convex hull
     camera_hull_recorder_node = Node(
         package="irb120_control",
         executable="camera_hull_recorder",
@@ -191,7 +146,7 @@ def generate_launch_description():
             {"auto_start_recording": False},
         ],
     )
-
+    # RQT plotter for netft. This doesn't work half the time.
     viz_netft_node = Node(
         package="rqt_plot",
         executable="rqt_plot",
@@ -204,13 +159,12 @@ def generate_launch_description():
         actions=[viz_netft_node],
     )
 
-
+    # Servo nodes for keyboard jogging AND for press-and-pull velocity control.
     servo_params = {
         "moveit_servo": ParameterBuilder("irb120_moveit_config")
         .yaml("config/servo.yaml")
         .to_dict()
     }
-
     servo_node = Node(
         package='moveit_servo',
         executable='servo_node',
@@ -224,7 +178,6 @@ def generate_launch_description():
         ],
         condition=IfCondition(LaunchConfiguration('start_servo')),
     )
-
     servo_set_twist_mode = TimerAction(
         period=3.0,
         actions=[
@@ -241,23 +194,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_servo')),
     )
 
-
-
-    perception_method_arg = DeclareLaunchArgument(
-        'perception_method',
-        default_value='dbscan',
-        description="Perception segmentation backend: 'dbscan' or 'sam'",
-    )
-
-    debug_perception_arg = DeclareLaunchArgument(
-        'debug_perception',
-        default_value='false',
-        description=(
-            'Launch the perception_debugger node and the debug RViz config. '
-            'Trigger a snapshot at runtime with: '
-            'ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty \'{}\''
-        ),
-    )
+    # Declare the launch arguments
 
     start_servo_arg = DeclareLaunchArgument(
         'start_servo',
@@ -266,6 +203,20 @@ def generate_launch_description():
             'Start MoveIt Servo for arrow-key Cartesian jogging. '
             'Then run keyboard_jog in a second terminal: ros2 run irb120_control keyboard_jog. '
             'Arrow keys: ↑/↓ = +Z/-Z,  ←/→ = -X/+X.'
+        ),
+    )
+    perception_method_arg = DeclareLaunchArgument(
+        'perception_method',
+        default_value='dbscan',
+        description="Perception segmentation backend: 'dbscan' or 'sam'",
+    )
+    debug_perception_arg = DeclareLaunchArgument(
+        'debug_perception',
+        default_value='false',
+        description=(
+            'Launch the perception_debugger node and the debug RViz config. '
+            'Trigger a snapshot at runtime with: '
+            'ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty \'{}\''
         ),
     )
 
@@ -279,8 +230,8 @@ def generate_launch_description():
         move_group_node,
         rviz_node,
         rviz_debug_node,
-        realsense_launch,
-        handeye_to_realsense_tf,
+        bringup_cam1,
+        bringup_cam2,
         perception_launch,
         net_ft_node,
         netft_preprocessor_node,

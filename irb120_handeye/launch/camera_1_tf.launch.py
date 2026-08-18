@@ -3,6 +3,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
+# 6mm reprojection error (pretty good, use this one)
 
 def generate_launch_description() -> LaunchDescription:
     nodes = [

@@ -1,6 +1,6 @@
 # irb120_ros2
 
-ROS2 driver and application stack for the ABB IRB120 with IRC5 controller, RealSense D400 camera, and ATI net/ft sensor.
+ROS2 driver and application stack for the ABB IRB120 with IRC5 controller, two RealSense D400 cameras, and ATI net/ft sensor.
 
 ---
 
@@ -136,7 +136,7 @@ Optional arguments:
 
 | Argument | Default | Description |
 |---|---|---|
-| `start_servo` | `false` | Start MoveIt Servo for Cartesian jogging |
+| `start_servo` | `false` | Start MoveIt Servo for Cartesian motions |
 | `debug_perception` | `false` | Launch perception debugger + debug RViz config |
 | `perception_method` | `dbscan` | Segmentation backend: `dbscan` or `sam` |
 
@@ -147,16 +147,10 @@ ros2 launch irb120_control bringup_stack.launch.py start_servo:=true
 
 This is the terminal you kill and relaunch during iteration. T1 and T2 remain untouched.
 
----
-
-## Keyboard jogging (requires `start_servo:=true`)
-
-```bash
-ros2 run irb120_control keyboard_jog
-```
-
-- `↑` / `↓` — +Z / −Z (up/down)
-- `←` / `→` — −X / +X (forward/back)
+This also brings up both RealSense cameras — `irb120_handeye`'s
+`bringup_cam1.launch.py` and `bringup_cam2.launch.py`, each pairing a
+camera driver pinned to its serial number with its calibrated TF. See
+[Calibration results](#calibration-results) below for which camera is which.
 
 ---
 
@@ -189,8 +183,19 @@ In RViz, use the HandEye Calibration panel to take samples manually at each pose
 
 ### Calibration results
 
-Calibration TF launches live in `share/irb120_handeye/launch/`:
-- `cam_tf_12mm.launch.py` — current result (12mm lens, eye-to-hand: `base_link` → `realsense_link`)
+Each camera has a driver bringup paired with its solved TF, both under
+`share/irb120_handeye/launch/`:
+- `bringup_cam1.launch.py` + `camera_1_tf.launch.py` — primary camera
+  (`realsense`, serial `243522072478`), eye-to-hand `base` → `realsense_link`,
+  solved via MoveIt hand-eye calibration (6mm reprojection error, current
+  result)
+- `bringup_cam2.launch.py` + `camera_2_tf.launch.py` — second camera
+  (`realsense2`, serial `750612071219`), `base` → `realsense2_link`, solved
+  via ICP calibration
+
+Both pairs are included automatically by `bringup_stack.launch.py`. Launch a
+`bringup_camN.launch.py` on its own only to verify a single camera in
+isolation (see the header comment in each file).
 
 ---
 
@@ -243,7 +248,7 @@ ros2 run controller_manager spawner joint_trajectory_controller -c /controller_m
 | `irb120_control` | Hardware bringup, controllers, EGM handler, application nodes (keyboard jog, squash-pull, net/ft) |
 | `irb120_moveit_config` | MoveIt config (SRDF, kinematics, OMPL, Servo, joint limits) |
 | `irb120_perception` | Object detection (DBSCAN / SAM2), robot mask filter, perception debugger |
-| `irb120_handeye` | Hand-eye calibration bringup, pose runner, calibration data files, camera TF |
+| `irb120_handeye` | Hand-eye calibration bringup, pose runner, calibration data files, and per-camera bringup (driver + solved TF) for both RealSense cameras |
 | `irb120_abb_hardware_interface` | Custom ros2_control hardware plugin for ABB EGM |
 
 ---

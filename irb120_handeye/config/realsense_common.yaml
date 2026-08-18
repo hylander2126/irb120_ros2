@@ -1,0 +1,27 @@
+# Realsense driver params shared by both D435s, passed to rs_launch.py via its `config_file` argument. 
+
+# Streams / point cloud
+pointcloud.enable: true
+enable_depth: true
+align_depth.enable: true
+enable_sync: true # This is only used for unique circumstances. See record_depth_both in irb perception
+
+# Cuts the depth-cloud point count ~4x — speeds up robot_mask_filter and DBSCAN, independent 
+# of rgb_camera.color_profile (recording).
+decimation_filter.enable: true
+decimation_filter.filter_magnitude: 2
+
+# Depth post-processing tuned by hand in the RealSense Viewer (2026-07-27). Not exposed as 
+# top-level rs_launch.py launch arguments, hence living here instead.
+
+# depth_module.visual_preset ("High Density" = index 4) is intentionally omitted
+spatial_filter.enable: true
+spatial_filter.filter_magnitude: 2
+spatial_filter.filter_smooth_alpha: 0.5
+spatial_filter.filter_smooth_delta: 9
+spatial_filter.holes_fill: 0          # Persistency mode: Disabled
+
+temporal_filter.enable: true
+temporal_filter.filter_smooth_alpha: 0.02
+temporal_filter.filter_smooth_delta: 35
+temporal_filter.holes_fill: 3         # Persistency mode: Valid in 2/last 4
