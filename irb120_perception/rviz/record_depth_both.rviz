@@ -5,10 +5,8 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
-        - /realsense_cloud1
-        - /realsense2_cloud1
       Splitter Ratio: 0.5
-    Tree Height: 700
+    Tree Height: 506
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -18,7 +16,7 @@ Visualization Manager:
   Class: ""
   Displays:
     - Alpha: 0.5
-      Cell Size: 0.1
+      Cell Size: 0.10000000149011612
       Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
       Enabled: true
@@ -37,14 +35,54 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/TF
       Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
       Frame Timeout: 15
       Frames:
-        All Enabled: true
-      Marker Scale: 0.2
+        All Enabled: false
+        base:
+          Value: false
+        realsense2_color_frame:
+          Value: false
+        realsense2_color_optical_frame:
+          Value: false
+        realsense2_depth_frame:
+          Value: false
+        realsense2_depth_optical_frame:
+          Value: false
+        realsense2_link:
+          Value: true
+        realsense_color_frame:
+          Value: false
+        realsense_color_optical_frame:
+          Value: false
+        realsense_depth_frame:
+          Value: false
+        realsense_depth_optical_frame:
+          Value: false
+        realsense_link:
+          Value: true
+      Marker Scale: 0.20000000298023224
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
+      Tree:
+        base:
+          realsense2_link:
+            realsense2_color_frame:
+              realsense2_color_optical_frame:
+                {}
+            realsense2_depth_frame:
+              realsense2_depth_optical_frame:
+                {}
+          realsense_link:
+            realsense_color_frame:
+              realsense_color_optical_frame:
+                {}
+            realsense_depth_frame:
+              realsense_depth_optical_frame:
+                {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -70,7 +108,7 @@ Visualization Manager:
       Selectable: true
       Size (Pixels): 2
       Size (m): 0.004999999888241291
-      Style: Flat Squares
+      Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -83,13 +121,13 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
+        Max Value: 0.5702215433120728
+        Min Value: -0.05891914665699005
         Value: true
       Axis: Z
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
-      Color: 255; 255; 255
+      Color: 246; 97; 81
       Color Transformer: RGB8
       Decay Time: 0
       Enabled: true
@@ -103,7 +141,7 @@ Visualization Manager:
       Selectable: true
       Size (Pixels): 2
       Size (m): 0.004999999888241291
-      Style: Flat Squares
+      Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -159,25 +197,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.5
+      Distance: 1.5100514888763428
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.3
-        Y: 0
-        Z: 0.1
+        X: 0.7084519863128662
+        Y: 0.025383271276950836
+        Z: 0.03136180341243744
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5
+      Pitch: 0.44479668140411377
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 0.8
+      Yaw: 3.3050169944763184
     Saved: ~
 Window Geometry:
   Displays:
@@ -185,12 +223,13 @@ Window Geometry:
   Height: 1043
   Hide Left Dock: false
   Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001c9000003b5fc0200000004fb00000020007200650061006c00730065006e007300650032005f0063006f006c006f007203000007f5000000420000029b000002ebfb0000001e007200650061006c00730065006e00730065005f0063006f006c006f00720300000a9200000042000002a6000002ebfb000000100044006900730070006c006100790073010000003f0000023a000000cc00fffffffb0000000a00560069006500770073010000027f00000175000000a900ffffff000005b1000003b500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
+  Width: 1920
+  X: 0
+  Y: 0
   realsense2_color:
     collapsed: false
   realsense_color:
     collapsed: false
-  Views:
-    collapsed: false
-  Width: 1854
-  X: 66
-  Y: 0

@@ -3,7 +3,7 @@
 # Streams / point cloud
 pointcloud.enable: true
 enable_depth: true
-align_depth.enable: true
+align_depth.enable: true # This aligns the depth to color, which is 640x480 for D435.
 enable_sync: true # This is only used for unique circumstances. See record_depth_both in irb perception
 
 # Cuts the depth-cloud point count ~4x — speeds up robot_mask_filter and DBSCAN, independent 
@@ -22,6 +22,6 @@ spatial_filter.filter_smooth_delta: 9
 spatial_filter.holes_fill: 0          # Persistency mode: Disabled
 
 temporal_filter.enable: true
-temporal_filter.filter_smooth_alpha: 0.02
+temporal_filter.filter_smooth_alpha: 0.7 # EMA smoothing: 1=no filter , 0=infinite history
 temporal_filter.filter_smooth_delta: 35
 temporal_filter.holes_fill: 3         # Persistency mode: Valid in 2/last 4

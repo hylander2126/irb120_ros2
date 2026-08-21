@@ -1,13 +1,21 @@
 # irb120_perception
 
-Object detection for the IRB120 robot workspace. The node subscribes to
-RealSense camera streams, isolates objects on the workspace surface, and
-publishes their 3D convex hulls, centroids, and orientations.
+Object detection for the IRB120 robot workspace. Subscribes to RealSense
+camera streams, isolates objects on the workspace surface, and publishes
+their 3D convex hulls, centroids, and orientations.
 
-Two segmentation backends are available and selected at launch time:
+Two segmentation backends are available as **separate nodes/executables**
+(different runtime deps, selected at launch time via the `method` arg, which
+picks which one actually runs — see [Launching](#launching)):
 
-- **DBSCAN** — pure geometry, no GPU required, fast
-- **SAM** — vision-based using SAM 2, GPU required, handles adjacent/touching objects
+- **`object_detector_dbscan`** — pure geometry, no GPU required, fast. Also
+  the only backend that fuses both cameras (see below).
+- **`object_detector_sam`** — vision-based using SAM 2, GPU required, handles
+  adjacent/touching objects. Single camera only.
+
+Both share plumbing (TF, ROI crop, PCA orientation, convex hull, Detection3D/
+marker publishing, EMA smoothing) via `perception_common.py`, so the shared
+logic isn't duplicated even though the backends are split into different files.
 
 ---
 
@@ -18,6 +26,14 @@ Two segmentation backends are available and selected at launch time:
 Clusters the 3D pointcloud spatially using DBSCAN. Works well when objects
 are clearly separated by a gap in 3D space. Requires no GPU and runs in real
 time on CPU.
+
+**Two-camera fusion:** `robot_mask_filter` transforms both cameras' clouds
+into `base_link` (using the existing eye-to-hand extrinsics), robot-masks
+each, concatenates them, and publishes one fused cloud — `object_detector_dbscan`
+itself has no camera-count awareness. This reduces occlusion (camera 2's
+portrait orientation covers the extremities of tall objects camera 1 misses)
+and increases point density. See [robot_mask_filter's docstring](irb120_perception/robot_mask_filter.py)
+for the fusion details, and [Launching](#launching) to disable it.
 
 **Limitations:** Fails when two objects touch or have similar depth profiles,
 because their points merge into a single cluster with no spatial gap to split on.
@@ -44,11 +60,16 @@ adjacent objects are handled correctly.
 ### DBSCAN pipeline
 
 ```
-/realsense/depth/color/points  (PointCloud2, ~30 Hz)
+/realsense/depth/color/points   (PointCloud2, ~30 Hz)  ─┐
+/realsense2/depth/color/points  (PointCloud2, ~30 Hz)  ─┤  fused in robot_mask_filter:
+                                                          │  TF → base_link (per camera),
+                                                          │  robot-mask, concatenate
+                                                          ▼
+                              ~/points_masked_dbscan  (PointCloud2, base_link, both cameras)
         │
         ▼
 ┌─────────────────────┐
-│  TF transform       │  camera frame → base_link
+│  TF transform       │  base_link → base_link (identity; cloud already fused into base_link)
 └─────────────────────┘
         │
         ▼
@@ -58,8 +79,8 @@ adjacent objects are handled correctly.
         │
         ▼
 ┌─────────────────────┐
-│  Voxel downsample   │  one point per voxel cell → uniform density
-└─────────────────────┘
+│  Voxel downsample   │  one point per voxel cell → uniform density;
+└─────────────────────┘  also collapses cam1/cam2 overlap into single points
         │
         ▼
 ┌─────────────────────┐
@@ -156,11 +177,18 @@ No RANSAC is needed because the table height is fixed in the robot base frame.
 
 ## Launching
 
+`method` selects which backend node (`object_detector_dbscan` or
+`object_detector_sam`) actually runs; the other stays defined but disabled
+via a launch `IfCondition`.
+
 ```bash
-# DBSCAN (default, no GPU needed)
+# DBSCAN (default, no GPU needed) — fuses both cameras
 ros2 launch irb120_perception perception.launch.py method:=dbscan
 
-# SAM (requires CUDA GPU and weights)
+# DBSCAN, camera 1 only (disable fusion)
+ros2 launch irb120_perception perception.launch.py method:=dbscan cam2_cloud_topic:=''
+
+# SAM (requires CUDA GPU and weights) — camera 1 only, no fusion
 ros2 launch irb120_perception perception.launch.py method:=sam
 ```
 
@@ -169,6 +197,10 @@ Or via the full bringup:
 ```bash
 ros2 launch irb120_control bringup_irb120_moveit.launch.py perception_method:=sam
 ```
+
+Both `ros2 run irb120_perception object_detector_dbscan` and
+`... object_detector_sam` also work directly if you want a backend running
+standalone outside the launch file (e.g. against a bag).
 
 ---
 
@@ -225,6 +257,7 @@ before any processing in both backends.
 | `dbscan_min_pts`   | `20`    | Minimum points to form a cluster core. Raise to suppress noise clusters. |
 | `min_cluster_pts`  | `30`    | Discard clusters with fewer points than this. |
 | `max_cluster_pts`  | `50000` | Discard clusters larger than this (catches robot body leaking into ROI). |
+| `single_object_mode` | `False` | Union every surviving cluster into one object. For a single rigid item that comes back as multiple disconnected clusters (e.g. a monitor's base+screen, joined only at a rear seam no camera can see). Only safe if the workspace holds one physical item per detection cycle — otherwise this wrongly fuses genuinely separate objects. |
 
 ### SAM-specific
 
@@ -275,7 +308,7 @@ Markers expire after 3 s so they disappear cleanly if detection stops.
 
 | Topic | Type | Produced by | QoS | Notes |
 |-------|------|-------------|-----|-------|
-| `/robot_mask_filter/points_masked_dbscan` | PointCloud2 | `robot_mask_filter` | **Reliable** | DBSCAN input, robot body removed |
+| `/robot_mask_filter/points_masked_dbscan` | PointCloud2 | `robot_mask_filter` | **Reliable** | DBSCAN input, robot body removed, both cameras fused into `base_link` |
 | `/robot_mask_filter/depth_masked_sam` | Image | `robot_mask_filter` | **Reliable** | SAM input, robot body removed |
 | `/object_detector/detections` | Detection3DArray | `object_detector` | Reliable | Both backends |
 | `/object_detector/markers` | MarkerArray | `object_detector` | Reliable | Both backends |
@@ -440,10 +473,10 @@ locked while HDR is active" and fails to start if you try. `visual_preset`
 is intentionally omitted from `realsense_filters.yaml` for this reason.
 
 Spatial and temporal filtering are now done on-device rather than in
-software. `object_detector.py` still applies its own `cv2.medianBlur`
-(`depth_median_ksize`) and EMA smoothing (`smooth_alpha`) on top of this —
-worth checking whether that's now double-filtering before tuning either
-side further.
+software. `object_detector_sam.py` still applies its own `cv2.medianBlur`
+(`depth_median_ksize`) on the depth image, and both backends apply EMA
+smoothing (`smooth_alpha`) on top of this — worth checking whether that's
+now double-filtering before tuning either side further.
 
 ---
 
@@ -463,6 +496,21 @@ side further.
 
 **Table not fully excluded:**
 → Increase `roi_z_min` to sit clearly above the table surface.
+
+**After enabling camera 2 fusion — visible seam/ghosting where the two clouds overlap:**
+→ Extrinsic calibration error. Check `base -> realsense_link` and `base -> realsense2_link`
+  in RViz (same registration check the `record_depth_both.launch.py` RViz view was built for)
+  before tuning anything else — a bad extrinsic can't be fixed by re-tuning DBSCAN params.
+
+**After enabling camera 2 fusion — clusters merging or splitting differently than before:**
+→ Point density roughly doubles in the overlap region, which can shift how `dbscan_eps`
+  behaves there. Re-check `dbscan_eps`/`voxel_size` rather than assuming old values still hold.
+
+**A single rigid object comes back as multiple detections (disconnected parts, e.g. a
+monitor's base + screen joined only at an occluded rear seam):**
+→ Set `single_object_mode: true` — only if the workspace holds one item at a time; it
+  unions every surviving cluster into one object rather than trying to bridge the gap
+  with `dbscan_eps` (which would risk merging genuinely separate objects elsewhere).
 
 ### SAM
 

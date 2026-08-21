@@ -16,9 +16,13 @@ SAM:    runs under the venv python (~/.venvs/.venv_torch_SAM/bin/python3),
 
 Pipeline topology:
 
-  RealSense ──▶ robot_mask_filter ──▶ object_detector
-                    │ ~/points_masked_dbscan   (DBSCAN input)
-                    └ ~/depth_masked_sam       (SAM input)
+  RealSense (cam1) ──┬──▶ robot_mask_filter ──▶ object_detector_dbscan
+  RealSense (cam2) ──┘        │ ~/points_masked_dbscan  (both cameras fused, DBSCAN input)
+                               └ ~/depth_masked_sam      (cam1 only, SAM input)
+
+  DBSCAN gets both cameras' point clouds fused (see robot_mask_filter's
+  docstring) to reduce occlusion and increase point density. SAM stays
+  single-camera — set cam2_cloud_topic:='' to disable fusion entirely.
 """
 
 import os
@@ -52,6 +56,16 @@ def generate_launch_description() -> LaunchDescription:
         description='Launch the perception_debugger node for on-demand SAM pipeline inspection.',
     )
 
+    cam2_cloud_arg = DeclareLaunchArgument(
+        'cam2_cloud_topic',
+        default_value='/realsense2/depth/color/points',
+        description=(
+            "Second camera's point cloud, fused into the DBSCAN input by "
+            "robot_mask_filter. Set to '' to disable fusion and run DBSCAN "
+            "on camera 1 alone."
+        ),
+    )
+
     # ---- Robot mask filter (always running, both backends benefit) ----------
     mask_filter_node = Node(
         package='irb120_perception',
@@ -61,6 +75,7 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             'base_frame':  'base_link',
             'input_cloud': '/realsense/depth/color/points',
+            'input_cloud2': LaunchConfiguration('cam2_cloud_topic'),
             'input_depth': '/realsense/aligned_depth_to_color/image_raw',
             'camera_info': '/realsense/color/camera_info',
             # Flattened (parent, child) pairs — each defines one capsule segment
@@ -79,12 +94,10 @@ def generate_launch_description() -> LaunchDescription:
         }],
     )
 
-    # ---- DBSCAN parameters — reads from masked pointcloud -------------------
+    # ---- DBSCAN parameters — reads from masked, camera-fused pointcloud -----
     dbscan_params = {
         'input_cloud_pc':      MASKED_CLOUD,
-        'input_image':         '/realsense/color/image_raw',
         'base_frame':          'base_link',
-        'segmentation_method': 'dbscan',
         'roi_x_min':  0.15,
         'roi_x_max':  0.80,
         'roi_y_min': -0.25,
@@ -97,6 +110,10 @@ def generate_launch_description() -> LaunchDescription:
         'min_cluster_pts': 30,
         'max_cluster_pts': 50000,
         'smooth_alpha':    0.3,
+        # Union all surviving clusters into one object — only safe if the
+        # workspace is scoped to a single physical item per detection cycle.
+        # See object_detector_dbscan's docstring.
+        'single_object_mode': True,
     }
 
     # ---- SAM parameters — reads from masked depth image --------------------
@@ -105,7 +122,6 @@ def generate_launch_description() -> LaunchDescription:
         'input_image':    '/realsense/color/image_raw',
         'camera_info':    '/realsense/color/camera_info',
         'base_frame':     'base_link',
-        'segmentation_method': 'sam',
         'roi_x_min':  0.15,
         'roi_x_max':  0.80,
         'roi_y_min': -0.25,
@@ -128,7 +144,7 @@ def generate_launch_description() -> LaunchDescription:
     # ---- DBSCAN node (system python) ----------------------------------------
     dbscan_node = Node(
         package='irb120_perception',
-        executable='object_detector',
+        executable='object_detector_dbscan',
         name='object_detector',
         output='screen',
         parameters=[dbscan_params],
@@ -138,7 +154,7 @@ def generate_launch_description() -> LaunchDescription:
     # ---- SAM node -----------------------------------------------------------
     sam_node = Node(
         package='irb120_perception',
-        executable='object_detector',
+        executable='object_detector_sam',
         name='object_detector',
         output='screen',
         parameters=[sam_params],
@@ -182,6 +198,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         method_arg,
         debug_arg,
+        cam2_cloud_arg,
         mask_filter_node,
         dbscan_node,
         sam_node,

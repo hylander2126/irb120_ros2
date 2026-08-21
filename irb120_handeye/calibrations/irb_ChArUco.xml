@@ -1,0 +1,10 @@
+<charuco>
+  <squares>
+    <x>3</x>
+    <y>4</y>
+  </squares>
+  <dimensions>
+    <square_length>0.034</square_length>
+    <marker_separation>0.0034</marker_separation>
+  </dimensions
+</charuco>

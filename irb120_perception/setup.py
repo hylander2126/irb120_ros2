@@ -23,7 +23,8 @@ setup(
     extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
-            'object_detector = irb120_perception.object_detector:main',
+            'object_detector_dbscan = irb120_perception.object_detector_dbscan:main',
+            'object_detector_sam = irb120_perception.object_detector_sam:main',
             'perception_debugger = irb120_perception.perception_debugger:main',
             'robot_mask_filter = irb120_perception.robot_mask_filter:main',
             'press_point_selector = irb120_perception.press_point_selector:main',

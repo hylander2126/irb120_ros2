@@ -38,8 +38,6 @@
     configure_via_rws="${configure_via_rws}"/>
 
   <!-- ====== Params to tweak ====== -->
-  <xacro:property name="ft_mass" value="0.255"/>               <!-- kg (sensor) (from spec sheet) -->
-  <xacro:property name="ft_cog" value="0.063"/>              <!-- meters in tool frame (from spec sheet)-->
   <xacro:property name="ft_length" value="0.08225"/>           <!-- FT sensor length (measured) -->
   <xacro:property name="finger_mass" value="0.066"/>           <!-- kg (measured finger+ball+screws) -->
   <xacro:property name="finger_cog" value="0.0275"/>         <!-- meters in finger frame (measured) -->
@@ -54,18 +52,6 @@
   <xacro:property name="bracket_thickness" value="0.021"/>
   <xacro:property name="table_center_x" value="0.40"/> <!-- Mostly visual, maybe for workspace bounds -->
   <xacro:property name="table_center_y" value="0.0"/>
-
-  <!-- FT sensor internal-frame mapping relative to link_6 (requested):
-       x_link6 ~ z_ft, y_link6 ~ -x_ft, z_link6 ~ -y_ft (right-hand completion).
-       Then we apply the inverse on ft_to_finger so finger stays in link_6/world-like
-       orientation at home for task reasoning. -->
-  <!-- <xacro:property name="ft_mount_roll" value="-1.5708"/>
-  <xacro:property name="ft_mount_pitch" value="0.0"/>
-  <xacro:property name="ft_mount_yaw" value="-1.5708"/> -->
-
-  <!-- <xacro:property name="finger_unwind_roll" value="0.0"/>
-  <xacro:property name="finger_unwind_pitch" value="-1.5708"/>
-  <xacro:property name="finger_unwind_yaw" value="1.5708"/> -->
 
   <!-- world: base_link is at x=y=0; table top surface is z=0 -->
   <link name="world"/>
@@ -109,29 +95,24 @@
   </link>
 
 
-  <!-- ====== FT sensor link mounted to link_6 ====== -->
-  <link name="ft_link">
-    <inertial>
-      <origin xyz="${ft_cog} 0 0" rpy="0 1.5708 0"/>
-      <mass value="${ft_mass}"/>
-      <inertia ixx="5e-4" iyy="5e-4" izz="5e-4" ixy="0" ixz="0" iyz="0"/>
-    </inertial>
-    <visual>
-      <origin xyz="${ft_length / 2} 0 0" rpy="0 1.5708 0"/>
-      <geometry>
-        <cylinder radius="0.025" length="${ft_length}"/>
-      </geometry>
-      <material name="LightGrey">
-        <color rgba="0.8 0.8 0.8 1.0"/>
-      </material>
-    </visual>
-    <collision>
-        <origin xyz="${ft_length / 2} 0 0" rpy="0 1.5708 0"/>
-        <geometry>
-            <cylinder radius="0.025" length="${ft_length / 2.5}"/> <!-- smaller to avoid finger interference (no collision anyways) -->
-        </geometry>
-    </collision>
-  </link>
+  <!-- ====== FT sensor + adapter stack, mounted to tool0 ====== -->
+  <!-- Accurate geometry/mass/collision now comes from the Onshape CAD export below
+       (root -> adapter_robot -> adapter_sensor -> sensor_plate -> sensor_body),
+       replacing the old hand-measured stand-in cylinder.
+
+       ft_link itself stays a bare frame (no visual/collision/inertial — same pattern
+       as finger_ball_center below) pinned EXACTLY where it always was: coincident
+       with tool0 (tool0_to_ft is identity). Do not move it or give it mass/inertia —
+       netft_preprocessor.py, calibrate_ft_sensor.py, and estimation/tst.py all
+       hardcode "ft_link" as the wrench TF frame and assume this exact position
+       (see tst.py's docstring); moving it or double-counting its mass against the
+       new CAD links' own inertials would silently break their lever-arm math. -->
+  <link name="ft_link"/>
+
+  <!-- Onshape CAD export: located in irb120_control/urdf/sensor_and_adapter_assembly.
+       Grafted onto tool0 as its own branch (parallel to ft_link/finger_link above),
+       not merged into the ft_link/finger chain. -->
+  <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly/sensor_and_adapter_assembly.urdf"/>
 
   <!-- ====== Finger link ====== -->
   <link name="finger_link">
@@ -166,6 +147,19 @@
       xyz="0 0 0"
       rpy="0 0 0"/> <!-- Now we re-orient the FT sensor internally (net ft settings configuration)-->
     <child link="ft_link"/>
+  </joint>
+
+  <!-- connect tool0 to the Onshape assembly's root mate connector.
+       Starting with identity: assumes the mate connector picked as "root" when
+       exporting from Onshape was oriented to match tool0's convention (Z out
+       along the approach direction). VERIFY VISUALLY IN RVIZ — if the assembly
+       renders rotated/flipped relative to the real sensor mounting, adjust this
+       joint's rpy (nothing else needs to change; ft_link/finger_link above are
+       on a separate branch and unaffected either way). -->
+  <joint name="tool0_to_root" type="fixed">
+    <parent link="tool0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="root"/>
   </joint>
 
   <!-- connect ft_link to finger_link -->
