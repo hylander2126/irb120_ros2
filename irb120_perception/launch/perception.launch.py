@@ -171,29 +171,19 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration('debug_perception')),
     )
 
-    # ---- Press point selector (always running, both backends) --------------
-    # On-demand only: call
-    #   ros2 service call /press_point_selector/compute_press_point std_srvs/srv/Trigger {}
-    # to select and publish a press point for the current detections.
-    press_point_node = Node(
-        package='irb120_perception',
-        executable='press_point_selector',
-        name='press_point_selector',
-        output='screen',
-        parameters=[{
-            'input_points':   '/object_detector/object_points',
-            'base_frame':     'base_link',
-            'camera_frame':   'realsense_color_optical_frame',
-            'press_frame_id': 'press_point',
-            'target_object_id': -1,
-            'top_fraction':      0.12,
-            'min_top_points':    5,
-            'w_height':          1.0,
-            'w_camera':          1.0,
-            'w_center':          0.5,
-            'publish_rate_hz':   5.0,
-        }],
-    )
+    # ---- Press point selector -----------------------------------------------
+    # NOT launched here: it's a one-shot node (compute once, print, publish,
+    # exit — see its module docstring), so including it in this persistent
+    # bringup would just fire it once at launch startup, likely before any
+    # object is even detected. Invoke it deliberately instead, once detections
+    # are live, either:
+    #
+    #   ros2 run irb120_perception press_point_selector
+    #
+    # or programmatically from another node's code — import
+    # `select_press_point` (pure function) or `PressPointSelector` (full
+    # node, `.run_once()` method) from irb120_perception.press_point_selector.
+    # See that module's docstring for both.
 
     return LaunchDescription([
         method_arg,
@@ -203,5 +193,4 @@ def generate_launch_description() -> LaunchDescription:
         dbscan_node,
         sam_node,
         debugger_node,
-        press_point_node,
     ])

@@ -38,20 +38,17 @@
     configure_via_rws="${configure_via_rws}"/>
 
   <!-- ====== Params to tweak ====== -->
-  <xacro:property name="ft_length" value="0.08225"/>           <!-- FT sensor length (measured) -->
+  <xacro:property name="ft_body_length_xyz" value="0 0 -0.02975"/>  <!-- Literallly just the sensor body length. Sensor body 'origin' is its robot-side face. -->
   <xacro:property name="finger_mass" value="0.066"/>           <!-- kg (measured finger+ball+screws) -->
   <xacro:property name="finger_cog" value="0.0275"/>         <!-- meters in finger frame (measured) -->
   <xacro:property name="finger_length" value="0.100"/>         <!-- finger length (measured)-->
-  <xacro:property name="finger_ball_radius" value="0.01312"/>  <!-- Ball radius (measured 26.25 mm diameter)-->
-  <xacro:property name="finger_contact" value="0.0875"/>     <!-- finger contact length (measured ball center from base)-->
-  <xacro:property name="finger_mesh" value="package://irb120_control/urdf/pusher_link.stl"/>
-  <!-- Total offset from link_6 to finger tip will be ft_length + finger_length -->
-  <!-- Total offset from link_6 to contact point will be ft_length + finger_contact -->
+  <xacro:property name="finger_ball_radius" value="0.01325"/>  <!-- Ball radius, matches finger_assembly.urdf ball link's CAD inertial/mesh offset exactly -->
+  <xacro:property name="finger_ball_center_xyz" value="0 0 0.0866512"/>     <!-- finger_assembly.urdf CAD chain, root_finger's local Z is the shaft axis: 0 (root_finger->pusher_body) + 0.0734012 (pusher_body->ball) + 0.01325 (ball mesh recenter) -->
 
   <xacro:property name="table_thickness" value="0.044"/> <!-- Visual feature -->
-  <xacro:property name="bracket_thickness" value="0.021"/>
-  <xacro:property name="table_center_x" value="0.40"/> <!-- Mostly visual, maybe for workspace bounds -->
-  <xacro:property name="table_center_y" value="0.0"/>
+  <xacro:property name="bracket_thickness" value="0.021"/> <!-- Visual feature -->
+  <xacro:property name="table_center_xyz" value="0.40 0 0"/> <!-- Visual feature -->
+
 
   <!-- world: base_link is at x=y=0; table top surface is z=0 -->
   <link name="world"/>
@@ -95,94 +92,62 @@
   </link>
 
 
-  <!-- ====== FT sensor + adapter stack, mounted to tool0 ====== -->
-  <!-- Accurate geometry/mass/collision now comes from the Onshape CAD export below
-       (root -> adapter_robot -> adapter_sensor -> sensor_plate -> sensor_body),
-       replacing the old hand-measured stand-in cylinder.
-
-       ft_link itself stays a bare frame (no visual/collision/inertial — same pattern
-       as finger_ball_center below) pinned EXACTLY where it always was: coincident
-       with tool0 (tool0_to_ft is identity). Do not move it or give it mass/inertia —
-       netft_preprocessor.py, calibrate_ft_sensor.py, and estimation/tst.py all
-       hardcode "ft_link" as the wrench TF frame and assume this exact position
-       (see tst.py's docstring); moving it or double-counting its mass against the
-       new CAD links' own inertials would silently break their lever-arm math. -->
-  <link name="ft_link"/>
-
-  <!-- Onshape CAD export: located in irb120_control/urdf/sensor_and_adapter_assembly.
-       Grafted onto tool0 as its own branch (parallel to ft_link/finger_link above),
-       not merged into the ft_link/finger chain. -->
-  <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly/sensor_and_adapter_assembly.urdf"/>
+  <!-- ====== FT sensor + adapter stack, mounted to tool0 + finger and ball ====== -->
+  <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly.urdf"/>
+  <xacro:include filename="$(find irb120_control)/urdf/finger_assembly.urdf"/>
 
   <!-- ====== Finger link ====== -->
-  <link name="finger_link">
+  <!-- <link name="finger_link">
     <inertial>
-        <origin xyz="${finger_cog} 0 0" rpy="0 1.5708 0"/>   <!-- Rotate for correct attachment and orientation -->
+        <origin xyz="${finger_cog} 0 0" rpy="0 ${pi/2} 0"/>
         <mass value="${finger_mass}"/>
         <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/>
     </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+      <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
         <geometry>
-          <mesh filename="${finger_mesh}"/>
+          <mesh filename="package://irb120_control/meshes/pusher_link.stl"/>
         </geometry>
         <material name="White">
             <color rgba="1.0 1.0 1.0 1.0"/>
         </material>
     </visual>
     <collision>
-        <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+        <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
         <geometry>
-            <mesh filename="${finger_mesh}"/>
+            <mesh filename="package://irb120_control/meshes/pusher_link.stl"/>
         </geometry>
     </collision>
-  </link>
+  </link> -->
 
   <!-- ==================================== JOINTS ==================================== -->
 
-  <!-- connect tool0 to ft_link -->
-  <joint name="tool0_to_ft" type="fixed">
+  <!-- connect tool0 to the Onshape assembly's root mate connector -->
+  <joint name="tool0_to_sensor_root" type="fixed">
     <parent link="tool0"/>
-    <origin
-      xyz="0 0 0"
-      rpy="0 0 0"/> <!-- Now we re-orient the FT sensor internally (net ft settings configuration)-->
-    <child link="ft_link"/>
+    <origin xyz="0 0 0" rpy="0 0 ${pi/2}"/>
+    <child link="root_sensor"/>
+  </joint>
+  <!-- connect sensor_body to finger_link (sensor body origin is its robot-side face) -->
+  <joint name="sensor_body_to_finger_root" type="fixed">
+    <parent link="sensor_body"/>
+    <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} 0"/> <!--0.3971356 ${pi/2} -1.1736581"-->
+    <child link="root_finger"/>
   </joint>
 
-  <!-- connect tool0 to the Onshape assembly's root mate connector.
-       Starting with identity: assumes the mate connector picked as "root" when
-       exporting from Onshape was oriented to match tool0's convention (Z out
-       along the approach direction). VERIFY VISUALLY IN RVIZ — if the assembly
-       renders rotated/flipped relative to the real sensor mounting, adjust this
-       joint's rpy (nothing else needs to change; ft_link/finger_link above are
-       on a separate branch and unaffected either way). -->
-  <joint name="tool0_to_root" type="fixed">
-    <parent link="tool0"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <child link="root"/>
-  </joint>
-
-  <!-- connect ft_link to finger_link -->
-  <joint name="ft_to_finger" type="fixed">
-    <parent link="ft_link"/>
-    <origin
-      xyz="${ft_length} 0 0"
-      rpy="0 0 0"/>
-    <child link="finger_link"/>
-  </joint>
-
-  <!-- finger_ball_center at contact point for EE position (like mujoco 'site') -->
+  <!-- finger_ball_center for EE pose (like mujoco 'site') -->
   <link name="finger_ball_center"/>
+
   <joint name="finger_to_ball_center" type="fixed">
-    <parent link="finger_link"/>
-    <origin xyz="${finger_contact} 0 0" rpy="0 0 0"/>
+    <parent link="root_finger"/>
+    <origin xyz="${finger_ball_center_xyz}" rpy="0 0 0"/>
     <child link="finger_ball_center"/>
   </joint>
 
   <!-- World and table should coincide, at the top table surface -->
   <joint name="world_to_table" type="fixed">
     <parent link="world"/>
-    <origin xyz="${table_center_x} ${table_center_y} 0" rpy="0 0 0"/>
+    <origin xyz="${table_center_xyz}" rpy="0 0 0"/>
     <child link="table"/>
   </joint>
 

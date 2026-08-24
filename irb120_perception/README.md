@@ -313,8 +313,8 @@ Markers expire after 3 s so they disappear cleanly if detection stops.
 | `/object_detector/detections` | Detection3DArray | `object_detector` | Reliable | Both backends |
 | `/object_detector/markers` | MarkerArray | `object_detector` | Reliable | Both backends |
 | `/object_detector/object_points` | PointCloud2 (x,y,z,label) | `object_detector` | Reliable | Both backends; input to `press_point_selector` |
-| `/press_point_selector/press_pose` | PoseStamped | `press_point_selector` | Reliable | On-demand, see [Press point selection](#press-point-selection) |
-| `/press_point_selector/press_marker` | MarkerArray | `press_point_selector` | Reliable | On-demand |
+| `/press_point_selector/press_pose` | PoseStamped | `press_point_selector` | Reliable | One-shot (run once, exits), see [Press point selection](#press-point-selection) |
+| `/press_point_selector/press_marker` | MarkerArray | `press_point_selector` | Reliable | One-shot |
 | `/object_detector/debug/sam_mask_overlay` | Image | `object_detector` | Reliable | **SAM only**, on-demand |
 | `/object_detector/debug/sam_pts_camera` | PointCloud2 | `object_detector` | Reliable | **SAM only**, on-demand |
 | `/object_detector/debug/sam_pts_after_roi` | PointCloud2 | `object_detector` | Reliable | **SAM only**, on-demand |
@@ -376,38 +376,103 @@ latency difference between the two once QoS is actually compatible.
 
 ## Press point selection
 
-`press_point_selector` picks a single 3D "press point" on the detected
-object: the highest, closest-to-camera point, biased toward the lateral
-middle of the object rather than an extreme corner. Useful for a
-single-finger poke/press action.
+`press_point_selector` picks a single 3D "press-and-pull" contact point on
+the detected object. This is a physically-motivated selection, not a
+visual "looks centered on top" pick — it targets a press-then-pull tipping
+strategy: press straight down to pin the object's base against the table
+(increasing friction at its near-robot pivot edge) without inducing
+premature/adversarial tip torque, then pull from up high for maximum
+leverage about that same pivot. That physical goal fixes the priority
+order below.
 
-**Heuristic** (per point of the target object, higher = better):
+Selection is a strict, ordered filter — **not** a blended score. Each step
+narrows the candidate set from the target object's points; ties are broken
+by the *next* criterion, never averaged together:
 
-```
-score = w_height * height_score      (higher Z = better)
-      + w_camera * camera_score      (closer to the camera = better)
-      + w_center * center_score      (closer to the object's lateral
-                                       centroid, measured in the plane
-                                       perpendicular to the camera's
-                                       view direction = better)
-```
+1. **Top-most** — keep points within a small (tight, by default) band of
+   the maximum Z. Maximizes the pull phase's lever arm about the pivot.
+2. **Nearest** — within that top band, keep points within a band of *its*
+   minimum X. Smaller X = closer to the robot base = closer to the pivot
+   edge, which is what keeps the press phase's torque pinning the pivot
+   down rather than fighting it. This is *not* trying to reach some
+   absolute pivot coordinate — "min available X near the top" already is
+   the closest the object's own geometry gets. For a non-overhanging
+   object (nearly all of them: their top doesn't extend past their own
+   base footprint) that's generally a bit past the true pivot edge, and
+   that's expected, not a shortfall to fix — no pivot coordinate needs to
+   be known or estimated at all for this step. The tolerance here is sized
+   as a fraction of the *whole object's* X-span, not the top band's own —
+   a near-flat top edge can have a tiny X-span of its own, and any
+   fraction of that collapses to the single most extreme point regardless
+   of where it lands on Y (an early version got this wrong: same
+   arithmetic, tolerance measured against the top band's own tiny range
+   instead, which produced a real corner-of-the-object result).
+3. **Mid-depth** — tie-break among the survivors of steps 1+2: closest to
+   the midpoint of the *whole object's* Y extent. Objects are expected to
+   be placed roughly centered on the robot's Y=0 line, so this mostly
+   resolves near-ties, not a real competing objective.
 
-The final point is the mean of the top `top_fraction` scoring points (not
-a single raw point) — this smooths sensor noise and lands near the middle
-of the qualifying near-top region instead of on one noisy outlier point.
+(Earlier versions tried finding "front" as a Y-centered or whole-object
+X-band *before* top-most, chasing a purely visual "looks centered,
+looks front-facing" result — that fought the physical goal above on
+tilted/reclined/curved objects in different ways across several reorders.
+Git history has those attempts if useful:
+`git log -- irb120_perception/press_point_selector.py`. Current ordering
+has been checked by hand against both a flat panel (monitor, reclined) and
+a rounded/curved prism (heart) — both land near the true top, near the
+true nearest-X point, and near the object's Y centerline.)
 
-**On-demand only.** The node continuously caches the latest
-`~/object_points` message but does **not** recompute every frame — it only
-runs the heuristic when its service is called, so the target doesn't
-drift while the arm is mid-approach:
+The result is always one of the actual sensed points (never an average) —
+no risk of the point sinking inside a curved surface. Orientation is a
+fixed parameter (default identity), matching the rest of the stack: in
+`irb120_control/object_params.json`, the pre-squash pose orientation is
+calibrated once and only x/y/z vary per object.
+
+**One-shot, not a service.** The node does exactly one thing and exits: it
+waits (briefly) for the next `~/object_points` message, computes the point
+once from whatever that message holds, **prints** the result to the
+console, **publishes** it (pose/marker/TF — repeated for a short grace
+window so RViz has time to receive it before the process exits), then
+returns/exits. No second terminal, no `ros2 service call` step:
 
 ```bash
-ros2 service call /press_point_selector/compute_press_point std_srvs/srv/Trigger {}
+ros2 run irb120_perception press_point_selector
 ```
 
-The last computed result is re-published at `publish_rate_hz` (default
-5 Hz) purely to keep RViz's preview fresh between triggers — that
-republish does not touch the point cloud or recompute anything.
+Not included in `perception.launch.py`'s persistent bringup — auto-starting
+a one-shot node there would just fire it once at launch time, likely before
+any object is detected. Run it deliberately once detections are live, or
+call it programmatically (below).
+
+**Callable from other Python files, two ways:**
+
+- Zero-ROS-node reuse, if you already have the object's points as a plain
+  array (e.g. from your own subscription) — `select_press_point` and the
+  `build_press_*` message builders are pure functions, no node/spin needed:
+
+  ```python
+  from irb120_perception.press_point_selector import select_press_point, build_press_pose_msg
+  point = select_press_point(object_points_xyz)   # (3,) float64
+  pose_msg = build_press_pose_msg(point, quat, base_frame, stamp)
+  ```
+
+- Full one-shot node reuse — construct `PressPointSelector` once (e.g. in
+  another node's `__init__`) and call `.run_once()` at the top of a loop
+  whenever you want a fresh point; it blocks briefly waiting for a cloud
+  message, then computes/prints/publishes, same as the CLI:
+
+  ```python
+  from irb120_perception.press_point_selector import PressPointSelector
+  pp = PressPointSelector()
+  ...
+  result = pp.run_once(timeout_sec=2.0)   # call at loop start
+  if result is not None:
+      point = result['point']
+  ```
+
+  `run_once()` calls `rclpy.spin_once()` internally, so only call it from
+  plain code or a single-threaded executor context — not from inside an
+  already-executing callback of a `MultiThreadedExecutor`.
 
 **Multi-object scenes:** `target_object_id` defaults to `-1` (auto-select
 the object with the highest mean Z, i.e. the "prominent" object, same
@@ -418,21 +483,23 @@ target a different object instead.
 
 | Topic/Frame | Type | Content |
 |---|---|---|
-| `~/press_pose` | `geometry_msgs/PoseStamped` | Position = press point in `base_frame`. Orientation Z axis = approach direction (camera → point). |
-| `~/press_marker` | `visualization_msgs/MarkerArray` | Magenta sphere at the point + arrow along the approach direction. |
-| TF: `base_frame` → `press_frame_id` | — | Broadcast continuously (from cached result) so it stays lookup-able in RViz/MoveIt between triggers. |
+| `~/press_pose` | `geometry_msgs/PoseStamped` | Position = press point in `base_frame`. Orientation = fixed `orientation_q*` params (default identity). This is what a control node subscribes to to command the robot to the point. |
+| `~/press_marker` | `visualization_msgs/MarkerArray` | Magenta sphere at the point + arrow along the fixed approach direction — RViz visualization. |
+| TF: `base_frame` → `press_frame_id` | — | Broadcast repeatedly during the post-compute publish window. |
 
 ### Parameters
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `input_points` | `/object_detector/object_points` | Labeled per-object cloud consumed (see below). |
-| `camera_frame` | `realsense_color_optical_frame` | TF frame used to compute "closest to camera". |
+| `input_points` | `/object_detector/object_points` | Labeled per-object cloud consumed (already in `base_frame` — no TF lookup needed to compute the point). |
 | `target_object_id` | `-1` | `-1` = auto-select prominent object; else a specific detection id. |
-| `top_fraction` | `0.12` | Fraction of best-scoring points averaged into the final point. |
-| `min_top_points` | `5` | Floor on how many points are averaged, even for small objects. |
-| `w_height` / `w_camera` / `w_center` | `1.0` / `1.0` / `0.5` | Heuristic term weights. |
-| `publish_rate_hz` | `5.0` | Rate at which the cached result is re-published for RViz. |
+| `top_z_tol` / `top_z_tol_frac` | `0.003` / `0.05` | Band around the max Z kept as "top-most" — `max(absolute, fraction * object's Z-range)`. |
+| `min_x_tol` / `min_x_tol_frac` | `0.003` / `0.05` | Band above the min X, within the top band, kept as "nearest" — same form, but the fraction is of the *whole object's* X-span, not the top band's own (see step 2 above for why). |
+| `orientation_qx/qy/qz/qw` | `0,0,0,1` | Fixed contact orientation published with the point (identity by default). |
+
+`run_once(timeout_sec=5.0, publish_grace_sec=1.0, publish_hz=10.0)` — not a
+declared ROS parameter, passed directly to the method — controls how long
+to wait for a cloud message and how long/fast to re-publish afterward.
 
 ### New `object_detector` output this depends on
 

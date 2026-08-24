@@ -63,6 +63,21 @@ Visualization Manager:
           Expand Link Details: false
           Expand Tree: false
           Link Tree Style: Links in Alphabetic Order
+          adapter_robot:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          adapter_sensor:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          ball:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           base:
             Alpha: 1
             Show Axes: false
@@ -81,20 +96,10 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          finger_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           flange:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          ft_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           link_1:
             Alpha: 1
             Show Axes: false
@@ -121,6 +126,29 @@ Visualization Manager:
             Show Trail: false
             Value: true
           link_6:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          pusher_body:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          root_finger:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          root_sensor:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          sensor_body:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          sensor_plate:
             Alpha: 1
             Show Axes: false
             Show Trail: false
@@ -184,6 +212,21 @@ Visualization Manager:
           Expand Link Details: false
           Expand Tree: false
           Link Tree Style: Links in Alphabetic Order
+          adapter_robot:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          adapter_sensor:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          ball:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           base:
             Alpha: 1
             Show Axes: false
@@ -202,20 +245,10 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          finger_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           flange:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          ft_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           link_1:
             Alpha: 1
             Show Axes: false
@@ -242,6 +275,29 @@ Visualization Manager:
             Show Trail: false
             Value: true
           link_6:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          pusher_body:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          root_finger:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          root_sensor:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          sensor_body:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          sensor_plate:
             Alpha: 1
             Show Axes: false
             Show Trail: false
@@ -278,6 +334,7 @@ Visualization Manager:
         Value: /realsense/color/image_raw
       Value: true
       Visibility:
+        Axes: true
         Grid: true
         MarkerArray: true
         MotionPlanning: true
@@ -381,6 +438,13 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Length: 0.10000000149011612
+      Name: Axes
+      Radius: 0.009999999776482582
+      Reference Frame: press_point
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 153; 193; 241
@@ -399,41 +463,41 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.57998526096344
+      Distance: 1.4738436937332153
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.5754255652427673
-        Y: 0.03425530716776848
-        Z: 0.24546657502651215
+        X: 0.3239108622074127
+        Y: 0.05746588110923767
+        Z: 0.45172759890556335
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.25039827823638916
+      Pitch: 0.24539825320243835
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.148615837097168
+      Yaw: 4.568618297576904
     Saved: ~
 Window Geometry:
   Camera:
     collapsed: false
   Displays:
     collapsed: false
-  Height: 1011
+  Height: 1043
   Hide Left Dock: false
   Hide Right Dock: false
   MotionPlanning:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001ee00000395fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000001700000017fb000000100044006900730070006c006100790073010000003f00000129000000cc00fffffffb0000000c00430061006d006500720061010000016e000000990000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000020d000001c70000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000054a0000039500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001ee000003b5fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000129000000cc00fffffffb0000000c00430061006d006500720061010000016e000000cf0000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000243000001b10000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000058c000003b500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
-  Width: 1854
-  X: 1986
-  Y: 32
+  Width: 1920
+  X: 0
+  Y: 0
