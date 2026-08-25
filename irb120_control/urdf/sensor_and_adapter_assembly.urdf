@@ -64,6 +64,12 @@
                 <color rgba="0.901961 0.901961 0.901961 1" />
             </material>
         </visual>
+        <collision>
+            <origin xyz="0 0 -0.02975" rpy="0 0 0" />
+            <geometry>
+                <mesh filename="package://irb120_control/meshes/sensor_and_adapter_assembly/sensor_body.gltf" scale="1 1 1" />
+            </geometry>
+        </collision>
     </link>
 
     <link name="sensor_plate">

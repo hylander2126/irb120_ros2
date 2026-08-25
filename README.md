@@ -204,7 +204,7 @@ isolation (see the header comment in each file).
 Requires T1 + T2 + T3 with `start_servo:=true`.
 
 ```bash
-ros2 launch irb120_control bringup_stack.launch.py start_servo:=true
+ros2 launch irb120_control bringup_stack.launch.py start_servo:=true # default
 # then in another terminal:
 ros2 run irb120_control squash_pull
 ```

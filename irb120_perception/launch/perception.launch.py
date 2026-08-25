@@ -78,19 +78,13 @@ def generate_launch_description() -> LaunchDescription:
             'input_cloud2': LaunchConfiguration('cam2_cloud_topic'),
             'input_depth': '/realsense/aligned_depth_to_color/image_raw',
             'camera_info': '/realsense/color/camera_info',
-            # Flattened (parent, child) pairs — each defines one capsule segment
-            'robot_mask_capsules': [
-                'base_link',   'link_1',
-                'link_1',      'link_2',
-                'link_2',      'link_3',
-                'link_3',      'link_4',
-                'link_4',      'link_5',
-                'link_5',      'link_6',
-                'link_6',      'ft_link',
-                'ft_link',     'finger_link',
-                'finger_link', 'finger_ball_center',
-            ],
-            'robot_mask_padding': 0.08,  # capsule radius — increase if arm still leaks through
+            'robot_mask_padding': 0.08,  # arm mesh links — increase if arm still leaks through
+            # Capsule segments (wrist sensor stack + finger) are fixed in
+            # RobotMaskFilter.CAPSULE_SEGMENTS, not a launch param — see that
+            # node's docstring. (A 'robot_mask_capsules' key used to be passed
+            # here, but the node never declared/read it — dead config left
+            # over from before the finger/sensor assembly was rebuilt, and it
+            # still named the now-nonexistent ft_link/finger_link frames.)
         }],
     )
 

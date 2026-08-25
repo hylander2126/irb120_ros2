@@ -27,6 +27,7 @@ from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.ft_tare import tare_netft
+from irb120_control.util.press_point_check import check_press_point
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
     arc_velocity_xz,
@@ -503,6 +504,13 @@ def main(args=None) -> int:
 
         if not node._wait_for_servo_ready(timeout_sec=5.0):
             node.get_logger().error("MoveIt Servo not ready — aborting")
+            return 1
+
+        if not check_press_point(node, node._pre_squash_pos, label=f"adaptive_press/{OBJECT}"):
+            node.get_logger().error(
+                "Press-point sanity check failed — perception disagrees with the calibrated "
+                "pre_squash pose (or no detection at all). Aborting before any motion."
+            )
             return 1
 
         if not node.move_to_pre_squash():

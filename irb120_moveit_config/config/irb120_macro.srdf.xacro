@@ -33,6 +33,7 @@
     <disable_collisions link1="link_6" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_robot" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_sensor" link2="sensor_plate" reason="Adjacent"/>
+    <disable_collisions link1="sensor_body" link2="sensor_plate" reason="Adjacent"/>
     <disable_collisions link1="sensor_body" link2="pusher_body" reason="Adjacent"/>
     <disable_collisions link1="pusher_body" link2="ball" reason="Adjacent"/>
   </xacro:macro>

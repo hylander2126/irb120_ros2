@@ -14,9 +14,16 @@ Two masking primitives are combined:
     if it is on the interior side of ALL face planes (i.e. inside the convex
     hull).  With padding>0 each plane is shifted outward by that amount.
 
-  Capsule test  — for ft_link and the finger (no simplified mesh available).
-    A point is masked if its distance to the line segment between the two TF
-    origins is less than the capsule radius.
+  Capsule test  — for the wrist-mounted F/T sensor stack and the finger (no
+    simplified mesh available for either). A point is masked if its distance
+    to the line segment between the two TF origins is less than the capsule
+    radius. Two zones, two radii — see `RobotMaskFilter.CAPSULE_SEGMENTS`:
+    'aggressive' (bigger radius) for link_6 -> sensor_body, the rigid F/T
+    sensor + adapter stack that's never what's being pressed against the
+    object; 'conservative' (smaller radius, sized close to the real finger
+    ball's 0.01325m radius) for sensor_body -> finger_ball_center, since
+    that's the part that actually contacts the object — too aggressive there
+    and real object points near contact get masked away too.
 
 Operates on both streams in parallel:
 
@@ -50,8 +57,10 @@ Two-camera fusion (PointCloud2 path only):
   Leave `input_cloud2` empty to disable fusion and run single-camera as before
   (output is now always in `base_frame` though, even with fusion disabled).
 
-Tune radius live — no rebuild:
+Tune radii live — no rebuild:
   ros2 param set /robot_mask_filter robot_mask_padding 0.10
+  ros2 param set /robot_mask_filter capsule_radius_aggressive 0.07
+  ros2 param set /robot_mask_filter capsule_radius_conservative 0.015
 """
 
 import os
@@ -228,20 +237,36 @@ class RobotMaskFilter(Node):
     # Links that have collision STL meshes in the irb120_control package
     MESH_LINKS = ['base_link', 'link_1', 'link_2', 'link_3', 'link_4', 'link_5', 'link_6']
 
-    # Capsule segments for end-effector (no simplified mesh available)
-    # Each tuple is (parent_link, child_link)
+    # Capsule segments for the end-effector (no simplified collision mesh
+    # available for these). Each tuple is (parent_link, child_link, zone) —
+    # zone selects which radius parameter applies (see __init__).
+    #
+    # Link names match the current finger/sensor assembly chain, wired in
+    # irb120_with_finger.xacro:
+    #   link_6 -> root_sensor -> adapter_robot -> adapter_sensor ->
+    #   sensor_body -> root_finger -> pusher_body -> ball (-> finger_ball_center)
+    # The old chain (link_6 -> ft_link -> finger_link -> finger_ball_center)
+    # predates that refactor — ft_link/finger_link no longer exist as TF
+    # frames at all (confirmed: tf2_echo on either just hangs), so those
+    # segments were silently doing nothing — zero masking on the whole
+    # wrist-through-finger region.
     CAPSULE_SEGMENTS = [
-        ('link_6',      'ft_link'),
-        ('ft_link',     'finger_link'),
-        ('finger_link', 'finger_ball_center'),
+        # Wrist through the bulky F/T sensor + adapter stack — rigid, never
+        # the thing being pressed against the object, safe to over-exclude.
+        ('link_6', 'sensor_body', 'aggressive'),
+        # The finger shaft + ball tip — this is what actually contacts the
+        # object, so keep the margin tight or real object points near contact
+        # get eaten too.
+        ('sensor_body', 'finger_ball_center', 'conservative'),
     ]
 
     def __init__(self):
         super().__init__('robot_mask_filter')
 
         self.declare_parameter('base_frame',          'base_link')
-        self.declare_parameter('robot_mask_padding',  0.04)   # metres outward expansion
-        self.declare_parameter('capsule_radius',      0.05)   # capsule radius for EE links
+        self.declare_parameter('robot_mask_padding',  0.04)   # metres outward expansion (arm mesh links)
+        self.declare_parameter('capsule_radius_aggressive',   0.06)  # wrist/sensor-stack capsule
+        self.declare_parameter('capsule_radius_conservative', 0.02)  # finger capsule — real ball radius is 0.01325m
         self.declare_parameter('input_cloud',  '/realsense/depth/color/points')
         self.declare_parameter('input_cloud2', '')  # second camera's cloud; '' = fusion disabled
         self.declare_parameter('input_depth',  '/realsense/aligned_depth_to_color/image_raw')
@@ -251,18 +276,21 @@ class RobotMaskFilter(Node):
         p = self.get_parameter
         self.base_frame     = p('base_frame').value
         self.mesh_padding   = p('robot_mask_padding').value
-        self.capsule_radius = p('capsule_radius').value
+        self.capsule_radius = {
+            'aggressive':   p('capsule_radius_aggressive').value,
+            'conservative': p('capsule_radius_conservative').value,
+        }
 
         # Transforms barely change between one depth frame and the next, so
         # look them up on a slow timer instead of ~14x per point-cloud
-        # callback (7 mesh links + 3 capsule segments x2 endpoints + camera
+        # callback (7 mesh links + 2 capsule segments x2 endpoints + camera
         # frame) — that serial TF round-tripping was the dominant cost, not
         # the (already-vectorised) mask math itself.
         self._tf_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._cloud_frame: str | None = None
         self._cloud2_frame: str | None = None
         self._depth_frame: str | None = None
-        self._capsule_links = sorted({link for pair in self.CAPSULE_SEGMENTS for link in pair})
+        self._capsule_links = sorted({link for seg in self.CAPSULE_SEGMENTS for link in seg[:2]})
 
         # Per-camera cache of the latest masked, base_frame-transformed cloud —
         # merged and republished whenever either camera's cloud arrives (see
@@ -331,7 +359,8 @@ class RobotMaskFilter(Node):
             f'{len(self._meshes)} mesh link(s), '
             f'{len(self.CAPSULE_SEGMENTS)} capsule segment(s), '
             f'mesh_padding={self.mesh_padding:.3f} m, '
-            f'capsule_radius={self.capsule_radius:.3f} m'
+            f"capsule_radius aggressive={self.capsule_radius['aggressive']:.3f} m "
+            f"conservative={self.capsule_radius['conservative']:.3f} m"
         )
 
     # -------------------------------------------------------------------------
@@ -375,7 +404,7 @@ class RobotMaskFilter(Node):
             mask_out[candidates] |= inside
 
         # --- Capsule tests for end-effector ---
-        for parent, child in self.CAPSULE_SEGMENTS:
+        for parent, child, zone in self.CAPSULE_SEGMENTS:
             candidates = ~mask_out
             if not candidates.any():
                 break
@@ -384,7 +413,7 @@ class RobotMaskFilter(Node):
             if tf_a is None or tf_b is None:
                 continue
             A, B = tf_a[1], tf_b[1]  # origin = translation only
-            inside = _capsule_inside_mask(pts[candidates], A, B, self.capsule_radius)
+            inside = _capsule_inside_mask(pts[candidates], A, B, self.capsule_radius[zone])
             mask_out[candidates] |= inside
 
         return ~mask_out  # keep = not masked

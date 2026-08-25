@@ -96,29 +96,6 @@
   <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly.urdf"/>
   <xacro:include filename="$(find irb120_control)/urdf/finger_assembly.urdf"/>
 
-  <!-- ====== Finger link ====== -->
-  <!-- <link name="finger_link">
-    <inertial>
-        <origin xyz="${finger_cog} 0 0" rpy="0 ${pi/2} 0"/>
-        <mass value="${finger_mass}"/>
-        <inertia ixx="70.297" iyy="70.297" izz="70.297" ixy="0" ixz="0" iyz="0"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
-        <geometry>
-          <mesh filename="package://irb120_control/meshes/pusher_link.stl"/>
-        </geometry>
-        <material name="White">
-            <color rgba="1.0 1.0 1.0 1.0"/>
-        </material>
-    </visual>
-    <collision>
-        <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
-        <geometry>
-            <mesh filename="package://irb120_control/meshes/pusher_link.stl"/>
-        </geometry>
-    </collision>
-  </link> -->
 
   <!-- ==================================== JOINTS ==================================== -->
 
@@ -140,7 +117,7 @@
 
   <joint name="finger_to_ball_center" type="fixed">
     <parent link="root_finger"/>
-    <origin xyz="${finger_ball_center_xyz}" rpy="0 0 0"/>
+    <origin xyz="${finger_ball_center_xyz}" rpy="${pi/2} ${-pi/2} 0"/>
     <child link="finger_ball_center"/>
   </joint>
 

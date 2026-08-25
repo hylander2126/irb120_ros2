@@ -30,6 +30,7 @@ from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.ft_tare import tare_netft
+from irb120_control.util.press_point_check import check_press_point
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
     arc_velocity_xz,
@@ -656,6 +657,13 @@ def main(args=None) -> int:
             node.get_logger().error(
                 "MoveIt Servo is not ready (/servo_node/delta_twist_cmds has no subscribers). "
                 "Launch stack with start_servo:=true before running arc_static."
+            )
+            return 1
+
+        if not check_press_point(node, node._pre_squash_pos, label=f"arc_static/{node._object}"):
+            node.get_logger().error(
+                "Press-point sanity check failed — perception disagrees with the calibrated "
+                "pre_squash pose (or no detection at all). Aborting before any motion."
             )
             return 1
 
