@@ -3,6 +3,7 @@ import os
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
 from launch.actions import (
     DeclareLaunchArgument,
@@ -57,7 +58,13 @@ def generate_launch_description():
             {"task": "T_ROB1"},
             {"startup_service_timeout_sec": 30.0},
             {"comm_timeout": 120.0},
-            {"cond_time": 180.0}, # 3 mins until egm shutoff. Very important: avoid mid-motion bail
+            # EGM hard-stops after this many seconds no matter what (RobotWare-side
+            # CondTime, not something ROS can override once set) — 180s (3 min) is
+            # the safe interactive default; override with egm_cond_time:=<seconds>
+            # for a long unattended batch (e.g. arc_static_batch) so it doesn't bail
+            # mid-run. Kept as a launch arg rather than just raising the default so
+            # everyday sessions keep the tighter backstop.
+            {"cond_time": ParameterValue(LaunchConfiguration('egm_cond_time'), value_type=float)},
         ],
     )
 
@@ -113,8 +120,13 @@ def generate_launch_description():
             PathJoinSubstitution([perception_pkg, "launch", "perception.launch.py"])
         ),
         launch_arguments={
-            'perception_method': LaunchConfiguration('perception_method'),
+            # NOTE: perception.launch.py's own arg is named 'method', not
+            # 'perception_method' — this key must match that name or the
+            # value passed through here is silently ignored and perception.launch.py
+            # just keeps its own 'dbscan' default regardless of what's passed below.
+            'method': LaunchConfiguration('perception_method'),
             'debug_perception': LaunchConfiguration('debug_perception'),
+            'active_at_start': LaunchConfiguration('perception_active_at_start'),
         }.items(),
     )
 
@@ -132,7 +144,9 @@ def generate_launch_description():
         output="screen",
     )
 
-    # Just for recording video and saving convex hull
+    # Just for recording video and saving convex hull — one instance per camera,
+    # driven together by irb120_control.util.runtime_log_dir.start_recording()/
+    # stop_recording() so cam1 and cam2 always start/stop/switch quality in lockstep.
     camera_hull_recorder_node = Node(
         package="irb120_control",
         executable="camera_hull_recorder",
@@ -143,7 +157,28 @@ def generate_launch_description():
             {"camera_info_topic": "/realsense/color/camera_info"},
             {"marker_topic": "/object_detector/markers"},
             {"recording_service": "/camera_hull_recorder/set_recording"},
+            {"filename_prefix": "camera_hull_overlay"},
             {"auto_start_recording": False},
+            {"show_hull": True},
+            {"show_ft_hud": True},
+        ],
+    )
+    camera_hull_recorder2_node = Node(
+        package="irb120_control",
+        executable="camera_hull_recorder",
+        name="camera_hull_recorder2",
+        output="screen",
+        parameters=[
+            {"image_topic": "/realsense2/color/image_raw"},
+            {"camera_info_topic": "/realsense2/color/camera_info"},
+            {"marker_topic": "/object_detector/markers"},
+            {"recording_service": "/camera_hull_recorder2/set_recording"},
+            {"filename_prefix": "camera_hull_overlay_cam2"},
+            {"auto_start_recording": False},
+            {"show_hull": True},
+            # No FT HUD on cam2 — this view is likely to get flipped/cropped in
+            # post, and the readout would end up mirrored/misplaced or cut off.
+            {"show_ft_hud": False},
         ],
     )
     # RQT plotter for netft. This doesn't work half the time.
@@ -196,6 +231,16 @@ def generate_launch_description():
 
     # Declare the launch arguments
 
+    egm_cond_time_arg = DeclareLaunchArgument(
+        'egm_cond_time',
+        default_value='180.0',
+        description=(
+            'EGM CondTime in seconds (RobotWare-side hard stop — see egm_handler_node '
+            'comment). 180s (3 min) default is the safe interactive value; raise it for '
+            'a long unattended batch (e.g. arc_static_batch) so EGM does not bail mid-run: '
+            'egm_cond_time:=1200.0'
+        ),
+    )
     start_servo_arg = DeclareLaunchArgument(
         'start_servo',
         default_value='true',
@@ -219,10 +264,21 @@ def generate_launch_description():
             'ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty \'{}\''
         ),
     )
+    perception_active_at_start_arg = DeclareLaunchArgument(
+        'perception_active_at_start',
+        default_value='true',
+        description=(
+            'Whether robot_mask_filter + object_detector start out processing '
+            'immediately (default) or idle until the first check_press_point() '
+            'call activates them — see irb120_perception/perception.launch.py.'
+        ),
+    )
 
     return LaunchDescription([
         perception_method_arg,
         debug_perception_arg,
+        perception_active_at_start_arg,
+        egm_cond_time_arg,
         start_servo_arg,
 
         egm_handler_node,
@@ -236,6 +292,7 @@ def generate_launch_description():
         net_ft_node,
         netft_preprocessor_node,
         camera_hull_recorder_node,
+        camera_hull_recorder2_node,
         viz_netft_delayed,
         servo_node,
         servo_set_twist_mode,

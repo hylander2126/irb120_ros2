@@ -23,7 +23,21 @@ Usage (from any Node, right before `move_to_pre_squash()`):
         node.get_logger().error("Press-point sanity check failed — aborting before any motion.")
         return 1
 
-Logs every check (pass or fail) to `runtime_logs/press_point_check.csv`.
+Logs every check (pass or fail) to `runtime_logs/press_point_check.csv`, and
+also stashes the same result as a dict on `node._press_point_check_result` for
+callers to fold into their own per-trial metadata (see arc_static.py).
+
+Also switches robot_mask_filter + object_detector into their 'active' state
+for the duration of the check and back to idle immediately afterward (pass or
+fail) — see each node's module docstring for the on/off gate itself. This is
+the intended trigger point for that gate: the robot is still clear of the
+object here, and neither node is needed again until the next check.
+
+Also publishes a Marker at the computed point (see PRESS_POINT_MARKER_TOPIC)
+whenever one was actually computed — camera_hull_recorder subscribes to this
+and burns it into the recorded video. Cleared in the same finally block that
+deactivates perception, so it disappears from the video at the same moment
+the hull does.
 """
 
 import csv
@@ -32,6 +46,9 @@ from datetime import datetime
 import numpy as np
 import rclpy
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import ColorRGBA
+from std_srvs.srv import SetBool
+from visualization_msgs.msg import Marker
 
 from irb120_perception.press_point_selector import select_press_point, unpack_labeled_pointcloud2
 from irb120_control.util.runtime_log_dir import runtime_log_dir
@@ -40,6 +57,77 @@ DEFAULT_TOPIC   = '/object_detector/object_points'
 DEFAULT_STANDOFF  = 0.05   # m, above the computed press point — matches the ~5cm scale of the tolerance itself
 DEFAULT_TOLERANCE = 0.05   # m, full 3D distance between computed and hardcoded pre-press positions
 DEFAULT_TIMEOUT    = 5.0   # s, how long to wait for one ~/object_points message
+
+# Published once per check (whenever a point was actually computed, pass or
+# fail) so it can be burned into the recorded video — see
+# camera_hull_recorder.py's press_point_marker_topic. Distinct from the object
+# hull's per-object palette (label_color() in perception_common.py) so it never
+# gets confused with a detected object in a figure: bright magenta, nothing
+# else in this pipeline uses that color.
+PRESS_POINT_MARKER_TOPIC = '/press_point_marker'
+_PRESS_POINT_COLOR = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)
+
+# robot_mask_filter + object_detector are compute-heavy (point cloud math every
+# frame, or a full SAM pass) but only actually needed for the moment it takes
+# to run this check — the robot is still clear of the object at this point in
+# every caller's sequence. Activate for the duration of the check, then idle
+# again immediately after, pass or fail.
+_PERCEPTION_ACTIVE_SERVICES = ('/robot_mask_filter/set_active', '/object_detector/set_active')
+
+
+def _set_perception_active(node, active: bool, timeout_sec: float = 3.0) -> None:
+    """Best-effort toggle of robot_mask_filter + object_detector's on/off gate.
+
+    Never raises — a missing or slow service just logs a warning and moves on;
+    this is a compute-saving optimization, not something the check's safety
+    guarantee depends on (both nodes default to active if never toggled).
+    """
+    for service in _PERCEPTION_ACTIVE_SERVICES:
+        client = node.create_client(SetBool, service)
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            node.get_logger().warn(f'{service} not available — leaving as-is')
+            continue
+        future = client.call_async(SetBool.Request(data=active))
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        if not future.done() or future.result() is None:
+            node.get_logger().warn(f'{service} call timed out')
+
+
+def _publish_press_point_marker(node, computed: np.ndarray, frame_id: str) -> None:
+    """Publish a one-shot marker at the computed press point, for the video
+    overlay (camera_hull_recorder) and/or RViz. Reuses a publisher cached on
+    `node` across calls rather than creating a new one every check."""
+    if not hasattr(node, '_press_point_marker_pub'):
+        node._press_point_marker_pub = node.create_publisher(Marker, PRESS_POINT_MARKER_TOPIC, 10)
+    m = Marker()
+    m.header.frame_id = frame_id
+    m.header.stamp = node.get_clock().now().to_msg()
+    m.ns = 'press_point'
+    m.id = 0
+    m.type = Marker.SPHERE
+    m.action = Marker.ADD
+    m.pose.position.x = float(computed[0])
+    m.pose.position.y = float(computed[1])
+    m.pose.position.z = float(computed[2])
+    m.pose.orientation.w = 1.0
+    m.scale.x = m.scale.y = m.scale.z = 0.015
+    m.color = _PRESS_POINT_COLOR
+    node._press_point_marker_pub.publish(m)
+
+
+def _clear_press_point_marker(node) -> None:
+    """Clear the press-point marker — called in lockstep with deactivating
+    perception so it disappears from the video at the same moment the hull
+    does, rather than lingering over the scene once the robot is up against
+    the object."""
+    if not hasattr(node, '_press_point_marker_pub'):
+        node._press_point_marker_pub = node.create_publisher(Marker, PRESS_POINT_MARKER_TOPIC, 10)
+    m = Marker()
+    m.header.stamp = node.get_clock().now().to_msg()
+    m.ns = 'press_point'
+    m.id = 0
+    m.action = Marker.DELETE
+    node._press_point_marker_pub.publish(m)
 
 
 def check_press_point(node,
@@ -64,38 +152,56 @@ def check_press_point(node,
     Fails closed: no cloud received in time, or no object detected, counts
     as a failed check (returns False) — same as an excessive deviation.
     """
-    latest = {}
-    sub = node.create_subscription(
-        PointCloud2, object_points_topic, lambda msg: latest.setdefault('msg', msg), 10)
-
-    deadline = node.get_clock().now() + rclpy.duration.Duration(seconds=timeout_sec)
-    while 'msg' not in latest and node.get_clock().now() < deadline:
-        rclpy.spin_once(node, timeout_sec=0.1)
-    node.destroy_subscription(sub)
-
     hardcoded = np.asarray(hardcoded_pos, dtype=np.float64)
 
-    if 'msg' not in latest:
-        _report(node, label, False, None, hardcoded, None,
-                f'no cloud received on {object_points_topic} within {timeout_sec:.1f}s')
-        return False
+    _set_perception_active(node, True)
+    try:
+        latest = {}
+        sub = node.create_subscription(
+            PointCloud2, object_points_topic, lambda msg: latest.setdefault('msg', msg), 10)
 
-    xyz, labels = unpack_labeled_pointcloud2(latest['msg'])
-    if len(xyz) == 0:
-        _report(node, label, False, None, hardcoded, None, 'no objects currently detected')
-        return False
+        deadline = node.get_clock().now() + rclpy.duration.Duration(seconds=timeout_sec)
+        while 'msg' not in latest and node.get_clock().now() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        node.destroy_subscription(sub)
 
-    present = np.unique(labels)
-    obj_id = max(present, key=lambda lbl: xyz[labels == lbl, 2].mean())  # prominent object, same convention as press_point_selector
-    pts = xyz[labels == obj_id].astype(np.float64)
+        if 'msg' not in latest:
+            _report(node, label, False, None, hardcoded, None,
+                    f'no cloud received on {object_points_topic} within {timeout_sec:.1f}s')
+            return False
 
-    point = select_press_point(pts)
-    computed = np.array([point[0], point[1], point[2] + standoff], dtype=np.float64)
+        xyz, labels = unpack_labeled_pointcloud2(latest['msg'])
+        if len(xyz) == 0:
+            _report(node, label, False, None, hardcoded, None, 'no objects currently detected')
+            return False
 
-    dist = float(np.linalg.norm(computed - hardcoded))
-    ok = dist <= tolerance
-    _report(node, label, ok, computed, hardcoded, dist, 'OK' if ok else f'EXCEEDS {tolerance:.3f}m tolerance')
-    return ok
+        present = np.unique(labels)
+        obj_id = max(present, key=lambda lbl: xyz[labels == lbl, 2].mean())  # prominent object, same convention as press_point_selector
+        pts = xyz[labels == obj_id].astype(np.float64)
+
+        point = select_press_point(pts)
+        computed = np.array([point[0], point[1], point[2] + standoff], dtype=np.float64)
+        _publish_press_point_marker(node, computed, latest['msg'].header.frame_id)
+
+        dist = float(np.linalg.norm(computed - hardcoded))
+        ok = dist <= tolerance
+        _report(node, label, ok, computed, hardcoded, dist, 'OK' if ok else f'EXCEEDS {tolerance:.3f}m tolerance')
+
+        # Stashed on the node (not just the CSV) so callers can fold it into their
+        # own per-trial metadata sidecar — see save_run_metadata() in arc_static.py.
+        node._press_point_check_result = {
+            'label': label,
+            'frame_id': latest['msg'].header.frame_id,
+            'computed_xyz': computed.tolist(),
+            'hardcoded_xyz': hardcoded.tolist(),
+            'dist_m': dist,
+            'tolerance_m': tolerance,
+            'ok': ok,
+        }
+        return ok
+    finally:
+        _set_perception_active(node, False)
+        _clear_press_point_marker(node)
 
 
 def _report(node, label, ok: bool, computed, hardcoded, dist, note: str) -> None:

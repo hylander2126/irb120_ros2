@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -10,10 +11,16 @@ import numpy as np
 import rclpy
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
+from std_srvs.srv import SetBool
 
 
 _OBJECT_PARAMS_PATH = Path(__file__).resolve().parents[1] / "object_params.json"
 VALID_OBJECTS = {"box", "heart", "flashlight", "monitor", "soda"}
+
+# One camera_hull_recorder instance per camera — see bringup_stack.launch.py.
+# Both get driven together by start_recording()/stop_recording() below so a
+# run's cam1 and cam2 clips always start/stop/switch quality in lockstep.
+DEFAULT_RECORDER_NODES = ("camera_hull_recorder", "camera_hull_recorder2")
 
 
 def load_object_params(object_name: str) -> dict:
@@ -71,6 +78,91 @@ def set_recorder_output_dir(node, subdir: str, recorder_node_name: str = "camera
     return True
 
 
+def set_recorder_video_quality(node, quality: str, recorder_node_name: str = "camera_hull_recorder", timeout_sec: float = 3.0) -> bool:
+    """Set the video_quality parameter ("h264" or "lossless") on the recorder
+    node before recording starts. Same pattern as set_recorder_output_dir."""
+    client = node.create_client(SetParameters, f"/{recorder_node_name}/set_parameters")
+    if not client.wait_for_service(timeout_sec=timeout_sec):
+        node.get_logger().warn(f"set_parameters not available on {recorder_node_name} — video_quality left at its launch default")
+        return False
+
+    param = Parameter()
+    param.name = "video_quality"
+    param.value = ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=quality)
+
+    req = SetParameters.Request()
+    req.parameters = [param]
+    future = client.call_async(req)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+    if not future.done() or future.result() is None:
+        node.get_logger().warn("set_parameters call timed out — video_quality left at its launch default")
+        return False
+
+    node.get_logger().info(f"{recorder_node_name} video_quality set to: {quality}")
+    return True
+
+
+def start_recording(
+    node,
+    subdir: str,
+    quality: str | None = None,
+    recorder_node_names: tuple[str, ...] = DEFAULT_RECORDER_NODES,
+    timeout_sec: float = 5.0,
+) -> bool:
+    """Configure output_dir (+ optionally video_quality) and start recording on
+    every recorder in recorder_node_names, one camera_hull_recorder per camera.
+
+    Returns True only if every recorder confirmed it started — callers should
+    treat a False return the same way the old single-camera code did (abort
+    before any motion), since a silently-missing camera view is exactly the
+    kind of gap this whole recording pipeline exists to avoid.
+    """
+    all_ok = True
+    for name in recorder_node_names:
+        set_recorder_output_dir(node, subdir, recorder_node_name=name, timeout_sec=timeout_sec)
+        if quality is not None:
+            set_recorder_video_quality(node, quality, recorder_node_name=name, timeout_sec=timeout_sec)
+
+        client = node.create_client(SetBool, f"/{name}/set_recording")
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            node.get_logger().error(f"{name} recorder service not available — aborting")
+            all_ok = False
+            continue
+        future = client.call_async(SetBool.Request(data=True))
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        result = future.result()
+        if result is None or not result.success:
+            node.get_logger().error(
+                f"{name} start-recording failed: {result.message if result else 'no response'}"
+            )
+            all_ok = False
+        else:
+            node.get_logger().info(f"{name} recording started")
+    return all_ok
+
+
+def stop_recording(node, recorder_node_names: tuple[str, ...] = DEFAULT_RECORDER_NODES, timeout_sec: float = 2.0) -> None:
+    """Stop every recorder in recorder_node_names. Best-effort — a missing
+    service on one camera just logs a warning, same as the old single-camera
+    cleanup code (this runs in a finally/cleanup path, not somewhere to raise)."""
+    if not rclpy.ok():
+        return
+    for name in recorder_node_names:
+        client = node.create_client(SetBool, f"/{name}/set_recording")
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            node.get_logger().warn(f"{name} recorder service not available — stop-recording skipped")
+            continue
+        future = client.call_async(SetBool.Request(data=False))
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        result = future.result()
+        if result is None or not result.success:
+            node.get_logger().error(
+                f"{name} stop-recording failed: {result.message if result else 'no response'}"
+            )
+        else:
+            node.get_logger().info(f"{name} recording stopped")
+
+
 def save_ft_log(ft_log: list, subdir: str, prefix: str) -> None:
     """Save a collected F/T buffer to a timestamped .npz file.
 
@@ -101,7 +193,8 @@ def save_ft_pose_log(
     obj_pose_log: list | None = None,
     ft_raw_log: list | None = None,
     command_log: list | None = None,
-) -> None:
+    timestamp: str | None = None,
+) -> str | None:
     """Save collected F/T, EE pose, and optional object pose buffers to a timestamped .npz file.
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
 
@@ -116,10 +209,14 @@ def save_ft_pose_log(
                  vx, vy, vz, wy, tangential_speed] rows.
     subdir: subdirectory under runtime_logs/ (e.g. "push").
     prefix: filename prefix (e.g. "push_ft_pose").
+    timestamp: reuse this timestamp for the filename instead of generating a fresh one — pass the
+               same value to save_run_metadata() so the .npz and its .json sidecar pair up by name.
+
+    Returns the timestamp string used for the filename, or None if nothing was saved.
     """
     if not ft_log and not pose_log and not obj_pose_log:
         print(f"[{prefix}] No F/T or pose data collected — skipping npz save")
-        return
+        return None
 
     ft_arr = np.array(ft_log, dtype=np.float64) if ft_log else np.empty((0, 7), dtype=np.float64)
     pose_arr = np.array(pose_log, dtype=np.float64) if pose_log else np.empty((0, 8), dtype=np.float64)
@@ -128,8 +225,9 @@ def save_ft_pose_log(
     cmd_arr = np.array(command_log, dtype=np.float64) if command_log else np.empty((0, 10), dtype=np.float64)
     ft_pose_arr = ft_arr if ft_arr.size and ft_arr.shape[1] > 13 else raw_arr
 
+    ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = runtime_log_dir(subdir)
-    npz_path = log_dir / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz"
+    npz_path = log_dir / f"{prefix}_{ts}.npz"
     save_kwargs = dict(
         # F/T columns — bias-corrected, transformed to world frame
         ft_time_s=ft_arr[:, 0] if ft_arr.size else np.array([]),
@@ -197,3 +295,65 @@ def save_ft_pose_log(
     most_recent_path = log_dir / "most_recent.npz"
     np.savez_compressed(most_recent_path, **save_kwargs)
     print(f"most_recent.npz updated at {most_recent_path}")
+    return ts
+
+
+def git_commit_info() -> dict:
+    """Return {'git_commit': <hash or None>, 'git_dirty': <bool or None>} for the repo
+    containing this file. Never raises — falls back to Nones if git or the repo is unavailable
+    (e.g. running from an installed/copied package with no .git directory).
+    """
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_dir, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=repo_dir, stderr=subprocess.DEVNULL, text=True
+        )
+        return {"git_commit": commit, "git_dirty": bool(status.strip())}
+    except Exception:
+        return {"git_commit": None, "git_dirty": None}
+
+
+def save_run_metadata(subdir: str, prefix: str, timestamp: str, metadata: dict) -> None:
+    """Write a JSON sidecar next to the matching timestamped .npz (same subdir/prefix/timestamp),
+    recording what produced it: code provenance (git commit + dirty flag) plus whatever run
+    parameters the caller passes in (e.g. every SCREAMING_CASE constant in the script, object name,
+    final force_ref, attempt count). Answers "which code/params made this file" later on.
+
+    Never raises on its own account — a metadata-write failure shouldn't be treated as a reason to
+    lose the .npz that was already saved; callers should still wrap this alongside save_ft_pose_log
+    in their own try/except.
+    """
+    record = {
+        "timestamp": timestamp,
+        "prefix": prefix,
+        **git_commit_info(),
+        **metadata,
+    }
+    log_dir = runtime_log_dir(subdir)
+    json_path = log_dir / f"{prefix}_{timestamp}.json"
+    with open(json_path, "w") as f:
+        json.dump(record, f, indent=2, default=str)
+    print(f"Run metadata written to {json_path}")
+
+
+def module_constants(module_globals: dict) -> dict:
+    """Pick out the SCREAMING_CASE module-level constants (the tunable parameters declared at the
+    top of most experiment scripts) for inclusion in a run's metadata sidecar. Pass globals() from
+    the calling script. Values that can't be JSON-serialized as-is are stringified.
+
+    Reading these straight out of globals() (rather than hand-listing them per script) means the
+    metadata sidecar can't drift out of sync as scripts gain or rename parameters.
+    """
+    result = {}
+    for key, value in module_globals.items():
+        if not key.isupper() or key.startswith("_"):
+            continue
+        try:
+            json.dumps(value)
+            result[key] = value
+        except TypeError:
+            result[key] = str(value)
+    return result

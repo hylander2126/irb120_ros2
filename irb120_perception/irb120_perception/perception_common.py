@@ -20,7 +20,8 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Header
+from std_srvs.srv import SetBool
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -275,6 +276,19 @@ class ObjectDetectorBase(Node):
     Subclasses declare their own backend-specific params/subscriptions and call
     `self._publish_results(header, clusters)` / `self._publish_empty(header)`
     with a list of per-object (Ni,3) point arrays in `self.base_frame`.
+
+    On/off gate: this is compute-heavy (point cloud math every frame at best,
+    a full SAM inference pass at worst) but is only actually needed briefly —
+    e.g. right before `press_point_check.check_press_point()` runs, while the
+    robot is out of the way of the object. `active` (declared param, default
+    True — matches the historical always-on behaviour) gates whether
+    subclasses' data callbacks do any work at all; toggle at runtime via:
+
+        ros2 service call /object_detector/set_active std_srvs/srv/SetBool "{data: false}"
+
+    Subclasses must add `if not self._active: return` at the top of whatever
+    callback triggers segmentation (this base class has no opinion on which
+    callback that is, since DBSCAN and SAM key off different messages).
     """
 
     def __init__(self, node_name: str):
@@ -282,6 +296,7 @@ class ObjectDetectorBase(Node):
 
         # ---- Shared parameters -------------------------------------------
         self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('active', True)
         self.declare_parameter('roi_x_min',   0.15)
         self.declare_parameter('roi_x_max',   0.80)
         self.declare_parameter('roi_y_min',  -0.25)
@@ -300,6 +315,7 @@ class ObjectDetectorBase(Node):
         )
         self.voxel_size   = p('voxel_size').value
         self.smooth_alpha = p('smooth_alpha').value
+        self._active      = bool(p('active').value)
 
         # ---- TF -------------------------------------------------------------
         self.tf_buffer   = Buffer()
@@ -309,6 +325,8 @@ class ObjectDetectorBase(Node):
         self.pub_det = self.create_publisher(Detection3DArray, '~/detections',    10)
         self.pub_mk  = self.create_publisher(MarkerArray,      '~/markers',      10)
         self.pub_pts = self.create_publisher(PointCloud2,      '~/object_points', 10)
+
+        self._active_srv = self.create_service(SetBool, '~/set_active', self._on_set_active)
 
         # EMA state for orientation + centroid smoothing, keyed by obj_id;
         # cleared when detection is absent
@@ -322,6 +340,21 @@ class ObjectDetectorBase(Node):
         self._smooth_q.clear()
         self._smooth_pos.clear()
         self._smooth_axes.clear()
+
+    def _on_set_active(self, req, res):
+        self._active = bool(req.data)
+        if not self._active:
+            # Don't leave a stale detection/hull hanging around once we stop
+            # updating it — clear immediately rather than freezing in place.
+            self._reset_smoothing()
+            hdr = Header()
+            hdr.stamp = self.get_clock().now().to_msg()
+            hdr.frame_id = self.base_frame
+            self._publish_empty(hdr)
+        self.get_logger().info(f"active={self._active}")
+        res.success = True
+        res.message = f"active={self._active}"
+        return res
 
     # -------------------------------------------------------------------------
     # Publish

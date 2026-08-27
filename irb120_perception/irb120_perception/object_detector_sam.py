@@ -162,6 +162,8 @@ class SAMObjectDetector(ObjectDetectorBase):
 
     def _depth_cb(self, msg: Image):
         # Store depth frame for reference, then immediately kick off SAM processing
+        if not self._active:
+            return
         self._latest_depth = msg
         self._depth_cloud_cb(msg)
 

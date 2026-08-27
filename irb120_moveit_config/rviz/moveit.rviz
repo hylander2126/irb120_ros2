@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 233
+    Tree Height: 492
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -34,7 +34,7 @@ Visualization Manager:
       Value: true
     - Acceleration_Scaling_Factor: 0.1
       Class: moveit_rviz_plugin/MotionPlanning
-      Enabled: true
+      Enabled: false
       Move Group Namespace: ""
       MoveIt_Allow_Approximate_IK: false
       MoveIt_Allow_External_Program: false
@@ -318,7 +318,7 @@ Visualization Manager:
         Robot Alpha: 1
         Show Robot Collision: false
         Show Robot Visual: true
-      Value: true
+      Value: false
       Velocity_Scaling_Factor: 0.1
     - Class: rviz_default_plugins/Camera
       Enabled: true
@@ -339,6 +339,7 @@ Visualization Manager:
         MarkerArray: true
         MotionPlanning: true
         PointCloud2: true
+        RobotModel: true
         TF: true
         Value: true
       Zoom Factor: 1
@@ -445,6 +446,135 @@ Visualization Manager:
       Radius: 0.009999999776482582
       Reference Frame: press_point
       Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+        adapter_robot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        adapter_sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        ball:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        base:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        bracket:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        finger_ball_center:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        flange:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        link_1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_3:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_4:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_5:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_6:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        pusher_body:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        root_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        root_sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        sensor_body:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        sensor_plate:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        table:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        tool0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        world:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
   Enabled: true
   Global Options:
     Background Color: 153; 193; 241
@@ -463,25 +593,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.4738436937332153
+      Distance: 1.795927882194519
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.3239108622074127
-        Y: 0.05746588110923767
-        Z: 0.45172759890556335
+        X: 0.6079633831977844
+        Y: -0.07383865118026733
+        Z: 0.21244221925735474
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.24539825320243835
+      Pitch: 0.39039817452430725
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.568618297576904
+      Yaw: 4.003607749938965
     Saved: ~
 Window Geometry:
   Camera:
@@ -495,7 +625,7 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001ee000003b5fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f00000129000000cc00fffffffb0000000c00430061006d006500720061010000016e000000cf0000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000243000001b10000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000058c000003b500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001ee000003b5fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000001700000017fb000000100044006900730070006c006100790073010000003f0000022c000000cc00fffffffb0000000c00430061006d0065007200610100000271000001830000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670000000243000001b10000019600fffffffb0000000a005600690065007700730000000371000000db000000a900ffffff0000058c000003b500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1920

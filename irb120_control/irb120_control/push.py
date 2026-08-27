@@ -14,6 +14,7 @@ F/T data collected during step 3 is saved to a .npz file.
 """
 
 import sys
+from datetime import datetime
 
 import rclpy
 from geometry_msgs.msg import Pose, WrenchStamped
@@ -27,7 +28,14 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
-from irb120_control.util.runtime_log_dir import load_object_params, save_ft_pose_log, set_recorder_output_dir, VALID_OBJECTS
+from irb120_control.util.runtime_log_dir import (
+    load_object_params,
+    module_constants,
+    save_ft_pose_log,
+    save_run_metadata,
+    set_recorder_output_dir,
+    VALID_OBJECTS,
+)
 
 
 BASE_FRAME = "base_link"
@@ -258,6 +266,8 @@ def main(args=None) -> int:
 
         # Phase 2: Cartesian push (F/T recorded during execution)
         node._push_started = True
+        push_ok = None
+        return_ok = None
         node._recording_ft = True
         node.get_logger().info(
             f"Pushing {PUSH_DISTANCE*1000:.0f}mm in +X  "
@@ -296,7 +306,24 @@ def main(args=None) -> int:
                 node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
         deactivate_egm(node)
         if node._push_started:
-            save_ft_pose_log(node._ft_log, node._pose_log, subdir=node._log_subdir, prefix="push_ft_pose")
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_ft_pose_log(
+                    node._ft_log, node._pose_log, subdir=node._log_subdir, prefix="push_ft_pose", timestamp=ts
+                )
+                save_run_metadata(
+                    node._log_subdir,
+                    "push_ft_pose",
+                    ts,
+                    {
+                        **module_constants(globals()),
+                        "object": node._object,
+                        "push_ok": push_ok,
+                        "return_ok": return_ok,
+                    },
+                )
+            except Exception as exc:
+                node.get_logger().error(f"Failed to save push F/T+pose log: {exc}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -38,9 +38,11 @@ class CameraHullRecorder(Node):
         self.declare_parameter("image_topic", "/realsense/color/image_raw")
         self.declare_parameter("camera_info_topic", "/realsense/color/camera_info")
         self.declare_parameter("marker_topic", "/object_detector/markers")
+        self.declare_parameter("press_point_marker_topic", "/press_point_marker")
         self.declare_parameter("annotated_image_topic", "~/annotated_image")
         self.declare_parameter("recording_service", "~/set_recording")
         self.declare_parameter("output_dir", "")
+        self.declare_parameter("filename_prefix", "camera_hull_overlay")
         self.declare_parameter("output_fps", 30.0)
         self.declare_parameter("line_thickness", 1)
         self.declare_parameter("line_b", 0)
@@ -52,15 +54,23 @@ class CameraHullRecorder(Node):
         self.declare_parameter("ft_hard_limit_n", 10.0)
         self.declare_parameter("show_hull", False)
         self.declare_parameter("show_rpy_hud", False)
-        # "h264" = good quality, small files (default)
-        # "lossless" = PNG-in-AVI, pixel-perfect, large files — re-encode before submission
-        self.declare_parameter("video_quality", "lossless")
+        self.declare_parameter("show_ft_hud", True)
+        self.declare_parameter("show_press_point", False)
+        # "h264" = good quality, small files (default) — the FT HUD and press-point
+        #   marker hold up fine at this setting; the object hull is on-demand and
+        #   brief enough now that its occasional aliasing under h264 is a
+        #   non-issue for everyday runs.
+        # "lossless" = PNG-in-AVI, pixel-perfect, large files — reserve for a
+        #   deliberate one-off high-quality take (e.g. one hero trial per object).
+        self.declare_parameter("video_quality", "h264")
 
         self._image_topic = str(self.get_parameter("image_topic").value)
         self._camera_info_topic = str(self.get_parameter("camera_info_topic").value)
         self._marker_topic = str(self.get_parameter("marker_topic").value)
+        self._press_point_marker_topic = str(self.get_parameter("press_point_marker_topic").value)
         self._annotated_image_topic = str(self.get_parameter("annotated_image_topic").value)
         self._recording_service_name = str(self.get_parameter("recording_service").value)
+        self._filename_prefix = str(self.get_parameter("filename_prefix").value)
         self._output_fps = max(1.0, float(self.get_parameter("output_fps").value))
         self._line_thickness = max(1, int(self.get_parameter("line_thickness").value))
         self._line_color = (
@@ -73,6 +83,8 @@ class CameraHullRecorder(Node):
         self._ft_hard_limit = float(self.get_parameter("ft_hard_limit_n").value)
         self._show_hull = bool(self.get_parameter("show_hull").value)
         self._show_rpy_hud = bool(self.get_parameter("show_rpy_hud").value)
+        self._show_ft_hud = bool(self.get_parameter("show_ft_hud").value)
+        self._show_press_point = bool(self.get_parameter("show_press_point").value)
 
         self._ft_fx: float = 0.0
         self._ft_fy: float = 0.0
@@ -96,6 +108,8 @@ class CameraHullRecorder(Node):
         self._camera_info_ready = False
 
         self._latest_markers: list[Marker] = []
+        # Cleared in lockstep with the hull — see _on_press_point.
+        self._press_point: Marker | None = None
         self._writer: cv2.VideoWriter | None = None
         self._recording_active = False
         self._pending_recording_start = self._auto_start
@@ -104,6 +118,8 @@ class CameraHullRecorder(Node):
         self._image_sub = self.create_subscription(Image, self._image_topic, self._on_image, 10)
         self._camera_info_sub = self.create_subscription(CameraInfo, self._camera_info_topic, self._on_camera_info, 10)
         self._marker_sub = self.create_subscription(MarkerArray, self._marker_topic, self._on_markers, 10)
+        self._press_point_sub = self.create_subscription(
+            Marker, self._press_point_marker_topic, self._on_press_point, 10)
         self._ft_sub = self.create_subscription(WrenchStamped, self.get_parameter("ft_topic").value, self._on_wrench, 10)
         self._det_sub = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._annotated_pub = self.create_publisher(Image, self._annotated_image_topic, 10)
@@ -138,6 +154,16 @@ class CameraHullRecorder(Node):
         self._obj_pitch_deg = math.degrees(math.asin(max(-1.0, min(1.0, sinp))))
         self._obj_yaw_deg   = math.degrees(math.atan2(siny, cosy))
         self._obj_pose_received = True
+
+    def _on_press_point(self, msg: Marker) -> None:
+        # Clears in lockstep with the hull (both go idle from the same
+        # check_press_point() finally block) rather than persisting — with the
+        # robot up against/over the object afterward, a frozen press-point
+        # marker floating over the scene would just look wrong.
+        if msg.action in (Marker.DELETE, Marker.DELETEALL):
+            self._press_point = None
+        else:
+            self._press_point = msg
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:
@@ -200,7 +226,9 @@ class CameraHullRecorder(Node):
         annotated = frame.copy()
         if self._show_hull:
             self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
-        if self._ft_received:
+        if self._show_press_point and self._press_point is not None:
+            self._draw_press_point(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
+        if self._show_ft_hud and self._ft_received:
             self._draw_ft_hud(annotated)
         if self._show_rpy_hud and self._obj_pose_received:
             self._draw_obj_rpy_hud(annotated)
@@ -224,11 +252,11 @@ class CameraHullRecorder(Node):
 
         if quality_mode == "lossless":
             # PNG-in-AVI: truly lossless, large files — re-encode with ffmpeg before submission
-            self._output_path = output_dir / f"camera_hull_overlay_{ts}.avi"
+            self._output_path = output_dir / f"{self._filename_prefix}_{ts}.avi"
             fourcc = cv2.VideoWriter_fourcc(*"png ")
         else:
             # H.264: excellent quality, small files
-            self._output_path = output_dir / f"camera_hull_overlay_{ts}.mp4"
+            self._output_path = output_dir / f"{self._filename_prefix}_{ts}.mp4"
             fourcc = cv2.VideoWriter_fourcc(*"avc1")
 
         self._writer = cv2.VideoWriter(str(self._output_path), fourcc, self._output_fps, (width, height))
@@ -359,6 +387,33 @@ class CameraHullRecorder(Node):
                 anchor = self._marker_anchor_pixel(marker, tf, width, height)
                 if anchor is not None:
                     cv2.putText(img, label, anchor, cv2.FONT_HERSHEY_SIMPLEX, 0.45, self._line_color, 1, cv2.LINE_AA)
+
+    def _draw_press_point(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
+        """Burn a persistent crosshair at the computed press point (see
+        press_point_check.py) — deliberately drawn as vector shapes rather than
+        reusing the generic hull-wireframe path, so it stays a crisp, distinct
+        landmark in the video regardless of which object hull is or isn't
+        currently visible."""
+        marker = self._press_point
+        tf = self._lookup_transform(marker.header.frame_id, image_frame, stamp)
+        if tf is None:
+            return
+        p_local = np.array(
+            [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z], dtype=np.float64)
+        p_cam = self._transform_point(p_local, tf)
+        pixel = self._project_point(p_cam, width, height)
+        if pixel is None:
+            return
+
+        color = (255, 0, 255)  # BGR magenta — matches press_point_check.py's marker color
+        x, y = pixel
+        radius = 10
+        gap = 6
+        cv2.circle(img, (x, y), radius, color, 2, cv2.LINE_AA)
+        cv2.line(img, (x - radius - gap, y), (x + radius + gap, y), color, 1, cv2.LINE_AA)
+        cv2.line(img, (x, y - radius - gap), (x, y + radius + gap), color, 1, cv2.LINE_AA)
+        cv2.putText(img, "press point", (x + radius + gap + 4, y + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
     def _draw_marker_wireframe(
         self,

@@ -10,11 +10,14 @@ At each tick the desired arc position is computed from the measured EE angle.
 The finger orientation is held fixed while a PI force controller adjusts the
 radial component computed in the actual XZ arc frame.
 
-UNARC reverses the arc back to the squash angle.
+UNARC reverses the arc back to the squash angle.  If contact is lost during
+ARC or UNARC, the complete attempt is re-run with a higher press force.
 """
 
+import argparse
 import math
 import sys
+from datetime import datetime
 
 import rclpy
 from geometry_msgs.msg import WrenchStamped
@@ -26,7 +29,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
 
 from irb120_control.controllers.force_controller import PIDForceController
-from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
+from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.ft_tare import tare_netft
@@ -38,11 +41,21 @@ from irb120_control.util.motion_geometry import (
     quat_to_pitch,
     radial_force_xz,
 )
-from irb120_control.util.runtime_log_dir import load_object_params, set_recorder_output_dir, save_ft_pose_log, VALID_OBJECTS
+from irb120_control.util.runtime_log_dir import (
+    load_object_params,
+    module_constants,
+    save_ft_pose_log,
+    save_run_metadata,
+    start_recording,
+    stop_recording,
+    VALID_OBJECTS,
+)
 
 BASE_FRAME = "world"       # fixed world frame — used for TF lookups and arc geometry (z=0 is table plane)
 SERVO_FRAME = "base_link"  # MoveIt Servo requires base_link as the twist command frame
 EE_LINK = "finger_ball_center"
+
+HOME_JOINT_POSITIONS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # all-zero joint configuration
 
 STATE_IDS = {
     "SQUASH": 1,
@@ -52,7 +65,11 @@ STATE_IDS = {
     "RETRACT": 5,
 }
 
-FORCE_HARD_LIMIT_N = 15.0
+FORCE_HARD_LIMIT_N = 20.0  # was 15.0 — moveit_servo's smoothing filter (servo.yaml,
+# use_smoothing: true) lets commanded velocity decay gradually rather than
+# stopping instantly, so SQUASH/LULL routinely overshoots ~5N past the squash
+# target before the arm actually stops (observed peaks ~15.1-15.4N against a
+# 10N target on the monitor). 20N clears that with margin.
 CONTACT_STABLE_SAMPLES = 1
 
 DESCEND_SPEED = 0.005       # m/s
@@ -96,15 +113,19 @@ REQUIRE_OPERATOR_CONFIRM = True
 LOST_CONTACT_FORCE_THRESH_N = 0.3
 LOST_CONTACT_STEPS = 20
 
+# Retry policy.  The configured per-object force is always the first attempt.
+ADAPTIVE_FORCE_SCALE_FACTOR = 1.25
+ADAPTIVE_FORCE_MAX_N = 13.0
+
 class ArcStatic(Node):
-    def __init__(self) -> None:
+    def __init__(self, object_name: str | None = None) -> None:
         super().__init__("arc_static")
         self.declare_parameter("object", "")
-        obj = self.get_parameter("object").get_parameter_value().string_value
+        obj = object_name or self.get_parameter("object").get_parameter_value().string_value
         if obj not in VALID_OBJECTS:
             raise ValueError(
                 f"Required parameter 'object' must be one of {sorted(VALID_OBJECTS)}, "
-                f"got: '{obj}'. Pass it with: --ros-args -p object:=box"
+                f"got: '{obj}'. Pass it as: arc_static box"
             )
         self._object = obj
         self._log_subdir = f"{obj}/arc_squash"
@@ -139,6 +160,8 @@ class ArcStatic(Node):
 
         self._state = "SQUASH"
         self._done = False
+        self._completed = False
+        self._retry_requested = False
         self._contact_count = 0
         self._force_x = 0.0
         self._force_z = 0.0
@@ -207,6 +230,17 @@ class ArcStatic(Node):
             target_orientation=self._pre_squash_ori,
             velocity_scale=0.1,
             acceleration_scale=0.1,
+        )
+
+    def move_to_home(self) -> bool:
+        """Return to the robot's all-zero joint configuration, gently — same
+        velocity/acceleration scale as the pre-squash approach."""
+        return plan_and_execute_joint_goal(
+            self,
+            self._move_group_client,
+            joint_positions=HOME_JOINT_POSITIONS,
+            velocity_scaling_factor=0.1,
+            acceleration_scaling_factor=0.1,
         )
 
     # ------------------------------------------------------------------ #
@@ -285,9 +319,10 @@ class ArcStatic(Node):
         if (force if force is not None else self._force_z) < LOST_CONTACT_FORCE_THRESH_N:
             self._lost_contact_count += 1
             if self._lost_contact_count >= LOST_CONTACT_STEPS:
-                self.get_logger().error(
+                self._retry_requested = True
+                self.get_logger().warn(
                     f"Lost contact in {self._state} ({self._lost_contact_count} samples "
-                    f"below {LOST_CONTACT_FORCE_THRESH_N:.1f} N) — retracting"
+                    f"below {LOST_CONTACT_FORCE_THRESH_N:.1f} N) — retracting before retry"
                 )
                 self._transition("RETRACT")
                 return True
@@ -613,6 +648,7 @@ class ArcStatic(Node):
                 )
 
             if angle >= self._arc_start_angle - math.radians(1.0):  # 1 deg tolerance
+                self._completed = True
                 self._transition("RETRACT")
             return
 
@@ -628,26 +664,122 @@ class ArcStatic(Node):
                 self._done = True
             return
 
+    def reset_attempt(self, force_ref: float) -> None:
+        """Reset transient FSM/controller state before another full attempt."""
+        self._state = "SQUASH"
+        self._done = False
+        self._completed = False
+        self._retry_requested = False
+        self._contact_count = 0
+        self._contact_felt = False
+        self._lost_contact_count = 0
+        self._lull_next = "ARC"
+        self._force_y_ref = None
+        self._vy_integral = 0.0
+        self._arc_center_x = None
+        self._arc_center_z = None
+        self._arc_start_angle = None
+        self._arc_end_angle = None
+        self._arc_fx_pos_count = 0
+        self._arc_fx_neg_count = 0
+        self._arc_fx_flip_count = 0
+        self._arc_fx_majority_sign = None
+        self._arc_fx_low_count = 0
+        self._force_ctrl.reset()
+        self._force_ctrl.set_reference(force_ref)
+        self._state_start_time = self._now_s()
+
+    def run_attempt(self) -> None:
+        """Run the FSM until its retract finishes."""
+        timer = self.create_timer(1.0 / CONTROL_HZ, self._tick)
+        try:
+            while rclpy.ok() and not self._done:
+                rclpy.spin_once(self, timeout_sec=0.05)
+        finally:
+            timer.cancel()
+            self.destroy_timer(timer)
+            self._servo_cmd.publish_zero(self._state, self._force_z)
+
+
+def run_adaptive_press(node: "ArcStatic", force_ref: float, log_prefix: str = "Attempt") -> tuple[bool, float, int]:
+    """Run one standard arc attempt, escalating the squash force by
+    ADAPTIVE_FORCE_SCALE_FACTOR and retrying on each lost-contact slip, up to
+    ADAPTIVE_FORCE_MAX_N. Stops as soon as an attempt completes cleanly, no
+    retry was requested (some other kind of failure), or the ceiling would be
+    exceeded.
+
+    Shared by arc_static's own single-run main() and arc_static_batch, so the
+    two can't silently drift apart on retry semantics again (see the
+    force-collapse bug arc_static_batch had before this was factored out).
+
+    Returns (completed, force_ref_used, attempts) — force_ref_used is whatever
+    force the last attempt actually ran at, so a caller doing repeated trials
+    of the same object (e.g. arc_static_batch) can seed the NEXT trial's
+    starting force from this instead of re-discovering it from scratch.
+    """
+    attempt = 1
+    while rclpy.ok():
+        node.get_logger().info(f"=== {log_prefix} {attempt}: press force {force_ref:.2f} N ===")
+        node.reset_attempt(force_ref)
+        node.run_attempt()
+
+        if node._completed or not node._retry_requested:
+            return node._completed, force_ref, attempt
+
+        next_force = force_ref * ADAPTIVE_FORCE_SCALE_FACTOR
+        if next_force > ADAPTIVE_FORCE_MAX_N:
+            node.get_logger().error(
+                f"Retry would require {next_force:.2f} N, above the "
+                f"{ADAPTIVE_FORCE_MAX_N:.2f} N adaptive ceiling — aborting"
+            )
+            return False, force_ref, attempt
+
+        force_ref = next_force
+        attempt += 1
+        node.pause_servo()
+        node.get_logger().info(f"Returning to pre-squash for adaptive retry at {force_ref:.2f} N")
+        if not node.move_to_pre_squash():
+            node.get_logger().error("MoveIt return for adaptive retry failed — aborting")
+            return False, force_ref, attempt
+        node.resume_servo()
+    return False, force_ref, attempt
+
 
 def main(args=None) -> int:
-    rclpy.init(args=args)
-    node = ArcStatic()
-    recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
+    raw_args = list(sys.argv[1:] if args is None else args)
+    ros_args_index = raw_args.index("--ros-args") if "--ros-args" in raw_args else len(raw_args)
+    app_args = raw_args[:ros_args_index]
+    ros_args = raw_args[ros_args_index:]
+
+    parser = argparse.ArgumentParser(description="Run the adaptive arc-static press FSM")
+    parser.add_argument("object", nargs="?", choices=sorted(VALID_OBJECTS))
+    parser.add_argument(
+        "--quality", choices=["h264", "lossless"], default="h264",
+        help="Video quality for both cameras this run (default: h264 — everyday runs). "
+             "Use 'lossless' for a deliberate one-off high-quality take, e.g. one hero "
+             "trial per object for a paper/video.",
+    )
+    parser.add_argument(
+        "--ignore-press-sanity", action="store_true",
+        help="Continue even if the press-point sanity check fails (perception disagrees "
+             "with the calibrated pre_squash pose, or nothing was detected at all). This "
+             "check exists to catch a badly-positioned/undetected object before any "
+             "motion — only skip it when you already know why it's failing.",
+    )
+    parsed = parser.parse_args(app_args)
+
+    rclpy.init(args=ros_args)
+    node = ArcStatic(object_name=parsed.object)
+    # Defaults in case we abort (or an exception fires) before the attempt loop is reached —
+    # the F/T subscriber is already live at this point, so there may be a log to save either way.
+    attempt = 0
+    force_ref = node._force_ctrl.reference
     try:
         if not tare_netft(node):
             return 1
 
-        set_recorder_output_dir(node, node._log_subdir)
-        if recorder_client.wait_for_service(timeout_sec=5.0):
-            future = recorder_client.call_async(SetBool.Request(data=True))
-            rclpy.spin_until_future_complete(node, future)
-            result = future.result()
-            if result is None or not result.success:
-                node.get_logger().error(f"Start-recording failed: {result.message if result else 'no response'} — aborting")
-                return 1
-            node.get_logger().info("Recording started")
-        else:
-            node.get_logger().error("Recorder service not available after 5 s — aborting")
+        if not start_recording(node, node._log_subdir, quality=parsed.quality):
+            node.get_logger().error("One or more cameras failed to start recording — aborting")
             return 1
 
         if not ensure_egm_active(node):
@@ -661,11 +793,15 @@ def main(args=None) -> int:
             return 1
 
         if not check_press_point(node, node._pre_squash_pos, label=f"arc_static/{node._object}"):
-            node.get_logger().error(
+            msg = (
                 "Press-point sanity check failed — perception disagrees with the calibrated "
-                "pre_squash pose (or no detection at all). Aborting before any motion."
+                "pre_squash pose (or no detection at all)."
             )
-            return 1
+            if parsed.ignore_press_sanity:
+                node.get_logger().warn(f"{msg} Continuing anyway (--ignore-press-sanity).")
+            else:
+                node.get_logger().error(f"{msg} Aborting before any motion.")
+                return 1
 
         if not node.move_to_pre_squash():
             node.get_logger().error("Approach failed. Aborting.")
@@ -691,35 +827,13 @@ def main(args=None) -> int:
             return 0
 
         node.resume_servo()
-        node._state_start_time = node._now_s()
-        node._timer = node.create_timer(1.0 / CONTROL_HZ, node._tick)
-        while rclpy.ok() and not node._done:
-            rclpy.spin_once(node, timeout_sec=0.05)
-
-        if rclpy.ok():
-            node._servo_cmd.publish_zero(node._state, node._force_z)
-            node.pause_servo()
-            node.get_logger().info("Returning to pre-squash pose via MoveIt on the existing EGM session...")
-            if not node.move_to_pre_squash():
-                node.get_logger().error(
-                    "MoveIt return to pre-squash failed. EGM may have ended; "
-                    "not restarting it automatically to avoid an unsafe snap."
-                )
+        _, force_ref, attempt = run_adaptive_press(node, node._force_ctrl.reference)
     except KeyboardInterrupt:
         pass
     finally:
-        if recorder_client.wait_for_service(timeout_sec=2.0):
-            if rclpy.ok():
-                future = recorder_client.call_async(SetBool.Request(data=False))
-                rclpy.spin_until_future_complete(node, future)
-                result = future.result()
-                if result is None or not result.success:
-                    node.get_logger().error(f"Stop-recording failed: {result.message if result else 'no response'}")
-                else:
-                    node.get_logger().info("Recording stopped")
-            else:
-                node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
+        stop_recording(node)
         try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_ft_pose_log(
                 node._ft_transformed_log,
                 node._pose_log,
@@ -727,10 +841,34 @@ def main(args=None) -> int:
                 "arc_static",
                 node._obj_pose_log,
                 command_log=node._command_log,
+                timestamp=ts,
+            )
+            save_run_metadata(
+                node._log_subdir,
+                "arc_static",
+                ts,
+                {
+                    **module_constants(globals()),
+                    "object": node._object,
+                    "final_force_ref_n": force_ref,
+                    "attempts": attempt,
+                    "completed": node._completed,
+                    "press_point_check": getattr(node, "_press_point_check_result", None),
+                },
             )
         except Exception as exc:
             node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
         node._servo_cmd.publish_zero(node._state, node._force_z)
+        if rclpy.ok():
+            node.pause_servo()
+            node.get_logger().info(
+                "Returning to home position (all joints zero) via MoveIt on the existing EGM session..."
+            )
+            if not node.move_to_home():
+                node.get_logger().error(
+                    "MoveIt return to home failed. EGM may have ended; "
+                    "not retrying automatically to avoid an unsafe snap."
+                )
         node._servo_cmd.close()
         deactivate_egm(node)
         node.destroy_node()

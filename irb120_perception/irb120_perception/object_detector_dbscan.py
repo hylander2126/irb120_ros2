@@ -93,6 +93,8 @@ class DBSCANObjectDetector(ObjectDetectorBase):
     def _cloud_cb(self, msg: PointCloud2):
         """Receives a PointCloud2 (possibly multi-camera fused), transforms to
         base_link if needed, crops to the workspace ROI, and segments."""
+        if not self._active:
+            return
         t0 = time.monotonic()
 
         pts_cam = pointcloud2_to_xyz(msg)

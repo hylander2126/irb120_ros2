@@ -3,6 +3,7 @@
 
 import math
 import sys
+from datetime import datetime
 
 import rclpy
 from geometry_msgs.msg import WrenchStamped
@@ -18,7 +19,13 @@ from irb120_control.controllers.servo_command_publisher import ServoCommandPubli
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.motion_geometry import arc_angle_xz, arc_velocity_xz, clamp, quat_to_pitch
-from irb120_control.util.runtime_log_dir import load_object_params, save_ft_pose_log, set_recorder_output_dir
+from irb120_control.util.runtime_log_dir import (
+    load_object_params,
+    module_constants,
+    save_ft_pose_log,
+    save_run_metadata,
+    set_recorder_output_dir,
+)
 
 BASE_FRAME = "world"
 SERVO_FRAME = "base_link"
@@ -324,7 +331,16 @@ def main(args=None) -> int:
             rclpy.spin_until_future_complete(node, future)
             node.get_logger().info("Recording stopped")
         try:
-            save_ft_pose_log(node._ft_transformed_log, node._pose_log, LOG_SUBDIR, "arc_test", node._obj_pose_log)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_ft_pose_log(
+                node._ft_transformed_log, node._pose_log, LOG_SUBDIR, "arc_test", node._obj_pose_log, timestamp=ts
+            )
+            save_run_metadata(
+                LOG_SUBDIR,
+                "arc_test",
+                ts,
+                {**module_constants(globals()), "object": OBJECT},
+            )
         except Exception as exc:
             node.get_logger().error(f"Failed to save no-load arc test log: {exc}")
         node._servo_cmd.publish_zero(node._state, node._force_z)

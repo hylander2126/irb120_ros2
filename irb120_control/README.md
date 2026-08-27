@@ -18,3 +18,17 @@ If `irb120_abb_hardware_interface` is missing, not built, or not sourced, real r
 
 - This package intentionally keeps vendor packages unmodified.
 - Bringup launch files in this package are tailored to this robot cell configuration.
+
+## Arc press behavior
+
+`arc_static` uses the selected object's `force_ref_n` as its initial press
+force. If radial contact is lost during ARC or UNARC, it retracts, returns to
+the pre-squash pose, multiplies the force by 1.25, and retries up to the 13 N
+adaptive ceiling. Other failures retract and stop without increasing force.
+
+```bash
+ros2 run irb120_control arc_static monitor
+```
+
+The ROS parameter form remains supported for launch files and other ROS-native
+configuration, but it is not required for normal command-line use.

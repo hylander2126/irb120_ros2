@@ -10,6 +10,15 @@ Enable the debug pipeline (perception_debugger node) with:
 
   ros2 launch irb120_perception perception.launch.py method:=sam debug_perception:=true
 
+robot_mask_filter and object_detector are compute-heavy but only actually
+needed briefly (see their own docstrings' "On/off gate" section) —
+`press_point_check.check_press_point()` already toggles them on/off around
+each check regardless of this launch arg. This one just controls what state
+they're in before the first check ever runs (or if you want to watch live
+detections in RViz without running a control script):
+
+  ros2 launch irb120_perception perception.launch.py active_at_start:=false
+
 DBSCAN: runs under system python, no GPU needed.
 SAM:    runs under the venv python (~/.venvs/.venv_torch_SAM/bin/python3),
         requires CUDA GPU and SAM 2 weights.
@@ -31,6 +40,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import EqualsSubstitution, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 PKG_SHARE      = get_package_share_directory('irb120_perception')
@@ -66,6 +76,17 @@ def generate_launch_description() -> LaunchDescription:
         ),
     )
 
+    active_at_start_arg = DeclareLaunchArgument(
+        'active_at_start',
+        default_value='true',
+        description=(
+            "Whether robot_mask_filter + object_detector start out processing "
+            "immediately (default, matches historical always-on behaviour) or "
+            "idle until the first check_press_point() call activates them."
+        ),
+    )
+    active_param = {'active': ParameterValue(LaunchConfiguration('active_at_start'), value_type=bool)}
+
     # ---- Robot mask filter (always running, both backends benefit) ----------
     mask_filter_node = Node(
         package='irb120_perception',
@@ -85,7 +106,7 @@ def generate_launch_description() -> LaunchDescription:
             # here, but the node never declared/read it — dead config left
             # over from before the finger/sensor assembly was rebuilt, and it
             # still named the now-nonexistent ft_link/finger_link frames.)
-        }],
+        }, active_param],
     )
 
     # ---- DBSCAN parameters — reads from masked, camera-fused pointcloud -----
@@ -141,7 +162,7 @@ def generate_launch_description() -> LaunchDescription:
         executable='object_detector_dbscan',
         name='object_detector',
         output='screen',
-        parameters=[dbscan_params],
+        parameters=[dbscan_params, active_param],
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration('method'), 'dbscan')),
     )
 
@@ -151,7 +172,7 @@ def generate_launch_description() -> LaunchDescription:
         executable='object_detector_sam',
         name='object_detector',
         output='screen',
-        parameters=[sam_params],
+        parameters=[sam_params, active_param],
         additional_env={'PYTHONPATH': VENV_SITE_PKGS + ':' + os.environ.get('PYTHONPATH', '')},
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration('method'), 'sam')),
     )
@@ -183,6 +204,7 @@ def generate_launch_description() -> LaunchDescription:
         method_arg,
         debug_arg,
         cam2_cloud_arg,
+        active_at_start_arg,
         mask_filter_node,
         dbscan_node,
         sam_node,

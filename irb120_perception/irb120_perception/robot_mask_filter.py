@@ -61,6 +61,16 @@ Tune radii live — no rebuild:
   ros2 param set /robot_mask_filter robot_mask_padding 0.10
   ros2 param set /robot_mask_filter capsule_radius_aggressive 0.07
   ros2 param set /robot_mask_filter capsule_radius_conservative 0.015
+
+On/off gate:
+  This is the most expensive node in the perception chain (mesh half-space +
+  capsule tests on every point, every frame) but it's only actually needed
+  briefly — e.g. right before a press-point check, while the robot is still
+  out of the way of the object. Defaults to active (matches historical
+  always-on behaviour); toggle at runtime with:
+    ros2 service call /robot_mask_filter/set_active std_srvs/srv/SetBool "{data: false}"
+  `press_point_check.check_press_point()` already does this automatically
+  around each check, so most callers never need to touch this directly.
 """
 
 import os
@@ -74,6 +84,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 
 
@@ -272,6 +283,7 @@ class RobotMaskFilter(Node):
         self.declare_parameter('input_depth',  '/realsense/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info',  '/realsense/color/camera_info')
         self.declare_parameter('tf_cache_rate_hz', 20.0)
+        self.declare_parameter('active', True)
 
         p = self.get_parameter
         self.base_frame     = p('base_frame').value
@@ -280,6 +292,7 @@ class RobotMaskFilter(Node):
             'aggressive':   p('capsule_radius_aggressive').value,
             'conservative': p('capsule_radius_conservative').value,
         }
+        self._active = bool(p('active').value)
 
         # Transforms barely change between one depth frame and the next, so
         # look them up on a slow timer instead of ~14x per point-cloud
@@ -350,6 +363,7 @@ class RobotMaskFilter(Node):
 
         self._pub_cloud = self.create_publisher(PointCloud2, '~/points_masked_dbscan', output_qos)
         self._pub_depth = self.create_publisher(Image,       '~/depth_masked_sam',     output_qos)
+        self._active_srv = self.create_service(SetBool, '~/set_active', self._on_set_active)
 
         cache_period = 1.0 / max(1.0, float(p('tf_cache_rate_hz').value))
         self.create_timer(cache_period, self._refresh_tf_cache)
@@ -364,6 +378,20 @@ class RobotMaskFilter(Node):
         )
 
     # -------------------------------------------------------------------------
+
+    def _on_set_active(self, req, res):
+        self._active = bool(req.data)
+        if not self._active:
+            # Drop cached per-camera clouds and republish empty immediately so
+            # downstream (object_detector) doesn't keep clustering a frozen,
+            # increasingly stale cloud while we're idle.
+            self._cam_pts_base.clear()
+            empty = _pack_pc2(np.zeros((0, 3), dtype=np.float32), self.base_frame, self.get_clock().now().to_msg())
+            self._pub_cloud.publish(empty)
+        self.get_logger().info(f'active={self._active}')
+        res.success = True
+        res.message = f'active={self._active}'
+        return res
 
     def _cam_info_cb(self, msg: CameraInfo):
         self._cam_info = msg
@@ -419,12 +447,16 @@ class RobotMaskFilter(Node):
         return ~mask_out  # keep = not masked
 
     def _cloud_cb(self, msg: PointCloud2):
+        if not self._active:
+            return
         if self._cloud_frame != msg.header.frame_id:
             self._cloud_frame = msg.header.frame_id
             self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
         self._process_and_publish(msg, 'cam1')
 
     def _cloud2_cb(self, msg: PointCloud2):
+        if not self._active:
+            return
         if self._cloud2_frame != msg.header.frame_id:
             self._cloud2_frame = msg.header.frame_id
             self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
@@ -471,6 +503,8 @@ class RobotMaskFilter(Node):
         )
 
     def _depth_cb(self, msg: Image):
+        if not self._active:
+            return
         if self._cam_info is None:
             self._pub_depth.publish(msg)
             return
