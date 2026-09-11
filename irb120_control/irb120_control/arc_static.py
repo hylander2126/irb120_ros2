@@ -81,7 +81,19 @@ ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
 ARC_FX_FLIP_STABLE_SAMPLES = 5
-ARC_FX_LOW_THRESH_N = 0.1 # 0.5 for monitor...        # stop ARC when tangent force drops below this (before sign flip)
+# ARC exits when the tangent force decays toward zero — that IS the tipping angle
+# theta*, so this threshold decides how close to theta* the sweep actually gets, and the
+# parameter fit then extrapolates the rest of the way.
+#
+# A single ABSOLUTE threshold cannot serve objects whose tangential force differs by
+# ~24x (measured torque RMS: heart 0.075 N·m vs monitor 1.79 N·m). At 0.1 N the heart
+# tripped 3.4-7.6 deg short of theta* while the box got within 0.8 deg — and the box had
+# 0.65% z_c error against the heart's 15.6%. Hence a RELATIVE threshold: stop at a
+# fraction of the peak tangent force this trial actually produced, so every object stops
+# at the same point on its own decay curve. ARC_FX_LOW_FLOOR_N keeps it above sensor
+# noise for the lightest objects.
+ARC_FX_LOW_FRACTION = 0.08   # of this trial's peak tangent force
+ARC_FX_LOW_FLOOR_N  = 0.1    # absolute floor — the old fixed threshold, now a lower bound
 ARC_FX_LOW_STABLE_SAMPLES = 5    # number of consecutive ticks below threshold required
 
 SQUASH_TIMEOUT_SEC = 30.0
@@ -116,6 +128,30 @@ LOST_CONTACT_STEPS = 20
 # Retry policy.  The configured per-object force is always the first attempt.
 ADAPTIVE_FORCE_SCALE_FACTOR = 1.25
 ADAPTIVE_FORCE_MAX_N = 13.0
+
+def _quat_rotate(q, v):
+    """Rotate vector v by quaternion q=(x,y,z,w). Plain math — this is a control node,
+    it should not pull in the estimation stack just to move one point between frames."""
+    x, y, z, w = q
+    vx, vy, vz = v
+    # t = 2 * (q_vec x v);  v' = v + w*t + q_vec x t
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (vx + w * tx + (y * tz - z * ty),
+            vy + w * ty + (z * tx - x * tz),
+            vz + w * tz + (x * ty - y * tx))
+
+
+def _quat_mul(a, b):
+    """Hamilton product a*b, both (x, y, z, w)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
 
 class ArcStatic(Node):
     def __init__(self, object_name: str | None = None) -> None:
@@ -186,6 +222,7 @@ class ArcStatic(Node):
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign: int | None = None
         self._arc_fx_low_count = 0
+        self._arc_peak_tangent = 0.0
 
         self._pause_servo_client   = self.create_client(SetBool, "/servo_node/pause_servo")
 
@@ -282,8 +319,30 @@ class ArcStatic(Node):
         t = self._now_s()
         p = hyp.pose.pose.position
         q = hyp.pose.pose.orientation
-        obj_pitch = quat_to_pitch(q.x, q.y, q.z, q.w)
-        self._obj_pose_log.append([t, p.x, p.y, p.z, q.x, q.y, q.z, q.w, obj_pitch])
+
+        # The perception stack publishes in 'base_link' (see perception.launch.py) but
+        # every other stream in this log — EE pose, ft pose, the arc centre — is in
+        # BASE_FRAME ('world'). Those differ by the 21 mm bracket under the robot base,
+        # so logging the detection raw would put the object 21 mm low in z relative to
+        # everything the estimator compares it against.
+        src = msg.header.frame_id
+        if src and src != BASE_FRAME:
+            try:
+                tf = self._tf_buffer.lookup_transform(BASE_FRAME, src, rclpy.time.Time())
+            except TransformException as exc:
+                self._warn_throttled(f"Dropping detection: no TF {src} -> {BASE_FRAME}: {exc}")
+                return
+            tr, ro = tf.transform.translation, tf.transform.rotation
+            rq = (ro.x, ro.y, ro.z, ro.w)
+            rx, ry, rz = _quat_rotate(rq, (p.x, p.y, p.z))
+            px, py, pz = rx + tr.x, ry + tr.y, rz + tr.z
+            qx, qy, qz, qw = _quat_mul(rq, (q.x, q.y, q.z, q.w))
+        else:
+            px, py, pz = p.x, p.y, p.z
+            qx, qy, qz, qw = q.x, q.y, q.z, q.w
+
+        obj_pitch = quat_to_pitch(qx, qy, qz, qw)
+        self._obj_pose_log.append([t, px, py, pz, qx, qy, qz, qw, obj_pitch])
 
     # ------------------------------------------------------------------ #
     #  TF / helpers
@@ -386,6 +445,7 @@ class ArcStatic(Node):
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign = None
         self._arc_fx_low_count = 0
+        self._arc_peak_tangent = 0.0
         self.get_logger().info(
             f"Arc init: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})  "
             f"r={radius:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
@@ -601,18 +661,23 @@ class ArcStatic(Node):
                     f"fx_low_count: {self._arc_fx_low_count}"
                 )
             swept = abs(self._arc_start_angle - angle) if self._arc_start_angle is not None else 0.0
-            if swept >= math.radians(ARC_FX_SIGN_MIN_SWEEP_DEG) and f_tangent < ARC_FX_LOW_THRESH_N:
+            self._arc_peak_tangent = max(self._arc_peak_tangent, abs(f_tangent))
+            fx_low_thresh = max(ARC_FX_LOW_FLOOR_N, ARC_FX_LOW_FRACTION * self._arc_peak_tangent)
+            if swept >= math.radians(ARC_FX_SIGN_MIN_SWEEP_DEG) and f_tangent < fx_low_thresh:
                 self._arc_fx_low_count += 1
                 if self._arc_fx_low_count >= ARC_FX_LOW_STABLE_SAMPLES:
                     self._lull_next = "UNARC"
                     self.get_logger().info(
-                        f"tangent force below threshold ({ARC_FX_LOW_THRESH_N:.2f} N) for "
+                        f"tangent force below threshold ({fx_low_thresh:.2f} N, "
+                        f"{ARC_FX_LOW_FRACTION:.0%} of peak {self._arc_peak_tangent:.2f} N) for "
                         f"{ARC_FX_LOW_STABLE_SAMPLES} ticks: f_tangent={f_tangent:.2f} N "
                         f"at arc_angle={math.degrees(angle):.1f} deg; entering LULL"
                     )
                     self._transition("LULL")
                     return
             else:
+                # Only the consecutive-tick counter resets here; the running peak must
+                # persist across the whole ARC or the relative threshold would collapse.
                 self._arc_fx_low_count = 0
 
             if self._arc_fx_flipped(angle):
@@ -685,6 +750,7 @@ class ArcStatic(Node):
         self._arc_fx_flip_count = 0
         self._arc_fx_majority_sign = None
         self._arc_fx_low_count = 0
+        self._arc_peak_tangent = 0.0
         self._force_ctrl.reset()
         self._force_ctrl.set_reference(force_ref)
         self._state_start_time = self._now_s()

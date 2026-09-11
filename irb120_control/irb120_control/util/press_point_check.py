@@ -58,6 +58,13 @@ DEFAULT_STANDOFF  = 0.05   # m, above the computed press point — matches the ~
 DEFAULT_TOLERANCE = 0.05   # m, full 3D distance between computed and hardcoded pre-press positions
 DEFAULT_TIMEOUT    = 5.0   # s, how long to wait for one ~/object_points message
 
+# Frame the comparison is done in. The perception stack publishes detections in
+# 'base_link' (see perception.launch.py), while every pose the controller plans and
+# logs against is in 'world' (arc_static.BASE_FRAME, moveit_single_shot.DEFAULT_BASE_FRAME).
+# The two differ by the 21 mm bracket the robot base sits on, so the press point MUST be
+# transformed before it is compared with a world-frame hardcoded position.
+COMPARE_FRAME = 'world'
+
 # Published once per check (whenever a point was actually computed, pass or
 # fail) so it can be burned into the recorded video — see
 # camera_hull_recorder.py's press_point_marker_topic. Distinct from the object
@@ -91,6 +98,32 @@ def _set_perception_active(node, active: bool, timeout_sec: float = 3.0) -> None
         rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
         if not future.done() or future.result() is None:
             node.get_logger().warn(f'{service} call timed out')
+
+
+def _to_frame(node, point: np.ndarray, src_frame: str, dst_frame: str):
+    """Transform a point between TF frames. Returns (point, note); point is None on failure.
+
+    A no-op when the frames already match, so this stays correct if the perception
+    stack is ever reconfigured to publish directly in the controller's frame.
+    """
+    if not src_frame or src_frame == dst_frame:
+        return point, 'no transform needed'
+    buf = getattr(node, '_tf_buffer', None)
+    if buf is None:
+        return None, 'node has no _tf_buffer'
+    try:
+        tf = buf.lookup_transform(dst_frame, src_frame, rclpy.time.Time())
+    except Exception as exc:                     # TransformException and friends
+        return None, str(exc)
+    t = tf.transform.translation
+    q = tf.transform.rotation
+    x, y, z, w = q.x, q.y, q.z, q.w
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ])
+    return R @ np.asarray(point, dtype=np.float64) + np.array([t.x, t.y, t.z]), 'ok'
 
 
 def _publish_press_point_marker(node, computed: np.ndarray, frame_id: str) -> None:
@@ -180,8 +213,20 @@ def check_press_point(node,
         pts = xyz[labels == obj_id].astype(np.float64)
 
         point = select_press_point(pts)
-        computed = np.array([point[0], point[1], point[2] + standoff], dtype=np.float64)
-        _publish_press_point_marker(node, computed, latest['msg'].header.frame_id)
+        computed_src = np.array([point[0], point[1], point[2] + standoff], dtype=np.float64)
+        src_frame = latest['msg'].header.frame_id
+        _publish_press_point_marker(node, computed_src, src_frame)
+
+        # The perception stack publishes in `base_link`, but `hardcoded_pos` is a
+        # world-frame pre-squash position (arc_static uses BASE_FRAME="world", and
+        # MoveIt plans against DEFAULT_BASE_FRAME="world"). world->base_link is a
+        # 21 mm z offset (the bracket the robot sits on), so comparing the two raw
+        # silently understated the z deviation by exactly that much.
+        computed, conv_note = _to_frame(node, computed_src, src_frame, COMPARE_FRAME)
+        if computed is None:
+            _report(node, label, False, None, hardcoded, None,
+                    f'cannot transform press point {src_frame}->{COMPARE_FRAME}: {conv_note}')
+            return False
 
         dist = float(np.linalg.norm(computed - hardcoded))
         ok = dist <= tolerance
@@ -191,8 +236,10 @@ def check_press_point(node,
         # own per-trial metadata sidecar — see save_run_metadata() in arc_static.py.
         node._press_point_check_result = {
             'label': label,
-            'frame_id': latest['msg'].header.frame_id,
+            'frame_id': COMPARE_FRAME,          # frame the comparison was actually done in
+            'source_frame_id': src_frame,       # frame perception published in
             'computed_xyz': computed.tolist(),
+            'computed_xyz_source_frame': computed_src.tolist(),
             'hardcoded_xyz': hardcoded.tolist(),
             'dist_m': dist,
             'tolerance_m': tolerance,
