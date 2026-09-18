@@ -117,7 +117,7 @@ def generate_launch_description() -> LaunchDescription:
         'roi_x_max':  0.80,
         'roi_y_min': -0.25,
         'roi_y_max':  0.25,
-        'roi_z_min': -0.02,  # Table at Z≈-0.02;
+        'roi_z_min': -0.01,  # Table at Z≈-0.02 (tilts up to ≈-0.015 at far x with the 2026-09-18 cam calibration)
         'roi_z_max':  0.50,
         'voxel_size':      0.005,
         'dbscan_eps':      0.02,

@@ -4,6 +4,9 @@ Object detection for the IRB120 robot workspace. Subscribes to RealSense
 camera streams, isolates objects on the workspace surface, and publishes
 their 3D convex hulls, centroids, and orientations.
 
+The independent [contact point selector](CONTACT_SELECTION.md) selects planar
+push, forward-tip and press contacts and estimates tipping axes from object clouds.
+
 Two segmentation backends are available as **separate nodes/executables**
 (different runtime deps, selected at launch time via the `method` arg, which
 picks which one actually runs — see [Launching](#launching)):

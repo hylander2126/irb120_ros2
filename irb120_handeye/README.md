@@ -128,6 +128,32 @@ produced are easy to pair up.
 - `OLD_joints_20_14mm.yaml` — previous 20-pose set, kept for reference; not
   used by default anymore.
 
+## Headless recalibration (`run_handeye_calibration.py`)
+
+`ros2 run irb120_handeye run_handeye_calibration` replaces steps 1-4 above
+with a scripted OpenCV solve — no MoveIt/RViz, no manual "Take Sample"
+clicks, and both cameras solved from one shared pose set instead of two
+separate per-camera runs. See the module docstring for the full recipe
+(`cv2.calibrateHandEye` in its documented eye-to-hand mode) and
+`generate_charuco_target.py` for the print-ready ChArUco target it prefers.
+
+### Future work
+
+- **Switch `--board-type` back to `charuco` (its long-term default) once a
+  printer and a rigid flat backing (acrylic/Dibond/plywood, not foam-core)
+  are available.** It currently defaults to `aruco` — the existing grid
+  board (`irb_target_image.png`) already printed and mounted — purely
+  because that's the only board on hand right now. A GridBoard's pose comes
+  from marker corners alone with no checkerboard-corner refinement, so it's
+  noisier and less occlusion-tolerant than ChArUco; once the ChArUco target
+  is printed (`generate_charuco_target.py`, printed at 100% and mounted
+  rigidly per its header comment) and mounted, re-run with `--board-type
+  charuco` and prefer that result.
+- **Design a combined/cam2-aware pose set.** `joints_5_6mm.yaml` was tuned
+  for cam1's FOV; cam2 is mounted steep/overhead and likely needs its own
+  pose subset (board presented closer to face-on to cam2's viewing angle,
+  arm held higher/closer) rather than reusing cam1's poses as-is.
+
 ## Gotcha: check the parent frame before trusting a new result
 
 `cam_tf_6mm.launch.py` (the current result, already wired into

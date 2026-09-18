@@ -18,6 +18,7 @@
 #include <abb_egm_rws_managers/egm_manager.h>
 #include <abb_egm_rws_managers/rws_manager.h>
 #include <abb_hardware_interface/visibility_control.h>
+#include <abb_hardware_interface/egm_command_guard.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -59,6 +60,9 @@ public:
   CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
 
   ROS2_CONTROL_DRIVER_PUBLIC
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
+
+  ROS2_CONTROL_DRIVER_PUBLIC
   return_type read(const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
   ROS2_CONTROL_DRIVER_PUBLIC
@@ -71,6 +75,7 @@ private:
 
   // Store the state and commands for the robot(s)
   abb::robot::MotionData motion_data_;
+  EGMCommandGuard command_guard_;
 };
 
 }  // namespace abb_hardware_interface

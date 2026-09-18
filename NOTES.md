@@ -6,6 +6,40 @@ cost time to discover and would cost time again.
 
 ---
 
+## 2026-09-18 — EGM startup command gate
+
+The 11:44 bringup logs showed EGM hardware activation about 0.96 s before the
+startup handler's automatic hold goal. The vendor EGM manager can reject an
+initial sequence-zero packet as a duplicate; the old hardware activation ignored
+the read result and copied default-zero state into joint commands. Subsequent
+valid feedback did not repair those command targets. Packet/target captures were
+not available to prove this was the exact trigger in that run.
+
+The local hardware driver now waits up to 100 s for successfully updated,
+complete, finite, in-limit six-joint feedback on its single EGM channel. It seeds
+position commands from that feedback, zeroes commanded velocity, and gates writes
+until initialized. Read/write errors, channel loss, a sequence regression, or a
+transition out of running EGM disable writes and return hardware ERROR. This is
+latched until explicit hardware activation; it does not automatically resume an
+old controller trajectory. Vendor packages are unchanged.
+
+**Compatibility consequence:** intentional `stop_egm` / `start_egm_joint` cycles
+(including motion scripts using `egm_client`) may now require restarting hardware
+and controllers. Do not assume their existing drain/sleep logic authorizes a safe
+reconnect. This change prioritizes refusing stale targets over seamless reconnect.
+
+The EGM handler no longer submits a startup hold trajectory. It aborts on failed
+startup service results and leaves readiness false; cleanup still attempts to
+stop EGM while leaving RAPID running. Its JTC check means action-server availability,
+not proof of controller activation. The hardware gate provides command protection.
+
+Validation is offline: command-gate tests cover skipped first packets, invalid
+feedback, measured-position initialization, channel loss and session resets;
+mocked handler tests cover service failures and absence of a startup trajectory.
+No powered-robot test or live EGM session was initiated during implementation.
+
+---
+
 ## 2026-09-04 — Multi-trial estimation (10 trials × 4 objects)
 
 Reviewers asked for more than a single trial per object. `estimate_params.py` now consumes

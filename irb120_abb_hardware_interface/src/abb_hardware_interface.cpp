@@ -20,7 +20,6 @@ using namespace std::chrono_literals;
 
 namespace abb_hardware_interface
 {
-static constexpr size_t NUM_CONNECTION_TRIES = 100;
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("ABBSystemHardware");
 
 CallbackReturn ABBSystemHardware::on_init(const hardware_interface::HardwareInfo& info)
@@ -339,54 +338,99 @@ std::vector<hardware_interface::CommandInterface> ABBSystemHardware::export_comm
 
 CallbackReturn ABBSystemHardware::on_activate(const rclcpp_lifecycle::State& /* previous_state */)
 {
-  size_t counter = 0;
-  RCLCPP_INFO(LOGGER, "Connecting to robot...");
-  while (rclcpp::ok() && counter++ < NUM_CONNECTION_TRIES)
+  command_guard_.reset();
+  RCLCPP_INFO(LOGGER, "Waiting for valid EGM joint feedback before enabling commands...");
+  const auto deadline = std::chrono::steady_clock::now() + 100s;
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline)
   {
-    // Wait for a message on any of the configured EGM channels.
-    if (egm_manager_->waitForMessage(500))
+    // A notification is not proof that read() populated the state. In particular,
+    // the vendor manager rejects the initial sequence-zero packet. Poll as well
+    // as waiting, since a notification can arrive before we begin waiting.
+    try
     {
-      RCLCPP_INFO(LOGGER, "Connected to robot");
-      break;
-    }
-
-    RCLCPP_INFO(LOGGER, "Not connected to robot...");
-    if (counter == NUM_CONNECTION_TRIES)
-    {
-      RCLCPP_ERROR(LOGGER, "Failed to connect to robot");
-      return CallbackReturn::ERROR;
-    }
-    rclcpp::sleep_for(500ms);
-  }
-
-  egm_manager_->read(motion_data_);
-  for (auto& group : motion_data_.groups)
-  {
-    for (auto& unit : group.units)
-    {
-      for (auto& joint : unit.joints)
+      const bool updated = egm_manager_->read(motion_data_);
+      if (command_guard_.initialize(motion_data_, updated, info_.joints.size()))
       {
-        joint.command.position = joint.state.position;
-        joint.command.velocity = 0.0;
+        RCLCPP_INFO(LOGGER, "EGM commands initialized from validated measured joint positions");
+        return CallbackReturn::SUCCESS;
       }
     }
+    catch (const std::exception& error)
+    {
+      RCLCPP_ERROR(LOGGER, "Invalid EGM activation feedback: %s", error.what());
+      return CallbackReturn::ERROR;
+    }
+    egm_manager_->waitForMessage(20);
   }
+  RCLCPP_ERROR(LOGGER, "No valid EGM feedback; hardware activation refused (commands disabled)");
+  return CallbackReturn::ERROR;
+}
 
-  RCLCPP_INFO(LOGGER, "ros2_control hardware interface was successfully started!");
-
+CallbackReturn ABBSystemHardware::on_deactivate(const rclcpp_lifecycle::State&)
+{
+  command_guard_.reset();
   return CallbackReturn::SUCCESS;
 }
 
-return_type ABBSystemHardware::read(const rclcpp::Time& time, const rclcpp::Duration& period)
+return_type ABBSystemHardware::read(const rclcpp::Time&, const rclcpp::Duration&)
 {
-  egm_manager_->read(motion_data_);
+  bool updated = false;
+  try
+  {
+    updated = egm_manager_->read(motion_data_);
+  }
+  catch (const std::exception& error)
+  {
+    // A genuine read exception means the EGM manager/socket itself is
+    // broken, not just an idle session -- this is fatal to the component.
+    RCLCPP_ERROR(LOGGER, "EGM read failed; commands disabled: %s", error.what());
+    command_guard_.reset();
+    return return_type::ERROR;
+  }
+
+  const bool was_initialized = command_guard_.initialized();
+  const bool ok = was_initialized && command_guard_.check(motion_data_, info_.joints.size());
+  if (was_initialized && !ok)
+  {
+    RCLCPP_ERROR(LOGGER,
+      "EGM feedback lost, invalid, or session restarted. Commands disabled; "
+      "resume EGM (enable_EGM_b4_moveit.sh) to re-enable. Joint states continue reporting.");
+  }
+  else if (!was_initialized && command_guard_.rearm(motion_data_, updated, info_.joints.size()))
+  {
+    RCLCPP_WARN(LOGGER, "EGM resumed; commands re-enabled once controller command matches measured position");
+  }
+
+  // An idle/lost EGM session blocks writes via the command guard (see write())
+  // but must never fail read() -- ros2_control deactivates every controller
+  // claiming this component's interfaces on a read() error, which would tear
+  // down joint_state_broadcaster along with EGM and break RSP/TF. Only a
+  // genuine read() exception, handled above, is fatal to the component.
   return return_type::OK;
 }
 
-return_type ABBSystemHardware::write(const rclcpp::Time& time, const rclcpp::Duration& period)
+return_type ABBSystemHardware::write(const rclcpp::Time&, const rclcpp::Duration&)
 {
-  egm_manager_->write(motion_data_);
-  return return_type::OK;
+  // Commands blocked: silently drop this cycle's write rather than returning
+  // ERROR. Returning ERROR here deactivates joint_state_broadcaster along
+  // with the trajectory controller, for the same reason read() must not
+  // error on a recoverable guard trip. Nothing is sent to the robot; write
+  // commands are re-seeded from measured position in on_activate() before
+  // the guard is ever initialized again, so no stale/queued target can leak
+  // through once commands resume.
+  if (!command_guard_.initialized()) return return_type::OK;
+  if (!command_guard_.commands_ok(motion_data_)) return return_type::OK;
+  try
+  {
+    egm_manager_->write(motion_data_);
+    return return_type::OK;
+  }
+  catch (const std::exception& error)
+  {
+    command_guard_.reset();
+    RCLCPP_ERROR(LOGGER, "EGM write failed; commands disabled: %s", error.what());
+    return return_type::ERROR;
+  }
 }
 
 }  // namespace abb_hardware_interface

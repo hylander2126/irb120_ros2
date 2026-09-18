@@ -55,7 +55,7 @@ def generate_launch_description() -> LaunchDescription:
     cam2_tf = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [get_package_share_directory("irb120_handeye"), "launch", "camera_2_tf.launch.py"]
+                [get_package_share_directory("irb120_handeye"), "launch", "cam_tf_realsense2_7mm.launch.py"]
             )
         )
     )

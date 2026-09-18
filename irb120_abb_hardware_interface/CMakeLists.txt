@@ -70,6 +70,10 @@ install(
 #############
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_egm_command_guard test/test_egm_command_guard.cpp)
+  target_include_directories(test_egm_command_guard PRIVATE include)
+  ament_target_dependencies(test_egm_command_guard abb_egm_rws_managers)
   find_package(ament_lint_auto REQUIRED)
   # Disable ament_copyright
   set(ament_cmake_copyright_FOUND TRUE)

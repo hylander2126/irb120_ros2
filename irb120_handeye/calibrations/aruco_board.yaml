@@ -1,0 +1,20 @@
+# Spec for the ArUco grid board already printed and mounted (irb_target_image.png).
+# TEMPORARY stopgap board type -- see "Future work" in the package README:
+# switch run_handeye_calibration.py back to --board-type charuco once a
+# printer and a rigid flat backing are available. A grid board's pose comes
+# from marker corners alone (no checkerboard-corner refinement), so it's
+# noisier and less occlusion-tolerant than the ChArUco board this pipeline
+# otherwise defaults to.
+#
+# Values below match the MoveIt HandEyeCalibration panel settings this same
+# physical board was originally printed for (see this package's README):
+# markers X=3/Y=4, measured marker size 0.034m, measured separation 0.0034m,
+# DICT_5X5_250. If your physical board differs (reprinted at another scale,
+# recut, etc.), remeasure with calipers and pass --marker-length-m /
+# --marker-separation-m to run_handeye_calibration rather than editing this
+# file, so the override is visible in the run's own log output.
+dictionary: DICT_5X5_250
+markers_x: 3
+markers_y: 4
+marker_length_m: 0.034
+marker_separation_m: 0.0034

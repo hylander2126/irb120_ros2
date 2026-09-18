@@ -34,6 +34,16 @@ joint_trajectory_controller:
     # If no new trajectory arrives within this window the JTC stops sending
     # position commands, so a stale goal cannot replay after EGM restarts.
     cmd_timeout: 0.1
+    # A goal only "succeeds" if every joint actually ends within `goal` of the
+    # target (measured state). Without this (tolerance 0 = unchecked) the JTC
+    # reports success whenever the trajectory time elapses, even if the
+    # hardware interface dropped every command (EGM down / guard tripped).
     constraints:
       stopped_velocity_tolerance: 0.0
-      goal_time: 0.0
+      goal_time: 0.0  # must stay below cmd_timeout (0.1)
+      joint_1: {goal: 0.05}
+      joint_2: {goal: 0.05}
+      joint_3: {goal: 0.05}
+      joint_4: {goal: 0.05}
+      joint_5: {goal: 0.05}
+      joint_6: {goal: 0.05}

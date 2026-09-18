@@ -4,19 +4,16 @@ import signal
 import time
 
 import rclpy
-from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from abb_rapid_sm_addin_msgs.srv import GetEGMSettings, SetEGMSettings
 from abb_robot_msgs.srv import TriggerWithResultCode
+from controller_manager_msgs.srv import ListControllers
 
-_JTC_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 
 class EGMHandler(Node):
@@ -35,6 +32,11 @@ class EGMHandler(Node):
         self.declare_parameter("ramp_out_time", 0.25)
         self.declare_parameter("pos_corr_gain", 1.0)
 
+        self.declare_parameter("controller_manager_service", "/controller_manager/list_controllers")
+        self.declare_parameter(
+            "required_active_controllers", ["joint_state_broadcaster", "joint_trajectory_controller"]
+        )
+
         self.rws_prefix = self.get_parameter("rws_service_prefix").value.rstrip("/")
         self.task = self.get_parameter("task").value
         self.startup_service_timeout_sec = float(self.get_parameter("startup_service_timeout_sec").value)
@@ -46,6 +48,8 @@ class EGMHandler(Node):
         self.egm_start_srv = f"{self.rws_prefix}/start_egm_joint"
         self.get_settings_srv = f"{self.rws_prefix}/get_egm_settings"
         self.set_settings_srv = f"{self.rws_prefix}/set_egm_settings"
+        self.list_controllers_srv = self.get_parameter("controller_manager_service").value
+        self.required_active_controllers = list(self.get_parameter("required_active_controllers").value)
 
         self._ready_pub = self.create_publisher(Bool, "~/ready", 1)
         self._jtc_client = ActionClient(
@@ -136,7 +140,10 @@ class EGMHandler(Node):
         if not self._spin_future(get_future, 5.0) or get_future.result() is None:
             return None, "get_egm_settings call failed"
 
-        settings = get_future.result().settings
+        response = get_future.result()
+        if response.result_code != 1:
+            return response.result_code, response.message
+        settings = response.settings
         settings.activate.max_speed_deviation = math.degrees(float(self.get_parameter("max_speed_dev_rad").value))
         settings.setup_uc.comm_timeout = float(self.get_parameter("comm_timeout").value)
         settings.run.cond_time = float(self.get_parameter("cond_time").value)
@@ -163,7 +170,7 @@ class EGMHandler(Node):
             return
         self._shutdown_done = True
 
-        print("[egm_handler] Shutdown requested. Stopping EGM and RAPID.", flush=True)
+        print("[egm_handler] Shutdown requested. Stopping EGM; leaving RAPID running.", flush=True)
 
         if not rclpy.ok():
             print("[egm_handler] rclpy context already shut down — cannot send stop commands.", flush=True)
@@ -186,88 +193,52 @@ class EGMHandler(Node):
             self._executor = None
             shutdown_executor.shutdown()
 
-    def _drain_jtc_commands(self, drain_sec: float = 0.35) -> None:
-        """Wait for the JTC command stream to go silent before activating EGM.
+    def _controllers_active(self, timeout_sec: float = 2.0) -> bool:
+        """True only if every required controller reports state "active".
 
-        cmd_timeout in irb120_controllers.yaml is 0.1 s — this must exceed it
-        so the hardware interface wakes up with no commands in-flight.
+        list_controllers is the source of truth for controller/hardware state.
+        The JTC action server alone is not: it is created in on_configure() and
+        stays alive across activate/deactivate, so it can be reachable while
+        the controller (or the hardware it depends on) is not actually active
+        -- e.g. right after an EGM drop, before hardware/controllers restart.
         """
-        self.get_logger().info(f"Draining JTC command stream ({drain_sec:.2f}s)...")
-        time.sleep(drain_sec)
+        client = self.create_client(ListControllers, self.list_controllers_srv)
+        if not self._wait_for_service(client, self.list_controllers_srv, timeout_sec):
+            return False
+        future = client.call_async(ListControllers.Request())
+        if not self._spin_future(future, timeout_sec) or future.result() is None:
+            return False
+        states = {c.name: c.state for c in future.result().controller}
+        missing = [name for name in self.required_active_controllers if states.get(name) != "active"]
+        if missing:
+            self.get_logger().warn(f"Controllers not active yet: {missing} (seen: {states})")
+            return False
+        return True
 
-    def _wait_for_jtc(self, timeout_sec: float = 30.0) -> bool:
-        """Block until the JTC action server is live.
+    def _wait_for_control_ready(self, timeout_sec: float = 30.0) -> bool:
+        """Block until the trajectory controller can actually accept motion.
 
-        The JTC spawner races against egm_handler.  We must wait for the JTC
-        to finish activating before we send any hold trajectory.
+        Checks both the action server and controller_manager state: the
+        action server alone can lie (see _controllers_active), and right
+        after a fresh spawn the reverse can happen -- state reports active
+        slightly before the action server is reachable.
         """
-        self.get_logger().info(f"Waiting for JTC action server (up to {timeout_sec:.0f}s)...")
+        self.get_logger().info(f"Waiting for control stack to be ready (up to {timeout_sec:.0f}s)...")
         end = time.monotonic() + timeout_sec
         while time.monotonic() < end:
-            if self._jtc_client.wait_for_server(timeout_sec=1.0):
-                self.get_logger().info("JTC action server is ready")
-                return True
             if not rclpy.ok():
                 return False
-        self.get_logger().error("JTC action server never became available")
+            if self._jtc_client.wait_for_server(timeout_sec=1.0) and self._controllers_active(timeout_sec=1.0):
+                self.get_logger().info("Trajectory controller and hardware are active")
+                return True
+        self.get_logger().error("Trajectory controller/hardware never became active")
         return False
 
-    def _send_hold_trajectory(self, timeout_sec: float = 5.0) -> None:
-        """Send a zero-displacement trajectory to seed the JTC from actual state.
-
-        On first activation the JTC may not have a commanded position yet.
-        Sending a hold-in-place goal forces it to read actual joint positions
-        from hardware state and lock onto them, preventing any phantom move.
-        """
-        # Grab one JointState message to read actual positions
-        js: JointState | None = None
-        deadline = time.monotonic() + timeout_sec
-
-        def _js_cb(msg: JointState) -> None:
-            nonlocal js
-            js = msg
-
-        sub = self.create_subscription(JointState, "/joint_states", _js_cb, 1)
-        while js is None and time.monotonic() < deadline:
-            if self._executor is not None:
-                self._executor.spin_once(timeout_sec=0.05)
-            else:
-                rclpy.spin_once(self, timeout_sec=0.05)
-        self.destroy_subscription(sub)
-
-        if js is None:
-            self.get_logger().warn("Could not read /joint_states — skipping hold trajectory")
-            return
-
-        # Build a position map from the JointState message
-        pos_map = dict(zip(js.name, js.position))
-        positions = [pos_map.get(j, 0.0) for j in _JTC_JOINTS]
-
-        traj = JointTrajectory()
-        traj.joint_names = _JTC_JOINTS
-        pt = JointTrajectoryPoint()
-        pt.positions = positions
-        pt.velocities = [0.0] * len(_JTC_JOINTS)
-        pt.accelerations = [0.0] * len(_JTC_JOINTS)
-        # 0.5 s gives the JTC time to accept the goal and latch the command
-        pt.time_from_start = Duration(sec=0, nanosec=500_000_000)
-        traj.points = [pt]
-
-        goal = FollowJointTrajectory.Goal()
-        goal.trajectory = traj
-
-        self.get_logger().info("Sending hold-in-place trajectory to seed JTC command state...")
-        send_future = self._jtc_client.send_goal_async(goal)
-        self._spin_future(send_future, timeout_sec)
-        if send_future.done() and send_future.result() is not None:
-            self.get_logger().info("Hold trajectory accepted — JTC command state seeded from hardware")
-        else:
-            self.get_logger().warn("Hold trajectory send failed — proceeding anyway")
-
     def startup_sequence(self):
+        self._ready_pub.publish(Bool(data=False))
         if not self._wait_for_startup_services():
             self.get_logger().error("Required startup services unavailable. Skipping EGM startup sequence.")
-            return
+            return False
 
         # The StateMachine RAPID program starts automatically when the IRC5
         # boots and sits idle — we must never stop/restart it. Doing so while
@@ -276,29 +247,35 @@ class EGMHandler(Node):
         # fresh one on the already-running StateMachine.
         code, msg = self._call_trigger(self.egm_stop_srv, sleep_after=2.0)
         self.get_logger().info(f"stop_egm (cleanup) -> code={code}, msg='{msg}'")
+        if code != 1:
+            self.get_logger().error("EGM startup failed; readiness remains false")
+            return False
 
         code, msg = self._set_egm_settings()
         self.get_logger().info(f"set_egm_settings -> code={code}, msg='{msg}'")
+        if code != 1:
+            self.get_logger().error("EGM startup failed; readiness remains false")
+            return False
 
         # Start EGM — the hardware interface connects to the robot here.
         # The JTC spawner (in abb_control launch) cannot activate until EGM
         # is live, so this ordering is correct: EGM first, then JTC activates.
         code, msg = self._call_trigger(self.egm_start_srv, sleep_after=1.0)
         self.get_logger().info(f"start_egm_joint -> code={code}, msg='{msg}'")
+        if code != 1:
+            self.get_logger().error("EGM startup failed; readiness remains false")
+            return False
 
-        # Wait for the JTC to finish activating on the now-live hardware interface,
-        # then immediately send a hold-in-place trajectory.  This seeds the JTC's
-        # internal command state from actual joint positions before any motion
-        # script runs, preventing a phantom move to an uninitialized target.
-        if self._wait_for_jtc(timeout_sec=self.startup_service_timeout_sec):
-            self._send_hold_trajectory()
-        else:
-            self.get_logger().error(
-                "JTC never became ready after EGM start — robot may move unexpectedly on first command"
-            )
+        # Hardware activation now seeds position commands from validated feedback.
+        # Do not submit a startup trajectory: a delayed "hold" can capture a
+        # position only after an unsafe initialization has already caused motion.
+        if not self._wait_for_control_ready(timeout_sec=self.startup_service_timeout_sec):
+            self.get_logger().error("Trajectory controller/hardware unavailable; EGM startup failed")
+            return False
 
         self._ready_pub.publish(Bool(data=True))
-        self.get_logger().info("EGM handler startup completed. Waiting for Ctrl+C to shutdown cleanly.")
+        self.get_logger().info("EGM handler startup completed without a motion goal. Waiting for Ctrl+C.")
+        return True
 
 
 def main(args=None):
@@ -313,7 +290,7 @@ def main(args=None):
     # default handler. rclpy's handler calls rclpy.shutdown() immediately,
     # which would kill the context before shutdown_sequence() can send stop
     # commands. Our handler instead just sets a flag and lets main() drive
-    # the shutdown in the correct order: stop_egm → stop_rapid → destroy → shutdown.
+    # the shutdown in the correct order: stop_egm → destroy → shutdown.
     shutdown_requested = [False]
 
     def _sigint_handler(*_):
@@ -323,7 +300,8 @@ def main(args=None):
     signal.signal(signal.SIGTERM, _sigint_handler)
 
     try:
-        node.startup_sequence()
+        if not node.startup_sequence():
+            raise RuntimeError("EGM startup failed; stopping EGM without publishing ready")
         while rclpy.ok() and not shutdown_requested[0]:
             executor.spin_once(timeout_sec=0.1)
     finally:

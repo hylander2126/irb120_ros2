@@ -25,6 +25,8 @@
   <depend>realsense2_camera</depend>
   <depend>tf2_ros</depend>
   <depend>rviz2</depend>
+  <depend>cv_bridge</depend>
+  <depend>geometry_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

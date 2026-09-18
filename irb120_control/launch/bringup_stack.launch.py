@@ -293,7 +293,7 @@ def generate_launch_description():
         netft_preprocessor_node,
         camera_hull_recorder_node,
         camera_hull_recorder2_node,
-        viz_netft_delayed,
+        # viz_netft_delayed,
         servo_node,
         servo_set_twist_mode,
     ])

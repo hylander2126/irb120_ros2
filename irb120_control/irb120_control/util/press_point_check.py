@@ -50,7 +50,8 @@ from std_msgs.msg import ColorRGBA
 from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker
 
-from irb120_perception.press_point_selector import select_press_point, unpack_labeled_pointcloud2
+from sensor_msgs_py import point_cloud2
+from irb120_perception.contact_point_selector import select_contact_points
 from irb120_control.util.runtime_log_dir import runtime_log_dir
 
 DEFAULT_TOPIC   = '/object_detector/object_points'
@@ -106,7 +107,9 @@ def _to_frame(node, point: np.ndarray, src_frame: str, dst_frame: str):
     A no-op when the frames already match, so this stays correct if the perception
     stack is ever reconfigured to publish directly in the controller's frame.
     """
-    if not src_frame or src_frame == dst_frame:
+    if not src_frame:
+        return None, 'missing source frame'
+    if src_frame == dst_frame:
         return point, 'no transform needed'
     buf = getattr(node, '_tf_buffer', None)
     if buf is None:
@@ -123,7 +126,7 @@ def _to_frame(node, point: np.ndarray, src_frame: str, dst_frame: str):
         [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
     ])
-    return R @ np.asarray(point, dtype=np.float64) + np.array([t.x, t.y, t.z]), 'ok'
+    return np.asarray(point, dtype=np.float64) @ R.T + np.array([t.x, t.y, t.z]), 'ok'
 
 
 def _publish_press_point_marker(node, computed: np.ndarray, frame_id: str) -> None:
@@ -176,7 +179,7 @@ def check_press_point(node,
 
     node: any rclpy Node — a temporary subscription is added to it and left
           in place afterward (harmless; it just keeps caching the latest
-          cloud, same pattern as press_point_selector.PressPointSelector).
+          cloud).
     hardcoded_pos: (x, y, z) — the calibrated pre_squash position to compare
                    against. This function does NOT return a pose to move to;
                    the caller keeps using this same value for the real motion.
@@ -186,6 +189,9 @@ def check_press_point(node,
     as a failed check (returns False) — same as an excessive deviation.
     """
     hardcoded = np.asarray(hardcoded_pos, dtype=np.float64)
+    node._press_point_check_result = {
+        'selector': 'contact_point_selector', 'ok': False, 'label': label,
+    }
 
     _set_perception_active(node, True)
     try:
@@ -203,30 +209,56 @@ def check_press_point(node,
                     f'no cloud received on {object_points_topic} within {timeout_sec:.1f}s')
             return False
 
-        xyz, labels = unpack_labeled_pointcloud2(latest['msg'])
+        try:
+            data = point_cloud2.read_points(
+                latest['msg'], field_names=('x', 'y', 'z', 'label'), skip_nans=True).reshape(-1)
+            xyz = np.column_stack([data[field] for field in ('x', 'y', 'z')])
+            labels = data['label']
+            finite = np.isfinite(xyz).all(axis=1)
+            xyz, labels = xyz[finite], labels[finite]
+        except (ValueError, AssertionError, KeyError) as exc:
+            _report(node, label, False, None, hardcoded, None, f'invalid object cloud: {exc}')
+            return False
         if len(xyz) == 0:
             _report(node, label, False, None, hardcoded, None, 'no objects currently detected')
             return False
 
         present = np.unique(labels)
-        obj_id = max(present, key=lambda lbl: xyz[labels == lbl, 2].mean())  # prominent object, same convention as press_point_selector
+        obj_id = max(present, key=lambda lbl: xyz[labels == lbl, 2].mean())  # preserve prominent-object policy
         pts = xyz[labels == obj_id].astype(np.float64)
 
-        point = select_press_point(pts)
-        computed_src = np.array([point[0], point[1], point[2] + standoff], dtype=np.float64)
         src_frame = latest['msg'].header.frame_id
-        _publish_press_point_marker(node, computed_src, src_frame)
-
-        # The perception stack publishes in `base_link`, but `hardcoded_pos` is a
-        # world-frame pre-squash position (arc_static uses BASE_FRAME="world", and
-        # MoveIt plans against DEFAULT_BASE_FRAME="world"). world->base_link is a
-        # 21 mm z offset (the bracket the robot sits on), so comparing the two raw
-        # silently understated the z deviation by exactly that much.
-        computed, conv_note = _to_frame(node, computed_src, src_frame, COMPARE_FRAME)
-        if computed is None:
+        # Selection needs Z-up geometry and the table height, not just a final
+        # point transform. The calibrated table is z=0 in world.
+        pts_world, conv_note = _to_frame(node, pts, src_frame, COMPARE_FRAME)
+        if pts_world is None:
             _report(node, label, False, None, hardcoded, None,
-                    f'cannot transform press point {src_frame}->{COMPARE_FRAME}: {conv_note}')
+                    f'cannot transform object cloud {src_frame}->{COMPARE_FRAME}: {conv_note}')
             return False
+        try:
+            press = select_contact_points(pts_world, table_z=0.0)['press']
+        except ValueError as exc:
+            _report(node, label, False, None, hardcoded, None, f'contact selector failed: {exc}')
+            return False
+        node._press_point_check_result = {
+            'selector': 'contact_point_selector', 'ok': False,
+            'reason': press.get('reason', ''),
+            'candidate_counts': press.get('candidate_counts', {}),
+        }
+        if not press['available']:
+            _report(node, label, False, None, hardcoded, None,
+                    f"press unavailable: {press['reason']}; counts={press.get('candidate_counts', {})}")
+            return False
+
+        # Preserve the calibration-check convention: surface contact + vertical
+        # standoff, NOT ball_center + standoff (which would add a new radius offset).
+        computed = press['point'] + np.array([0., 0., standoff])
+        computed_src, conv_note = _to_frame(node, computed, COMPARE_FRAME, src_frame)
+        if computed_src is None:
+            _report(node, label, False, None, hardcoded, None,
+                    f'cannot transform pre-press point to {src_frame}: {conv_note}')
+            return False
+        _publish_press_point_marker(node, computed_src, src_frame)
 
         dist = float(np.linalg.norm(computed - hardcoded))
         ok = dist <= tolerance
@@ -235,6 +267,9 @@ def check_press_point(node,
         # Stashed on the node (not just the CSV) so callers can fold it into their
         # own per-trial metadata sidecar — see save_run_metadata() in arc_static.py.
         node._press_point_check_result = {
+            'selector': 'contact_point_selector',
+            'candidate_counts': press.get('candidate_counts', {}),
+            'contact_xyz': press['point'].tolist(),
             'label': label,
             'frame_id': COMPARE_FRAME,          # frame the comparison was actually done in
             'source_frame_id': src_frame,       # frame perception published in
@@ -252,6 +287,7 @@ def check_press_point(node,
 
 
 def _report(node, label, ok: bool, computed, hardcoded, dist, note: str) -> None:
+    node._press_point_check_result.update(ok=bool(ok), reason=note)
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     computed_s  = f'({computed[0]:.4f}, {computed[1]:.4f}, {computed[2]:.4f})' if computed is not None else '(n/a)'
     hardcoded_s = f'({hardcoded[0]:.4f}, {hardcoded[1]:.4f}, {hardcoded[2]:.4f})'
