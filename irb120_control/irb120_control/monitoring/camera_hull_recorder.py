@@ -14,6 +14,7 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import TransformStamped, WrenchStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -105,7 +106,7 @@ class CameraHullRecorder(Node):
         self.declare_parameter("image_topic", "/realsense/color/image_raw")
         self.declare_parameter("camera_info_topic", "/realsense/color/camera_info")
         self.declare_parameter("marker_topic", "/object_detector/markers")
-        self.declare_parameter("press_point_marker_topic", "/press_point_marker")
+        self.declare_parameter("contact_marker_topic", "/contact_point_selector/markers")
         self.declare_parameter("annotated_image_topic", "~/annotated_image")
         self.declare_parameter("recording_service", "~/set_recording")
         self.declare_parameter("output_dir", "")
@@ -122,7 +123,7 @@ class CameraHullRecorder(Node):
         self.declare_parameter("show_hull", False)
         self.declare_parameter("show_rpy_hud", False)
         self.declare_parameter("show_ft_hud", True)
-        self.declare_parameter("show_press_point", False)
+        self.declare_parameter("show_contact_points", True)
         # "h264" = good quality, small files (default) — encoded via a direct
         #   ffmpeg/libx264 pipe (see _FfmpegH264Writer) at h264_crf below, not
         #   cv2.VideoWriter's own h264 backend, which doesn't expose real
@@ -139,7 +140,7 @@ class CameraHullRecorder(Node):
         self._image_topic = str(self.get_parameter("image_topic").value)
         self._camera_info_topic = str(self.get_parameter("camera_info_topic").value)
         self._marker_topic = str(self.get_parameter("marker_topic").value)
-        self._press_point_marker_topic = str(self.get_parameter("press_point_marker_topic").value)
+        self._contact_marker_topic = str(self.get_parameter("contact_marker_topic").value)
         self._annotated_image_topic = str(self.get_parameter("annotated_image_topic").value)
         self._recording_service_name = str(self.get_parameter("recording_service").value)
         self._filename_prefix = str(self.get_parameter("filename_prefix").value)
@@ -159,7 +160,7 @@ class CameraHullRecorder(Node):
         # at point of use instead of snapshotted at startup.
         self._show_rpy_hud = bool(self.get_parameter("show_rpy_hud").value)
         self._show_ft_hud = bool(self.get_parameter("show_ft_hud").value)
-        self._show_press_point = bool(self.get_parameter("show_press_point").value)
+        self._show_contact_points = bool(self.get_parameter("show_contact_points").value)
 
         self._ft_fx: float = 0.0
         self._ft_fy: float = 0.0
@@ -183,8 +184,9 @@ class CameraHullRecorder(Node):
         self._camera_info_ready = False
 
         self._latest_markers: list[Marker] = []
-        # Cleared in lockstep with the hull — see _on_press_point.
-        self._press_point: Marker | None = None
+        self._contact_markers: list[Marker] = []
+        self._contact_geometry_markers: list[Marker] = []
+        self._contact_markers_received = False
         self._writer: cv2.VideoWriter | _FfmpegH264Writer | None = None
         self._recording_active = False
         self._pending_recording_start = self._auto_start
@@ -193,8 +195,10 @@ class CameraHullRecorder(Node):
         self._image_sub = self.create_subscription(Image, self._image_topic, self._on_image, 10)
         self._camera_info_sub = self.create_subscription(CameraInfo, self._camera_info_topic, self._on_camera_info, 10)
         self._marker_sub = self.create_subscription(MarkerArray, self._marker_topic, self._on_markers, 10)
-        self._press_point_sub = self.create_subscription(
-            Marker, self._press_point_marker_topic, self._on_press_point, 10)
+        self._contact_marker_sub = self.create_subscription(
+            MarkerArray, self._contact_marker_topic, self._on_contact_markers,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._ft_sub = self.create_subscription(WrenchStamped, self.get_parameter("ft_topic").value, self._on_wrench, 10)
         self._det_sub = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._annotated_pub = self.create_publisher(Image, self._annotated_image_topic, 10)
@@ -203,6 +207,7 @@ class CameraHullRecorder(Node):
         self.get_logger().info(
             "Camera hull recorder ready: "
             f"image={self._image_topic}, camera_info={self._camera_info_topic}, markers={self._marker_topic}, "
+            f"contacts={self._contact_marker_topic}, "
             f"service={self._recording_service_name}"
         )
 
@@ -230,15 +235,33 @@ class CameraHullRecorder(Node):
         self._obj_yaw_deg   = math.degrees(math.atan2(siny, cosy))
         self._obj_pose_received = True
 
-    def _on_press_point(self, msg: Marker) -> None:
-        # Clears in lockstep with the hull (both go idle from the same
-        # check_press_point() finally block) rather than persisting — with the
-        # robot up against/over the object afterward, a frozen press-point
-        # marker floating over the scene would just look wrong.
-        if msg.action in (Marker.DELETE, Marker.DELETEALL):
-            self._press_point = None
-        else:
-            self._press_point = msg
+    def _on_contact_markers(self, msg: MarkerArray) -> None:
+        """Keep the selector contacts and pivot geometry for RGB projection.
+
+        The selector also publishes arrows, labels, and pivot axes for RViz;
+        drawing those all into a small RGB frame is cluttered.  Its selected
+        contacts are consistently the sphere at id 0 in each known namespace.
+        The signed axis is id 3 and an observed support edge, when available,
+        is the line-list at id 5.
+        """
+        contact_modes = {'planar_push', 'forward_tip', 'press'}
+        self._contact_markers = [
+            marker for marker in msg.markers
+            if marker.action == Marker.ADD and marker.ns in contact_modes
+            and marker.id == 0 and marker.type == Marker.SPHERE
+        ]
+        self._contact_geometry_markers = [
+            marker for marker in msg.markers
+            if marker.action == Marker.ADD and marker.ns in contact_modes
+            and ((marker.id == 3 and marker.type == Marker.ARROW)
+                 or (marker.id == 5 and marker.type == Marker.LINE_LIST))
+        ]
+        if not self._contact_markers_received:
+            self.get_logger().info(
+                f'Received {len(self._contact_markers)} selector contact marker(s) and '
+                f'{len(self._contact_geometry_markers)} axis/edge marker(s) '
+                f'from {self._contact_marker_topic}')
+            self._contact_markers_received = True
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:
@@ -301,15 +324,22 @@ class CameraHullRecorder(Node):
         annotated = frame.copy()
         if bool(self.get_parameter("show_hull").value):
             self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
-        if self._show_press_point and self._press_point is not None:
-            self._draw_press_point(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
+        if self._show_contact_points:
+            self._draw_contact_geometry(annotated, msg.header.frame_id, msg.header.stamp,
+                                        frame.shape[1], frame.shape[0])
+            self._draw_contact_points(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
         if self._show_ft_hud and self._ft_received:
             self._draw_ft_hud(annotated)
         if self._show_rpy_hud and self._obj_pose_received:
             self._draw_obj_rpy_hud(annotated)
 
         try:
-            self._annotated_pub.publish(self._bridge.cv2_to_imgmsg(annotated, encoding="bgr8"))
+            annotated_msg = self._bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
+            # Preserve the RGB camera frame and timestamp.  Besides making the
+            # overlay traceable to its source frame, RViz's Image display
+            # rejects messages with an empty frame_id.
+            annotated_msg.header = msg.header
+            self._annotated_pub.publish(annotated_msg)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"Failed to publish annotated image: {exc}")
 
@@ -464,32 +494,53 @@ class CameraHullRecorder(Node):
                 if anchor is not None:
                     cv2.putText(img, label, anchor, cv2.FONT_HERSHEY_SIMPLEX, 0.45, self._line_color, 1, cv2.LINE_AA)
 
-    def _draw_press_point(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
-        """Burn a persistent crosshair at the computed press point (see
-        press_point_check.py) — deliberately drawn as vector shapes rather than
-        reusing the generic hull-wireframe path, so it stays a crisp, distinct
-        landmark in the video regardless of which object hull is or isn't
-        currently visible."""
-        marker = self._press_point
-        tf = self._lookup_transform(marker.header.frame_id, image_frame, stamp)
-        if tf is None:
-            return
-        p_local = np.array(
-            [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z], dtype=np.float64)
-        p_cam = self._transform_point(p_local, tf)
-        pixel = self._project_point(p_cam, width, height)
-        if pixel is None:
-            return
+    def _draw_contact_points(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
+        """Project the current selector contacts into the RGB frame."""
+        styles = {
+            'planar_push': ((51, 230, 26), 'planar push'),
+            'forward_tip': ((13, 140, 255), 'forward tip'),
+            'press': ((217, 26, 255), 'press'),
+        }
+        for marker in self._contact_markers:
+            tf = self._lookup_transform(marker.header.frame_id, image_frame, stamp)
+            if tf is None:
+                continue
+            point = np.array(
+                [marker.pose.position.x, marker.pose.position.y, marker.pose.position.z], dtype=np.float64)
+            pixel = self._project_point(self._transform_point(point, tf), width, height)
+            if pixel is None:
+                continue
+            color, label = styles[marker.ns]
+            x, y = pixel
+            radius, gap = 9, 5
+            cv2.circle(img, (x, y), radius, color, 2, cv2.LINE_AA)
+            cv2.line(img, (x - radius - gap, y), (x + radius + gap, y), color, 1, cv2.LINE_AA)
+            cv2.line(img, (x, y - radius - gap), (x, y + radius + gap), color, 1, cv2.LINE_AA)
+            cv2.putText(img, label, (x + radius + gap + 3, y + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
-        color = (255, 0, 255)  # BGR magenta — matches press_point_check.py's marker color
-        x, y = pixel
-        radius = 10
-        gap = 6
-        cv2.circle(img, (x, y), radius, color, 2, cv2.LINE_AA)
-        cv2.line(img, (x - radius - gap, y), (x + radius + gap, y), color, 1, cv2.LINE_AA)
-        cv2.line(img, (x, y - radius - gap), (x, y + radius + gap), color, 1, cv2.LINE_AA)
-        cv2.putText(img, "press point", (x + radius + gap + 4, y + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+    def _draw_contact_geometry(self, img: np.ndarray, image_frame: str, stamp, width: int, height: int) -> None:
+        """Draw selector axes and the hull edge that supplied each pivot."""
+        colors = {
+            'planar_push': (51, 230, 26),
+            'forward_tip': (13, 140, 255),
+            'press': (217, 26, 255),
+        }
+        for marker in self._contact_geometry_markers:
+            tf = self._lookup_transform(marker.header.frame_id, image_frame, stamp)
+            if tf is None or len(marker.points) < 2:
+                continue
+            start = self._marker_point_to_pixel(marker, marker.points[0], tf, width, height)
+            end = self._marker_point_to_pixel(marker, marker.points[1], tf, width, height)
+            if start is None or end is None:
+                continue
+            color = colors[marker.ns]
+            if marker.id == 3:
+                cv2.arrowedLine(img, start, end, color, 2, cv2.LINE_AA, tipLength=0.18)
+                cv2.putText(img, f'{marker.ns.replace("_", " ")} axis', end,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+            else:
+                cv2.line(img, start, end, color, 3, cv2.LINE_AA)
 
     def _draw_marker_wireframe(
         self,

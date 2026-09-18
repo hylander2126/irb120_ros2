@@ -237,11 +237,52 @@ def select_contact_points(clouds, *, normals=None,
             failed = next(stage for stage, count in counts.items() if count == 0)
             result[mode] = missing(f'No candidates after {failed} filter')
         else:
+            # The PDF score describes the subsequent horizontal pull.  A press-
+            # and-pull interaction also applies a downward force while making
+            # contact.  Among contacts whose pull moment is effectively tied,
+            # prefer the one whose downward press produces the least opposing
+            # moment about the desired axis.  This moves a flat-top-box contact
+            # toward the relevant support edge instead of letting height noise
+            # choose an interior point.  Do not trade a materially smaller pull
+            # moment for this preference: score_tolerance defines that tradeoff.
+            if mode == 'press':
+                press_scores = np.cross(
+                    points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
+                # Keep a small edgeward band rather than one noise-determined
+                # extremal sample.  For a horizontal pivot geometry the score
+                # is a distance in metres per unit force, so score_tolerance is
+                # also an intuitive spatial band.
+                ids = ids[press_scores >= press_scores.max() - score_tolerance]
+                counts['least_anti_tipping_press'] = len(ids)
+                if geometry['edge'] is not None:
+                    edge_midpoint = geometry['edge'].mean(axis=0)
+                    along_edge = (points[ids] - edge_midpoint) @ geometry['axis']
+                    # The desired-axis moments do not distinguish locations
+                    # along a straight pivot edge. Center there, in the edge's
+                    # own coordinate system, rather than in a world axis.
+                    ids = ids[np.abs(along_edge) <= np.abs(along_edge).min() + 1e-10]
+                    counts['centered_on_edge'] = len(ids)
+                    # If several points are equally centered, keep the most
+                    # edgeward one; the median below then only resolves truly
+                    # equivalent samples instead of drifting inward.
+                    centered_press_scores = np.cross(
+                        points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
+                    ids = ids[centered_press_scores >= centered_press_scores.max() - 1e-10]
+                    counts['centered_edgeward'] = len(ids)
             target = np.median(points[ids], axis=0)
             if mode == 'forward_tip':
                 target[1] = 0.0
             i = ids[np.argmin(np.linalg.norm(points[ids] - target, axis=1))]
             result[mode] = contact(i, scores[i])
+            if mode == 'press':
+                result[mode]['press_score'] = float(
+                    geometry['axis'] @ np.cross(
+                        points[i] - geometry['pivot'], [0., 0., -1.]))
+                if geometry['edge'] is not None:
+                    edge_midpoint = geometry['edge'].mean(axis=0)
+                    result[mode]['edge_midpoint'] = edge_midpoint
+                    result[mode]['along_edge_offset'] = float(
+                        (points[i] - edge_midpoint) @ geometry['axis'])
             if topmost:
                 result[mode]['normal'] = np.array([0., 0., 1.])
                 result[mode]['ball_center'] = points[i] + finger_radius * result[mode]['normal']
@@ -337,6 +378,13 @@ def build_contact_markers(result, frame, stamp):
             axis_label.text = mode.replace('_', ' ') + ' axis'
             if not selected['available']:
                 axis_label.text += ' (no contact)'
+            if geometry['edge'] is not None:
+                # The support edge itself is distinct from the signed rotation
+                # axis arrow.  Publish it so camera overlays can show exactly
+                # which observed hull feature supplied the pivot hypothesis.
+                support_edge = marker(5, Marker.LINE_LIST)
+                support_edge.points = [point(geometry['edge'][0]), point(geometry['edge'][1])]
+                support_edge.scale.x = 0.004
         if not selected['available']:
             continue
 

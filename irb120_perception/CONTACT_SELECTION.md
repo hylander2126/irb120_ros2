@@ -50,7 +50,12 @@ ros2 run irb120_perception contact_point_selector                    # one messa
 ros2 run irb120_perception contact_point_selector cloud1.npy cloud2.npy   # or Nx3 .npy files already in base_link
 ```
 
-Markers are always published (snapshot, until Ctrl-C):
+Markers are always published (snapshot, until Ctrl-C). When the normal stack
+bringup is running, their selected spheres are also projected onto both RGB
+streams at `/contact_point_selector/camera1_overlay` and
+`/contact_point_selector/camera2_overlay`; add either `sensor_msgs/Image`
+topic in RViz to inspect the contacts, signed axes, and observed hull support
+edges in camera space. The edge is an estimate, not ground truth.
 
 In RViz, use **Add → By topic → /contact_point_selector/markers → MarkerArray**.
 Use `base_link` as the Fixed Frame, or `world` with the stack's TF available.
@@ -97,12 +102,20 @@ Section IV-C is not implemented: the script reports candidates for all modes.
   additionally excludes tangential/top contacts that cannot provide a side push.
 - **Press:** use the same score for the estimated pull geometry, normal tolerance
   0.1, and upward-facing surfaces. Inset the feasible top region's XY convex hull
-  by 5 mm, then retain points within 3 mm of the best remaining moment arm and
-  pick the observed point nearest their median. The inset is a simple heuristic
-  for contact-patch room.
+  by `press_inset`, then retain points within 3 mm of the best remaining **pull**
+  moment arm. Among that band, evaluate the downward contact-establishing press
+  as `axis · ((point - pivot) × [0, 0, -1])` and retain the least anti-tipping
+  band. For an extended support edge, retain the candidate closest to that
+  edge's midpoint **along the edge direction**; this centers the press without
+  assuming a world-frame Y coordinate. This makes nominally flat tops prefer
+  the centered pivot-side edge rather than a slightly taller noisy interior or
+  corner point, without sacrificing pull moment beyond the 3 mm tolerance. The
+  inset is a simple heuristic for contact-patch room.
 
 Every mode returns `available`, `point`, `normal`, `ball_center`, and `score` when
-successful. Tip and press also return `geometry` with `pivot`, `axis`, `direction`,
+successful. For press, `score` is the pull moment and `press_score` is the signed
+moment from a unit downward press; an extended-edge press also reports its
+`edge_midpoint` and signed `along_edge_offset`. Tip and press also return `geometry` with `pivot`, `axis`, `direction`,
 `kind` and edge endpoints (or null for isolated pivots). Scores have metre units
 per unit applied force; the planar score is negative height above the table.
 Failures return `available: false` and a reason rather than inventing a contact.
@@ -142,8 +155,7 @@ arc_static.py / arc_static_batch.py
 ```
 
 The check preserves perception activation, prominent-object selection, the 5 cm
-vertical standoff, 5 cm 3D comparison tolerance, CSV/run metadata, and the
-`/press_point_marker` recorder topic. It transforms the whole cloud into `world`
+vertical standoff, 5 cm 3D comparison tolerance, and CSV/run metadata. It transforms the whole cloud into `world`
 before selection with table z=0. The comparison uses surface contact plus vertical
 standoff, not ball center plus standoff. The calibrated controller motion target
 is unchanged. An unavailable press selection fails the check with its reason and

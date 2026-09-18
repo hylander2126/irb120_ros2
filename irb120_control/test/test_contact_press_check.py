@@ -18,8 +18,7 @@ def test_new_selector_drives_check(monkeypatch, available):
              'reason': 'No candidates after inset filter', 'candidate_counts': {'inset': 0}}
     selector = Mock(return_value={'press': press})
     monkeypatch.setattr(check, 'select_contact_points', selector)
-    for name in ('_report', '_publish_press_point_marker', '_clear_press_point_marker',
-                 '_set_perception_active'):
+    for name in ('_report', '_set_perception_active'):
         monkeypatch.setattr(check, name, Mock())
     msg = SimpleNamespace(header=SimpleNamespace(frame_id='base_link'))
     node = Mock()
@@ -38,9 +37,5 @@ def test_new_selector_drives_check(monkeypatch, available):
     assert node._press_point_check_result['selector'] == 'contact_point_selector'
     assert node._press_point_check_result['ok'] is available
     assert check._set_perception_active.call_args.args == (node, False)
-    check._clear_press_point_marker.assert_called_once_with(node)
     if available:
         np.testing.assert_allclose(node._press_point_check_result['computed_xyz'], [0.6, 0., 0.271])
-        np.testing.assert_allclose(check._publish_press_point_marker.call_args.args[1], [0.6, 0., 0.25])
-    else:
-        check._publish_press_point_marker.assert_not_called()

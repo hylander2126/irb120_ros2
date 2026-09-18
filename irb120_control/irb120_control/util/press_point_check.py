@@ -33,11 +33,6 @@ fail) — see each node's module docstring for the on/off gate itself. This is
 the intended trigger point for that gate: the robot is still clear of the
 object here, and neither node is needed again until the next check.
 
-Also publishes a Marker at the computed point (see PRESS_POINT_MARKER_TOPIC)
-whenever one was actually computed — camera_hull_recorder subscribes to this
-and burns it into the recorded video. Cleared in the same finally block that
-deactivates perception, so it disappears from the video at the same moment
-the hull does.
 """
 
 import csv
@@ -46,9 +41,7 @@ from datetime import datetime
 import numpy as np
 import rclpy
 from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import ColorRGBA
 from std_srvs.srv import SetBool
-from visualization_msgs.msg import Marker
 
 from sensor_msgs_py import point_cloud2
 from irb120_perception.contact_point_selector import select_contact_points
@@ -65,15 +58,6 @@ DEFAULT_TIMEOUT    = 5.0   # s, how long to wait for one ~/object_points message
 # The two differ by the 21 mm bracket the robot base sits on, so the press point MUST be
 # transformed before it is compared with a world-frame hardcoded position.
 COMPARE_FRAME = 'world'
-
-# Published once per check (whenever a point was actually computed, pass or
-# fail) so it can be burned into the recorded video — see
-# camera_hull_recorder.py's press_point_marker_topic. Distinct from the object
-# hull's per-object palette (label_color() in perception_common.py) so it never
-# gets confused with a detected object in a figure: bright magenta, nothing
-# else in this pipeline uses that color.
-PRESS_POINT_MARKER_TOPIC = '/press_point_marker'
-_PRESS_POINT_COLOR = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)
 
 # robot_mask_filter + object_detector are compute-heavy (point cloud math every
 # frame, or a full SAM pass) but only actually needed for the moment it takes
@@ -127,43 +111,6 @@ def _to_frame(node, point: np.ndarray, src_frame: str, dst_frame: str):
         [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
     ])
     return np.asarray(point, dtype=np.float64) @ R.T + np.array([t.x, t.y, t.z]), 'ok'
-
-
-def _publish_press_point_marker(node, computed: np.ndarray, frame_id: str) -> None:
-    """Publish a one-shot marker at the computed press point, for the video
-    overlay (camera_hull_recorder) and/or RViz. Reuses a publisher cached on
-    `node` across calls rather than creating a new one every check."""
-    if not hasattr(node, '_press_point_marker_pub'):
-        node._press_point_marker_pub = node.create_publisher(Marker, PRESS_POINT_MARKER_TOPIC, 10)
-    m = Marker()
-    m.header.frame_id = frame_id
-    m.header.stamp = node.get_clock().now().to_msg()
-    m.ns = 'press_point'
-    m.id = 0
-    m.type = Marker.SPHERE
-    m.action = Marker.ADD
-    m.pose.position.x = float(computed[0])
-    m.pose.position.y = float(computed[1])
-    m.pose.position.z = float(computed[2])
-    m.pose.orientation.w = 1.0
-    m.scale.x = m.scale.y = m.scale.z = 0.015
-    m.color = _PRESS_POINT_COLOR
-    node._press_point_marker_pub.publish(m)
-
-
-def _clear_press_point_marker(node) -> None:
-    """Clear the press-point marker — called in lockstep with deactivating
-    perception so it disappears from the video at the same moment the hull
-    does, rather than lingering over the scene once the robot is up against
-    the object."""
-    if not hasattr(node, '_press_point_marker_pub'):
-        node._press_point_marker_pub = node.create_publisher(Marker, PRESS_POINT_MARKER_TOPIC, 10)
-    m = Marker()
-    m.header.stamp = node.get_clock().now().to_msg()
-    m.ns = 'press_point'
-    m.id = 0
-    m.action = Marker.DELETE
-    node._press_point_marker_pub.publish(m)
 
 
 def check_press_point(node,
@@ -253,13 +200,6 @@ def check_press_point(node,
         # Preserve the calibration-check convention: surface contact + vertical
         # standoff, NOT ball_center + standoff (which would add a new radius offset).
         computed = press['point'] + np.array([0., 0., standoff])
-        computed_src, conv_note = _to_frame(node, computed, COMPARE_FRAME, src_frame)
-        if computed_src is None:
-            _report(node, label, False, None, hardcoded, None,
-                    f'cannot transform pre-press point to {src_frame}: {conv_note}')
-            return False
-        _publish_press_point_marker(node, computed_src, src_frame)
-
         dist = float(np.linalg.norm(computed - hardcoded))
         ok = dist <= tolerance
         _report(node, label, ok, computed, hardcoded, dist, 'OK' if ok else f'EXCEEDS {tolerance:.3f}m tolerance')
@@ -274,7 +214,6 @@ def check_press_point(node,
             'frame_id': COMPARE_FRAME,          # frame the comparison was actually done in
             'source_frame_id': src_frame,       # frame perception published in
             'computed_xyz': computed.tolist(),
-            'computed_xyz_source_frame': computed_src.tolist(),
             'hardcoded_xyz': hardcoded.tolist(),
             'dist_m': dist,
             'tolerance_m': tolerance,
@@ -283,7 +222,6 @@ def check_press_point(node,
         return ok
     finally:
         _set_perception_active(node, False)
-        _clear_press_point_marker(node)
 
 
 def _report(node, label, ok: bool, computed, hardcoded, dist, note: str) -> None:

@@ -35,7 +35,13 @@ def test_box_contacts_and_signed_scores():
     assert push['available'] and tip['available'] and press['available']
     np.testing.assert_allclose(push['point'], [0.5, 0., 0.02])
     np.testing.assert_allclose(tip['point'], [0.5, 0., 0.195])
-    np.testing.assert_allclose(press['point'], [0.55, 0., 0.2], atol=1e-10)
+    # The horizontal pull moment ties across the flat top.  The press stage
+    # therefore chooses the point nearest the -X support edge, minimizing the
+    # opposing moment from the downward contact-establishing press.
+    np.testing.assert_allclose(press['point'], [0.505, 0., 0.2], atol=1e-10)
+    assert press['press_score'] == pytest.approx(-0.005)
+    np.testing.assert_allclose(press['edge_midpoint'], [0.5, 0., 0.], atol=1e-10)
+    assert press['along_edge_offset'] == pytest.approx(0.)
     for selected, pivot_x, direction_x in [(tip, 0.6, 1.), (press, 0.5, -1.)]:
         geometry = selected['geometry']
         assert geometry['kind'] == 'extended_edge'
@@ -134,6 +140,22 @@ def test_press_insets_face_before_scoring_sloped_top():
     assert press['available']
     assert press['point'][1] <= 0.04 + 1e-10
     assert press['candidate_counts']['inset'] > press['candidate_counts']['best_score_band']
+
+
+def test_press_prefers_edgeward_contact_despite_flat_top_height_noise():
+    points, normals = box()
+    top = normals[:, 2] > 0.7
+    # A 2 mm depth-noise ridge at the centre is still within the 3 mm pull-score
+    # tolerance.  It must not displace the press point from the pivot-side edge.
+    noisy_ridge = top & np.isclose(points[:, 0], 0.55)
+    points[noisy_ridge, 2] += 0.002
+    press = select_contact_points(points, normals=normals, table_z=0.)['press']
+    assert press['available']
+    assert press['point'][0] == pytest.approx(0.505)
+    assert press['point'][1] == pytest.approx(0.)
+    assert press['score'] == pytest.approx(0.2)
+    assert press['press_score'] == pytest.approx(-0.005)
+    assert press['along_edge_offset'] == pytest.approx(0.)
 
 
 def test_press_failure_names_rejecting_filter():
