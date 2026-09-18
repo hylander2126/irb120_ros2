@@ -102,15 +102,41 @@ def set_recorder_video_quality(node, quality: str, recorder_node_name: str = "ca
     return True
 
 
+def set_recorder_show_hull(node, show_hull: bool, recorder_node_name: str = "camera_hull_recorder", timeout_sec: float = 3.0) -> bool:
+    """Set the show_hull parameter on the recorder node before recording starts.
+    Same pattern as set_recorder_video_quality."""
+    client = node.create_client(SetParameters, f"/{recorder_node_name}/set_parameters")
+    if not client.wait_for_service(timeout_sec=timeout_sec):
+        node.get_logger().warn(f"set_parameters not available on {recorder_node_name} — show_hull left at its launch default")
+        return False
+
+    param = Parameter()
+    param.name = "show_hull"
+    param.value = ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=show_hull)
+
+    req = SetParameters.Request()
+    req.parameters = [param]
+    future = client.call_async(req)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+    if not future.done() or future.result() is None:
+        node.get_logger().warn("set_parameters call timed out — show_hull left at its launch default")
+        return False
+
+    node.get_logger().info(f"{recorder_node_name} show_hull set to: {show_hull}")
+    return True
+
+
 def start_recording(
     node,
     subdir: str,
     quality: str | None = None,
+    show_hull: bool | None = None,
     recorder_node_names: tuple[str, ...] = DEFAULT_RECORDER_NODES,
     timeout_sec: float = 5.0,
 ) -> bool:
-    """Configure output_dir (+ optionally video_quality) and start recording on
-    every recorder in recorder_node_names, one camera_hull_recorder per camera.
+    """Configure output_dir (+ optionally video_quality, show_hull) and start
+    recording on every recorder in recorder_node_names, one camera_hull_recorder
+    per camera.
 
     Returns True only if every recorder confirmed it started — callers should
     treat a False return the same way the old single-camera code did (abort
@@ -122,6 +148,8 @@ def start_recording(
         set_recorder_output_dir(node, subdir, recorder_node_name=name, timeout_sec=timeout_sec)
         if quality is not None:
             set_recorder_video_quality(node, quality, recorder_node_name=name, timeout_sec=timeout_sec)
+        if show_hull is not None:
+            set_recorder_show_hull(node, show_hull, recorder_node_name=name, timeout_sec=timeout_sec)
 
         client = node.create_client(SetBool, f"/{name}/set_recording")
         if not client.wait_for_service(timeout_sec=timeout_sec):

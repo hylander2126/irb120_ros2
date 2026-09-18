@@ -33,7 +33,8 @@ from irb120_control.util.runtime_log_dir import (
     module_constants,
     save_ft_pose_log,
     save_run_metadata,
-    set_recorder_output_dir,
+    start_recording,
+    stop_recording,
     VALID_OBJECTS,
 )
 
@@ -53,6 +54,17 @@ RETURN_VELOCITY_SCALE    = 0.05    # slower return after push
 
 REQUIRE_OPERATOR_CONFIRM = True
 DEBUG = True
+
+# Session F/T tare, run automatically at the pre-push pose (stationary, unloaded,
+# confirmed-but-not-yet-touching) right before each push — see _tare_ft_sensor().
+TARE_WAIT_SEC = 3.0   # netft_preprocessor accumulates TARE_SAMPLES=200 asynchronously
+                       # after the service call returns; this is a generous fixed wait
+                       # rather than a completion signal (none is exposed).
+
+PUSH_VIDEO_QUALITY = "h264"   # camera_hull_recorder's "h264" mode now encodes via a
+                               # direct ffmpeg/libx264 CRF pipe (see _FfmpegH264Writer),
+                               # not cv2.VideoWriter's own ineffective h264 backend —
+                               # good quality at a small fraction of "lossless"'s size.
 
 
 class Push(Node):
@@ -231,27 +243,46 @@ class Push(Node):
 
 
 
+def _tare_ft_sensor(node: Push, wait_sec: float = TARE_WAIT_SEC) -> None:
+    """Zero the F/T sensor's session residual at the current pose. Call ONLY when
+    the tool is stationary and definitely not in contact with anything — e.g. right
+    after the operator confirms the object is positioned but before the push starts.
+
+    netft_preprocessor's /set_tare service returns as soon as it *starts*
+    accumulating TARE_SAMPLES; the actual capture finishes asynchronously as more
+    wrench samples arrive. There's no completion signal exposed, so this just
+    blocks for a generous fixed window afterward.
+    """
+    client = node.create_client(SetBool, "/netft_preprocessor/set_tare")
+    if not client.wait_for_service(timeout_sec=3.0):
+        node.get_logger().warn("netft_preprocessor tare service not available — skipping session tare")
+        return
+    future = client.call_async(SetBool.Request(data=True))
+    rclpy.spin_until_future_complete(node, future, timeout_sec=3.0)
+    result = future.result()
+    if result is None or not result.success:
+        node.get_logger().warn(
+            f"Session tare request failed: {result.message if result else 'no response'} — proceeding untared"
+        )
+        return
+    node.get_logger().info(f"{result.message} Waiting {wait_sec:.1f}s for capture to finish...")
+    deadline = node.get_clock().now().nanoseconds * 1e-9 + wait_sec
+    while rclpy.ok() and node.get_clock().now().nanoseconds * 1e-9 < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+
 def main(args=None) -> int:
     rclpy.init(args=args)
     node = Push()
-    recorder_client = node.create_client(SetBool, "/camera_hull_recorder/set_recording")
     try:
         if not ensure_egm_active(node):
             return 1
 
-        set_recorder_output_dir(node, node._log_subdir)
-        if recorder_client.wait_for_service(timeout_sec=5.0):
-            future = recorder_client.call_async(SetBool.Request(data=True))
-            rclpy.spin_until_future_complete(node, future)
-            result = future.result()
-            if result is None or not result.success:
-                node.get_logger().error(
-                    f"Start-recording failed: {result.message if result else 'no response'} — aborting"
-                )
-                return 1
-            node.get_logger().info("Recording started")
-        else:
-            node.get_logger().error("Recorder service not available after 5 s — aborting")
+        # show_hull=False: push videos don't need the object-hull overlay —
+        # see camera_hull_recorder's show_hull param (on by default via
+        # bringup_stack.launch.py for arc recordings).
+        if not start_recording(node, node._log_subdir, quality=PUSH_VIDEO_QUALITY, show_hull=False):
+            node.get_logger().error("Recording failed to start on one or more cameras — aborting")
             return 1
 
         # Phase 1: approach
@@ -263,6 +294,10 @@ def main(args=None) -> int:
             "At pre-push pose. Confirm object is in position before pushing."
         ):
             return 0
+
+        # Stationary, confirmed-in-position, not yet touching — zero the F/T
+        # sensor's session residual right here before any contact happens.
+        _tare_ft_sensor(node)
 
         # Phase 2: Cartesian push (F/T recorded during execution)
         node._push_started = True
@@ -291,19 +326,7 @@ def main(args=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        if recorder_client.wait_for_service(timeout_sec=2.0):
-            if rclpy.ok():
-                future = recorder_client.call_async(SetBool.Request(data=False))
-                rclpy.spin_until_future_complete(node, future)
-                result = future.result()
-                if result is None or not result.success:
-                    node.get_logger().error(
-                        f"Stop-recording failed: {result.message if result else 'no response'}"
-                    )
-                else:
-                    node.get_logger().info("Recording stopped")
-            else:
-                node.get_logger().warn("rclpy already shut down — stop-recording call skipped")
+        stop_recording(node)
         deactivate_egm(node)
         if node._push_started:
             try:

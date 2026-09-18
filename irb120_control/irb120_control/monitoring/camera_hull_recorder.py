@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,72 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+class _FfmpegH264Writer:
+    """Pipes raw BGR frames to an ffmpeg subprocess encoding libx264 at a fixed
+    CRF. cv2.VideoWriter's own 'avc1' backend (via FFmpeg) doesn't expose real
+    quality control in this OpenCV build — no VIDEOWRITER_PROP_BITRATE, and
+    VIDEOWRITER_PROP_QUALITY has no meaningful effect on the resulting x264
+    bitrate — so its output came out ~500KB for a short clip and visibly
+    over-compressed. This goes straight to ffmpeg's own CRF-controlled x264
+    encode instead, landing far closer to the "lossless" PNG-in-AVI mode's
+    quality at a small fraction of its size.
+
+    Implements the same write()/release()/isOpened() surface cv2.VideoWriter
+    provides so it's a drop-in swap at the call sites.
+    """
+
+    def __init__(self, path: Path, fps: float, width: int, height: int, crf: int, logger) -> None:
+        self._logger = logger
+        self._opened = False
+        self._proc: subprocess.Popen | None = None
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "rawvideo", "-pix_fmt", "bgr24",
+                    "-s", f"{width}x{height}", "-r", f"{fps}",
+                    "-i", "-",
+                    "-an",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                    "-pix_fmt", "yuv420p",
+                    str(path),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._opened = self._proc.stdin is not None
+        except OSError as exc:
+            logger.error(f"Failed to launch ffmpeg for {path}: {exc}")
+
+    def isOpened(self) -> bool:
+        return self._opened and self._proc is not None and self._proc.poll() is None
+
+    def write(self, frame: np.ndarray) -> None:
+        if not self.isOpened():
+            return
+        try:
+            self._proc.stdin.write(frame.tobytes())
+        except (BrokenPipeError, OSError) as exc:
+            self._logger.warn(f"ffmpeg writer pipe broke: {exc}")
+            self._opened = False
+
+    def release(self) -> None:
+        if self._proc is None:
+            return
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+        try:
+            self._proc.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            self._logger.warn("ffmpeg did not exit within 15s of closing input — killing")
+            self._proc.kill()
+        self._opened = False
 
 
 def _resolve_workspace_root() -> Path:
@@ -56,13 +123,18 @@ class CameraHullRecorder(Node):
         self.declare_parameter("show_rpy_hud", False)
         self.declare_parameter("show_ft_hud", True)
         self.declare_parameter("show_press_point", False)
-        # "h264" = good quality, small files (default) — the FT HUD and press-point
-        #   marker hold up fine at this setting; the object hull is on-demand and
-        #   brief enough now that its occasional aliasing under h264 is a
-        #   non-issue for everyday runs.
+        # "h264" = good quality, small files (default) — encoded via a direct
+        #   ffmpeg/libx264 pipe (see _FfmpegH264Writer) at h264_crf below, not
+        #   cv2.VideoWriter's own h264 backend, which doesn't expose real
+        #   quality control in this OpenCV build.
         # "lossless" = PNG-in-AVI, pixel-perfect, large files — reserve for a
         #   deliberate one-off high-quality take (e.g. one hero trial per object).
         self.declare_parameter("video_quality", "h264")
+        # x264 CRF for "h264" mode — lower = higher quality/bigger file. 18 is the
+        # conventional "visually lossless" threshold; still a small fraction of
+        # true-lossless PNG-in-AVI's size. Read live at recording start, so it
+        # can be tuned per-run the same way as video_quality/output_dir.
+        self.declare_parameter("h264_crf", 18)
 
         self._image_topic = str(self.get_parameter("image_topic").value)
         self._camera_info_topic = str(self.get_parameter("camera_info_topic").value)
@@ -81,7 +153,10 @@ class CameraHullRecorder(Node):
         self._whitelist = {str(x) for x in self.get_parameter("object_id_whitelist").value}
         self._auto_start = bool(self.get_parameter("auto_start_recording").value)
         self._ft_hard_limit = float(self.get_parameter("ft_hard_limit_n").value)
-        self._show_hull = bool(self.get_parameter("show_hull").value)
+        # show_hull is intentionally NOT cached here — it's read live in _on_image
+        # so a runtime set_parameters call (e.g. push.py's show_hull=False) takes
+        # effect immediately, the same way output_dir/video_quality are re-read
+        # at point of use instead of snapshotted at startup.
         self._show_rpy_hud = bool(self.get_parameter("show_rpy_hud").value)
         self._show_ft_hud = bool(self.get_parameter("show_ft_hud").value)
         self._show_press_point = bool(self.get_parameter("show_press_point").value)
@@ -110,7 +185,7 @@ class CameraHullRecorder(Node):
         self._latest_markers: list[Marker] = []
         # Cleared in lockstep with the hull — see _on_press_point.
         self._press_point: Marker | None = None
-        self._writer: cv2.VideoWriter | None = None
+        self._writer: cv2.VideoWriter | _FfmpegH264Writer | None = None
         self._recording_active = False
         self._pending_recording_start = self._auto_start
         self._output_path: Path | None = None
@@ -224,7 +299,7 @@ class CameraHullRecorder(Node):
             return
 
         annotated = frame.copy()
-        if self._show_hull:
+        if bool(self.get_parameter("show_hull").value):
             self._draw_marker_hulls(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
         if self._show_press_point and self._press_point is not None:
             self._draw_press_point(annotated, msg.header.frame_id, msg.header.stamp, frame.shape[1], frame.shape[0])
@@ -254,14 +329,15 @@ class CameraHullRecorder(Node):
             # PNG-in-AVI: truly lossless, large files — re-encode with ffmpeg before submission
             self._output_path = output_dir / f"{self._filename_prefix}_{ts}.avi"
             fourcc = cv2.VideoWriter_fourcc(*"png ")
+            self._writer = cv2.VideoWriter(str(self._output_path), fourcc, self._output_fps, (width, height))
         else:
-            # H.264: excellent quality, small files
+            # H.264 via a direct ffmpeg/libx264 pipe — see _FfmpegH264Writer.
             self._output_path = output_dir / f"{self._filename_prefix}_{ts}.mp4"
-            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+            crf = int(self.get_parameter("h264_crf").value)
+            self._writer = _FfmpegH264Writer(
+                self._output_path, self._output_fps, width, height, crf, self.get_logger()
+            )
 
-        self._writer = cv2.VideoWriter(str(self._output_path), fourcc, self._output_fps, (width, height))
-        if quality_mode != "lossless":
-            self._writer.set(cv2.VIDEOWRITER_PROP_QUALITY, 100)
         if not self._writer.isOpened():
             self.get_logger().error(f"Failed to open writer: {self._output_path}")
             self._writer = None
