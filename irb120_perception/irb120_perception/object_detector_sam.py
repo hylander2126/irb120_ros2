@@ -10,7 +10,7 @@ DBSCAN clusters by spatial gap, so it cannot split two objects that touch or
 share a depth profile (see object_detector_dbscan.py's docstring). This
 backend instead segments the color image with a promptable vision model
 (Segment Anything, in "segment everything" mode) and back-projects each mask
-through the aligned, robot-masked depth image into 3D. It splits on visual
+through the aligned depth image into 3D. It splits on visual
 appearance/boundary, so touching objects with a visible seam are not a
 special case for it the way they are for DBSCAN.
 
@@ -35,12 +35,10 @@ via `~/set_active` immediately allows a fresh run regardless of the throttle
 window, same as before.
 
 Status / limitations:
-  - Single camera (camera 1) only, matching the current scope of
-    `robot_mask_filter`'s `~/depth_masked_sam` output — see that node's
-    docstring ("The SAM depth-image path is untouched by this — single
-    camera only"). Multi-camera fusion for this backend (matching DBSCAN's
-    three-camera fusion) is not implemented; it would need either 2D mask
-    correspondence across viewpoints or per-camera SAM + 3D mask fusion.
+  - Runs independently on each configured camera and conservatively merges
+    matching 3-D instances by bounding-box overlap. It therefore trades CPU
+    time for coverage; use the prompted DBSCAN→SAM culler for a fast cam1
+    boundary refinement.
   - Masks are class-agnostic (SAM has no notion of "object" vs "table" vs
     "background") — the ROI crop and `min_cluster_pts`/`max_cluster_pts`
     filtering do the same job DBSCAN's cluster-size filter does, rejecting
@@ -70,9 +68,8 @@ machine against a synthetic 1280x720 test scene with 6 objects, MobileSAM,
   not just slower convergence, but objects silently missing entirely
   (pps=4 found 3/6 objects, pps=6 found 2/6, pps=8 and pps=10 both found
   5/6 with no further gain above 8). Do not go below 8 without re-verifying
-  recall on your actual scene; this node's default is intentionally left at
-  16, above that floor, since accuracy matters more than speed here — lower
-  it yourself only after checking recall doesn't regress for your objects.
+  recall on your actual scene. The launch default is 8 as a practical
+  comparison baseline; raise it after checking recall on your own objects.
 
   Thread count is a separate, effectively free lever: at points_per_side=8,
   OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/MKL_NUM_THREADS=1 (this node's
@@ -96,12 +93,9 @@ machine against a synthetic 1280x720 test scene with 6 objects, MobileSAM,
   Bottom line: full "segment everything" MobileSAM cannot reach ~1-2s on
   this CPU without giving up real recall (see the pps cliff above) — that's
   inherent to decoding a whole point grid, not a tuning artifact. The
-  thread-count fix alone (zero accuracy cost) cuts the shipped
-  points_per_side=16 default from the ~85s originally observed live to
-  roughly ~40s. Getting meaningfully below that needs a different approach
-  entirely, e.g. seeding a handful of targeted point/box prompts from
-  DBSCAN's cluster centroids instead of a dense full-image point grid — not
-  implemented here.
+  thread-count fix alone (zero accuracy cost) improves throughput, but the
+  automatic backend remains costly. For a targeted point/box prompt seeded
+  from DBSCAN, use `object_detector_dbscan_sam_cull` instead.
 
 Depends on packages not in package.xml (pip, not a rosdep-known package —
 install into this workspace's Python environment, not declared as a ROS

@@ -94,8 +94,8 @@ def generate_launch_description() -> LaunchDescription:
             "8->~12s, 12->~23s, 16->~39s (thread count aside). Recall drops "
             "off a cliff below 8 (objects go missing, not just slower "
             "convergence) — do not go below 8 without re-checking recall on "
-            "your actual scene. Default kept at 16 (favors accuracy); try 8-10 "
-            "for comparison runs where you've confirmed recall holds."
+            "your actual scene. Default 8 is the practical comparison baseline; "
+            "raise it if it misses a real object."
         ),
     )
     points_per_batch_arg = DeclareLaunchArgument(

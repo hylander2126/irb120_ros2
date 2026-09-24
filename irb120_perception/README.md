@@ -33,9 +33,8 @@ cloud into `base_link`, caches the latest cloud per camera, then concatenates
 them before ROI cropping. The offline workflow assumes the arm is clear, so
 `robot_mask_filter` is not part of the default pipeline. This reduces
 occlusion (each camera's viewpoint covers extremities the others miss) and
-increases point density. See [robot_mask_filter's docstring](irb120_perception/robot_mask_filter.py)
-for the fusion details, and [Launching](#launching) to disable fusion for any
-one camera.
+increases point density. See [Launching](#launching) to disable fusion for an
+individual camera.
 
 **Limitations:** Fails when two objects touch or have similar depth profiles,
 because their points merge into a single cluster with no spatial gap to split
@@ -86,16 +85,16 @@ before trying to run it.
 
 **Always launch this via `perception_sam.launch.py`, never a bare `ros2 run`.**
 irb120_perception is built with the workspace's normal system Python — on
-purpose, because `robot_mask_filter`/`object_detector` run near a live,
-250 Hz real-time EGM control loop and must not depend on a pip-heavy venv's
-Python. The launch file routes only this node through `~/irb_venv`'s
-interpreter and forces single-threaded BLAS/torch. Skipping the launch file
+purpose, because the primary DBSCAN detector runs near a live, 250 Hz EGM
+control loop and must not depend on a pip-heavy venv's Python. The launch file
+routes only this node through `~/irb_venv`'s interpreter and caps BLAS/torch
+to eight threads. Skipping the launch file
 either fails the torch import (system Python) or, if you improvise your own
 venv invocation without the same thread caps, risks the exact failure this
 setup exists to avoid: a pip-installed numpy's bundled OpenBLAS defaults to
 one thread pool per core *per call*, and this package's nodes call it at
 ~90 Hz — building the whole package under venv Python once did this to
-`robot_mask_filter` and knocked out EGM on live hardware.
+the continuously-running perception stack and knocked out EGM on live hardware.
 
 ---
 
@@ -103,20 +102,30 @@ one thread pool per core *per call*, and this package's nodes call it at
 
 ```
 /realsense/depth/color/points   (PointCloud2, ~30 Hz)  ─┐
-/realsense2/depth/color/points  (PointCloud2, ~30 Hz)  ─┤  fused in robot_mask_filter:
+/realsense2/depth/color/points  (PointCloud2, ~30 Hz)  ─┤  fused in object_detector:
 /realsense3/depth/color/points  (PointCloud2, ~30 Hz)  ─┤  TF → base_link (per camera),
-                                                          │  robot-mask, concatenate
+                                                          │  concatenate latest clouds
                                                           ▼
-                        ~/points_masked_dbscan  (PointCloud2, base_link, all three cameras)
+                        raw fused cloud  (base_link, all configured cameras)
         │
         ▼
 ┌─────────────────────┐
-│  TF transform       │  base_link → base_link (identity; cloud already fused into base_link)
+│  TF transform       │  camera frame → base_link (per camera)
 └─────────────────────┘
         │
         ▼
 ┌─────────────────────┐
 │  ROI crop           │  discard points outside the workspace box
+└─────────────────────┘
+        │
+        ▼
+┌─────────────────────┐
+│ Table-plane reject  │  fitted horizontal plane removes support-surface points
+└─────────────────────┘
+        │
+        ▼
+┌─────────────────────┐
+│ Temporal consensus  │  retain voxels seen in 12 of the last 20 observations
 └─────────────────────┘
         │
         ▼
@@ -141,15 +150,15 @@ one thread pool per core *per call*, and this package's nodes call it at
         └──▶  ~/markers      (visualization_msgs/MarkerArray)
 ```
 
-Table removal is handled by `roi_z_min` set just above the known table height.
-No RANSAC is needed because the table height is fixed in the robot base frame.
+The ROI provides a first coarse crop; a fitted near-horizontal plane is then
+removed before temporal accumulation and clustering.
 
 ---
 
 ## Launching
 
 ```bash
-# Fuses all three cameras
+# Fuses all three raw camera clouds; no robot mask is required offline
 ros2 launch irb120_perception perception.launch.py
 
 # Camera 1 only (disable fusion for cameras 2 and 3)
@@ -166,23 +175,22 @@ ros2 launch irb120_control bringup_irb120_moveit.launch.py
 you want the backend running standalone outside the launch file (e.g.
 against a bag).
 
-### SAM, alongside DBSCAN for comparison
+### Prompted SAM cull (recommended comparison)
 
 ```bash
-ros2 launch irb120_perception perception.launch.py           # robot_mask_filter + DBSCAN, as above
-ros2 launch irb120_perception perception_sam.launch.py sam_checkpoint:=/path/to/mobile_sam.pt
+ros2 launch irb120_perception perception.launch.py
+ros2 launch irb120_perception perception_dbscan_sam_cull.launch.py \
+  sam_checkpoint:=/path/to/mobile_sam.pt
 ```
 
-The second launch file adds only `object_detector_sam` — it depends on
-`robot_mask_filter` already running from the first (see
-[`perception_sam.launch.py`](launch/perception_sam.launch.py) for why it
-doesn't start its own copy). With both running, compare:
+The second launch consumes DBSCAN's `/object_detector/object_points` and cam1
+RGB/camera-info. With both running, compare:
 
-| | DBSCAN | SAM |
+| | DBSCAN | DBSCAN → SAM cull |
 |---|---|---|
-| Detections | `/object_detector/detections` | `/object_detector_sam/detections` |
-| Markers | `/object_detector/markers` | `/object_detector_sam/markers` |
-| Object points | `/object_detector/object_points` | `/object_detector_sam/object_points` |
+| Detections | `/object_detector/detections` | `/object_detector_dbscan_sam_cull/detections` |
+| Markers | `/object_detector/markers` | `/object_detector_dbscan_sam_cull/markers` |
+| Object points | `/object_detector/object_points` | `/object_detector_dbscan_sam_cull/object_points` |
 
 ---
 
@@ -217,25 +225,16 @@ doesn't recur across frames is noise, not signal — this denoises using that
 directly, rather than only a single frame's local density. See
 `FrameAccumulator`'s docstring in `perception_common.py`.
 
-**Off (`accum_frames: 1`) by default, including in `perception.launch.py`.**
-It was briefly enabled there (`accum_frames: 10`) on the assumption that
-`robot_mask_filter` sustains something near camera rate; measured live under
-continuous operation (`active_at_start` default) it's actually ~1-1.5 Hz
-with heavy jitter, since it's the most expensive node in the chain and was
-designed to be toggled on briefly per check rather than run continuously
-flat-out (see its own docstring's "On/off gate"). At that real rate,
-`accum_frames=10` meant 10+ seconds of total silence on `~/object_points`
-before the first detection ever appeared — indistinguishable from
-segmentation being broken. Re-measure `ros2 topic hz <input_cloud_pc>` under
-your actual run conditions before raising this above 1; it's much safer
-around a single deliberate `press_point_check` activation (where a
-several-second wait is already expected and budgeted) than for continuous
-bringup viewing.
+**Enabled by default in `perception.launch.py`: 20 observations, 12 hits.**
+The default launch now consumes direct camera clouds rather than the slow
+robot-mask pipeline, so this warm-up is short during offline operation and
+reliably rejects flickering edge/free-space depth samples. The scene must be
+stationary while the window fills.
 
 | Parameter          | Default | Effect |
 |---------------------|---------|--------|
-| `accum_frames`      | `1` (off) | Sliding window length. `1` disables accumulation (original single-frame behaviour). Naive latency estimate is `accum_frames`/publish-rate seconds before the first usable detection — but see the real-rate warning above before trusting that estimate. Keep well under `check_press_point`'s 5 s `timeout_sec` for whatever rate you actually measure. |
-| `accum_min_hits`    | `0` (auto: ~60% of `accum_frames`) | Minimum distinct frames a voxel must be seen in to survive. Raise for more aggressive denoising (risks trimming a genuinely faint/thin object edge); lower to keep more of a marginal edge at the cost of more surviving noise. |
+| `accum_frames`      | `20` | Sliding-window length. `1` disables accumulation. |
+| `accum_min_hits`    | `12` | Minimum observations in which a voxel must recur. Raise for stronger denoising (may trim faint/thin edges); lower to retain marginal edges at the cost of more noise. |
 
 While the window is filling after activation, `object_detector` publishes
 nothing at all (not `~/detections`, not `~/object_points`) — this matters
@@ -253,9 +252,10 @@ in a reasonable time, which is exactly what happened with the old default.
 | `dbscan_min_pts`   | `20`    | Minimum points to form a cluster core. Raise to suppress noise clusters. |
 | `min_cluster_pts`  | `30`    | Discard clusters with fewer points than this. |
 | `max_cluster_pts`  | `50000` | Discard clusters larger than this (catches robot body leaking into ROI). |
-| `single_object_mode` | `False` | Union every surviving cluster into one object. For a single rigid item that comes back as multiple disconnected clusters (e.g. a monitor's base+screen, joined only at a rear seam no camera can see). Only safe if the workspace holds one physical item per detection cycle — otherwise this wrongly fuses genuinely separate objects. |
+| `single_object_mode` | `True` | Union every surviving cluster into one object. For a single rigid item that comes back as multiple disconnected clusters (e.g. a monitor's base+screen, joined only at a rear seam no camera can see). Only safe if the workspace holds one physical item per detection cycle — otherwise this wrongly fuses genuinely separate objects. |
 | `outlier_k`        | `8`     | Neighbours sampled per point for the local-density check, run before clustering. Strips depth-camera "flying pixel" noise trails that DBSCAN's single-linkage chaining would otherwise absorb into a real object's cluster. See [contact_point_selector](CONTACT_SELECTION.md) — this is what was throwing off downstream contact selection. |
 | `outlier_std_ratio` | `2.0`  | How many std-devs above the mean k-NN distance counts as "sparse" and gets dropped. Lower = more aggressive removal (risks trimming real sparse object edges); `0` disables the check entirely. |
+| `table_plane_distance` | `0.008` | Distance from the fitted horizontal tabletop plane (m) considered table and removed before clustering. |
 | `smooth_alpha`     | `0.3`   | EMA weight for temporal smoothing. `0` = frozen (previous frame), `1` = raw (no smoothing). Lower values reduce jitter but add lag. |
 
 ---
@@ -292,10 +292,13 @@ Markers expire after 3 s so they disappear cleanly if detection stops.
 
 | Topic | Type | Produced by | QoS | Notes |
 |-------|------|-------------|-----|-------|
-| `/robot_mask_filter/points_masked_dbscan` | PointCloud2 | `robot_mask_filter` | **Reliable** | DBSCAN input, robot body removed, all three cameras fused into `base_link` |
+| `/realsense[2|3]/depth/color/points` | PointCloud2 | RealSense | Best Effort | Raw DBSCAN inputs; each is transformed/fused in `object_detector` |
 | `/object_detector/detections` | Detection3DArray | `object_detector` | Reliable | |
 | `/object_detector/markers` | MarkerArray | `object_detector` | Reliable | |
 | `/object_detector/object_points` | PointCloud2 (x,y,z,label) | `object_detector` | Reliable | Input to `contact_point_selector` — see [CONTACT_SELECTION.md](CONTACT_SELECTION.md) |
+| `/object_detector_dbscan_sam_cull/detections` | Detection3DArray | `object_detector_dbscan_sam_cull` | Reliable | Optional prompted-SAM refinement of DBSCAN |
+| `/object_detector_dbscan_sam_cull/markers` | MarkerArray | `object_detector_dbscan_sam_cull` | Reliable | Optional prompted-SAM refinement visualisation |
+| `/object_detector_dbscan_sam_cull/object_points` | PointCloud2 (x,y,z,label) | `object_detector_dbscan_sam_cull` | Reliable | SAM-culled DBSCAN cloud; comparison output, not selected by contact code by default |
 
 ### Troubleshooting: topic is in `ros2 topic list`, but RViz shows nothing
 
@@ -308,8 +311,7 @@ The most common cause: **QoS mismatch (Best Effort vs Reliable).** RViz's defaul
    ```
    Fix: either set the display's **Topic → Reliability Policy** to `Best Effort`
    in RViz, or (better, so it's not a manual step every time) make the
-   publisher `Reliable` if nothing about it needs Best Effort's tradeoffs —
-   that's exactly what was done for `robot_mask_filter`'s two output topics.
+   publisher `Reliable` if nothing about it needs Best Effort's tradeoffs.
 
 **Reliable vs. Best Effort, briefly:** Reliable is like TCP — the publisher
 keeps a message around and retries until the subscriber acks it, so nothing
@@ -321,12 +323,10 @@ away regardless, and retry/ack bookkeeping under load risks a growing
 backlog, which is *worse* for latency than just dropping the occasional
 frame. That's a real cost of Reliable, not a myth — but it only bites when
 messages are large *and* frequent *and* something is otherwise struggling to
-keep up. `robot_mask_filter`'s inputs stay Best Effort to match the camera
-driver they subscribe to; its outputs (`points_masked_dbscan`,
-`depth_masked_sam`) were switched to Reliable, which is safe here because a
-Best-Effort subscriber (like `object_detector`) can always read from a
-Reliable publisher — the incompatibility only runs the other direction
-(Reliable subscriber vs. Best-Effort publisher).
+keep up. The RealSense raw streams stay Best Effort; detector outputs are
+Reliable, so RViz can subscribe with its default QoS. A Best-Effort subscriber
+can read a Reliable publisher; the incompatible direction is a Reliable
+subscriber consuming a Best-Effort publisher.
 
 If Reliable seemed "faster" when you tried it, that wasn't really a speed
 comparison — Best Effort with a mismatched Reliable subscriber delivers
@@ -360,35 +360,22 @@ superseded it. See CONTACT_SELECTION.md for the migration notes.)
 
 ## RealSense configuration
 
-Configured in [`bringup_stack.launch.py`](../irb120_control/launch/bringup_stack.launch.py).
+Shared settings are in [`realsense_common.yaml`](../irb120_handeye/config/realsense_common.yaml),
+loaded by each camera bringup wrapper.
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| `depth_module.depth_profile` | `1280x720x30` | Max depth resolution on the D435 (top res caps at 30fps) |
-| `rgb_camera.color_profile` | `1280x720x30` | Matched to depth resolution — avoids scaling artefacts in aligned depth |
+| `pointcloud.enable` | `true` | Publishes the raw clouds consumed by DBSCAN. |
 | `align_depth.enable` | `true` | Depth pixels aligned to color image frame |
 | `decimation_filter.enable` | `false` | Disabled to preserve full native resolution |
-| `depth_module.hdr_enabled` / `hdr_merge.enable` | `true` | On-sensor HDR merge (alternating exposure/gain pairs) — see gotcha below |
-| `disparity_filter.enable` | `true` | Wraps spatial/temporal in the disparity domain (Intel-recommended for filter quality) |
-| `spatial_filter.enable` | `true` | Magnitude 2, smooth alpha 0.5, smooth delta 4, persistency disabled — tuned by hand in the RealSense Viewer |
-| `temporal_filter.enable` | `true` | Smooth alpha 0.02, smooth delta 99, persistency "Valid in 2/last 4" — tuned by hand in the RealSense Viewer |
+| `spatial_filter.enable` | `true` | Magnitude 1, alpha 0.5, delta 5. |
+| `temporal_filter.enable` | `true` | Alpha 0.7, delta 35, persistency "Valid in 2/last 4". |
 
-Fine-grained filter numbers live in [`realsense_filters.yaml`](../irb120_control/config/realsense_filters.yaml)
-(passed via `rs_launch.py`'s `config_file` arg, since they aren't exposed as
-top-level launch arguments in this realsense2_camera version).
-
-Note: the D435 cannot exceed 30fps at this resolution — higher framerates (60/90fps) are only
-available at 848x480 or lower. This config prioritizes resolution/accuracy over framerate.
-
-**Gotcha (verified live against the D435):** HDR merge and a `visual_preset`
-(e.g. "High Density") cannot both be active — the sensor throws "gain is
-locked while HDR is active" and fails to start if you try. `visual_preset`
-is intentionally omitted from `realsense_filters.yaml` for this reason.
-
-Spatial and temporal filtering are now done on-device rather than in
-software. `object_detector_dbscan` additionally applies EMA smoothing
-(`smooth_alpha`) on top of this — worth checking whether that's now
-double-filtering before tuning either side further.
+The current configuration intentionally has `decimation_filter.enable: false`
+and `temporal_filter.holes_fill: 0`, preserving native edge detail. These
+camera-side settings do not fully remove stereo depth-edge artifacts; the
+DBSCAN temporal consensus, table-plane rejection, and optional SAM cull are
+the perception-side safeguards.
 
 ---
 
@@ -401,14 +388,16 @@ double-filtering before tuning either side further.
 
 **Two adjacent objects merging into one cluster:**
 → Decrease `dbscan_eps` (try `0.015`). DBSCAN cannot separate touching
-  objects without a spatial gap — a vision-based backend would be needed
-  for that case, and none is currently wired in.
+  objects without a spatial gap — use automatic SAM when visual instance
+  separation is required.
 
 **Too many small noise clusters:**
 → Increase `min_cluster_pts` and `dbscan_min_pts`.
 
 **Table not fully excluded:**
-→ Increase `roi_z_min` to sit clearly above the table surface.
+→ The fitted table-plane rejection is enabled by default. Tune
+  `table_plane_distance` before raising `roi_z_min`, which can trim an
+  object's base.
 
 **After enabling multi-camera fusion — visible seam/ghosting where clouds overlap:**
 → Extrinsic calibration error. Check `base -> realsense_link`, `base -> realsense2_link`,

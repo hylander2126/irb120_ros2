@@ -8,20 +8,20 @@ enable_sync: true # This is only used for unique circumstances. See record_depth
 
 # Cuts the depth-cloud point count ~4x — speeds up robot_mask_filter and DBSCAN, independent 
 # of rgb_camera.color_profile (recording).
-decimation_filter.enable: false # WAS true
-# decimation_filter.filter_magnitude: 2
+decimation_filter.enable: true
+decimation_filter.filter_magnitude: 2
 
 # Depth post-processing tuned by hand in the RealSense Viewer (2026-07-27). Not exposed as 
 # top-level rs_launch.py launch arguments, hence living here instead.
 
 # depth_module.visual_preset ("High Density" = index 4) is intentionally omitted
 spatial_filter.enable: true
-spatial_filter.filter_magnitude: 1 # WAS 2
+spatial_filter.filter_magnitude: 2
 spatial_filter.filter_smooth_alpha: 0.5
-spatial_filter.filter_smooth_delta: 5 # WAS 9
+spatial_filter.filter_smooth_delta: 9
 spatial_filter.holes_fill: 0          # Persistency mode: Disabled
 
 temporal_filter.enable: true
 temporal_filter.filter_smooth_alpha: 0.7 # EMA smoothing: 1=no filter , 0=infinite history
 temporal_filter.filter_smooth_delta: 35
-temporal_filter.holes_fill: 0         # WAS 3; Persistency mode: Valid in 2/last 4
+temporal_filter.holes_fill: 3 # Persistency mode: Valid in 2/last 4

@@ -1,9 +1,9 @@
 """
 IRB120 Workspace Object Detector — DBSCAN backend
 ==================================================
-Subscribes to a PointCloud2 (by default, the robot-masked, multi-camera-fused
-cloud published by `robot_mask_filter`), crops to the robot workspace, clusters
-remaining points spatially with DBSCAN, then for each object computes:
+Subscribes to one to three raw camera PointCloud2 streams, transforms and
+fuses their latest clouds in `base_link`, crops to the workspace, then clusters
+the remaining points spatially with DBSCAN. For each object it computes:
 
   - 3D convex hull  (vertices + triangular faces)
   - Centroid        (geometry_msgs/Point in base_link)
@@ -24,26 +24,14 @@ geometry by whether it *recurs* across frames, not just by local density
 within one frame. When `accum_frames > 1`, each incoming ROI-cropped frame is
 pushed into a `FrameAccumulator` (see its docstring) and segmentation only
 runs on the fused, persistence-filtered cloud once the sliding window fills.
-Off (`accum_frames = 1`, single-frame, original behaviour) by default,
-including in `perception.launch.py` — do not enable it for continuous
-bringup viewing without reading the next paragraph first.
+The node keeps the original single-frame default for standalone use; the
+offline launch enables a 20-observation / 12-hit consensus window.
 
 Budget for this: the naive estimate is `accum_frames / rate` seconds of
 latency before the first usable detection, using the fused-cloud publish
 rate. That estimate is only as good as your assumption about `rate` —
-`robot_mask_filter` does NOT sustain anywhere near camera rate when run
-continuously (`active_at_start` default): measured live it was ~1-1.5 Hz
-with heavy jitter, not 30-90 Hz, because it's the most expensive node in the
-chain (full-resolution mesh/capsule masking, three cameras, one thread — see
-its own docstring's "On/off gate") and was designed to be toggled on briefly
-per check, not run flat-out. `accum_frames=10` against a wrongly-assumed
-near-camera-rate input once meant 10+ seconds of total silence on
-`~/object_points` in practice — indistinguishable from segmentation being
-broken. Re-measure with `ros2 topic hz <input_cloud_pc topic>` under the
-actual conditions you'll run in before setting this above 1; a short,
-deliberate active window (e.g. around one `press_point_check` call, where a
-several-second wait is expected and budgeted via `timeout_sec`) is a much
-safer place to use it than continuous bringup viewing. While the window is
+With direct camera input, budget roughly `accum_frames / observation-rate`
+before the first result. While the window is
 filling, this node publishes nothing at all (not even an empty detection) on
 `~/object_points`/`~/detections`, so a consumer that reads "the first message
 after activation" (e.g. `press_point_check.check_press_point`) never mistakes
@@ -61,14 +49,13 @@ it on if the workspace is scoped to a single physical item per detection
 cycle — if two genuinely separate objects can share the ROI, this will
 wrongly fuse them into one.
 
-Multi-camera note: this node itself has no camera-count awareness. Point-cloud
-fusion across cameras happens upstream in `robot_mask_filter`, which transforms
-each camera's points into `base_frame` before masking/publishing — this node
-just clusters whatever arrives on `input_cloud_pc` as one cloud. See that
-node's docstring for the fusion details.
+Multi-camera note: optional `input_cloud_pc2` and `input_cloud_pc3` streams
+are individually transformed and cached here; every arrival is clustered with
+the latest cloud from every enabled camera. This targets a static offline
+scene and intentionally avoids a hardware-sync requirement.
 
-Table removal: handled by roi_z_min (set to known table height + margin).
-No RANSAC needed since the table height is fixed.
+Table removal: the ROI makes a coarse crop, then a dominant near-horizontal
+plane is fitted and removed using `table_plane_distance`.
 
 Publishes:
   ~/detections     vision_msgs/Detection3DArray
