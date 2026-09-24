@@ -1,24 +1,9 @@
 """
 SAM backend launch file — for side-by-side comparison against DBSCAN.
 
-Launches ONLY `object_detector_sam`. It does NOT start `robot_mask_filter`
-itself: run `perception.launch.py` first (that's where robot_mask_filter
-comes from, and it already publishes both the DBSCAN-fusion pointcloud and
-the single-camera masked depth image this node needs), then bring this up
-alongside it:
-
-  ros2 launch irb120_perception perception.launch.py
-  ros2 launch irb120_perception perception_sam.launch.py
-
-Two robot_mask_filter instances publishing the same output topics would
-conflict, so this file intentionally does not include one — it only adds the
-second detector.
-
-Both detectors then run against the same masked camera stream, each on its
-own topic namespace (`/object_detector/...` vs `/object_detector_sam/...`),
-so both can be viewed in RViz at once and compared directly on the same
-scene. See object_detector_sam.py's docstring for the model/dependency setup
-this requires (MobileSAM checkpoint + torch/mobile_sam pip packages).
+Launches `object_detector_sam` directly against all configured cameras.
+Offline perception assumes the arm is clear of the workspace, so this launch
+intentionally bypasses `robot_mask_filter`.
 
 Interpreter: this node needs torch/mobile_sam, which live in `~/irb_venv`,
 not in irb120_perception's normal (system-Python) build — `irb120_perception`
@@ -51,12 +36,8 @@ above, which was unbounded thread count running
 forever. Pass `sam_num_threads:=1` to go back to the original conservative
 value if you'd rather not take that reasoning on faith.
 
-Pipeline topology:
-
-  RealSense (cam1) ──▶ robot_mask_filter ──▶ object_detector_sam
-                          ~/depth_masked_sam   (single camera only — see
-                                                 object_detector_sam's
-                                                 docstring, "Status")
+Pipeline topology: each camera supplies synchronized colour + aligned depth;
+SAM runs per camera and merges only matching 3-D instances in base_link.
 """
 
 import os
@@ -72,6 +53,15 @@ VENV_PYTHON = os.path.expanduser('~/irb_venv/bin/python3')
 
 
 def generate_launch_description() -> LaunchDescription:
+    sam_device_arg = DeclareLaunchArgument(
+        'sam_device', default_value='cpu',
+        description="Torch device (use 'cuda' on a machine with a supported NVIDIA GPU).")
+    cam2_color_arg = DeclareLaunchArgument('cam2_color_topic', default_value='/realsense2/color/image_raw')
+    cam2_depth_arg = DeclareLaunchArgument('cam2_depth_topic', default_value='/realsense2/aligned_depth_to_color/image_raw')
+    cam2_info_arg = DeclareLaunchArgument('cam2_camera_info_topic', default_value='/realsense2/color/camera_info')
+    cam3_color_arg = DeclareLaunchArgument('cam3_color_topic', default_value='/realsense3/color/image_raw')
+    cam3_depth_arg = DeclareLaunchArgument('cam3_depth_topic', default_value='/realsense3/aligned_depth_to_color/image_raw')
+    cam3_info_arg = DeclareLaunchArgument('cam3_camera_info_topic', default_value='/realsense3/color/camera_info')
     sam_checkpoint_arg = DeclareLaunchArgument(
         'sam_checkpoint',
         default_value='',
@@ -97,7 +87,7 @@ def generate_launch_description() -> LaunchDescription:
     # tradeoffs before changing them. ----------------------------------------
     points_per_side_arg = DeclareLaunchArgument(
         'points_per_side',
-        default_value='16',
+        default_value='8',
         description=(
             "Side length of the point-prompt grid (total prompts = this^2). "
             "Dominant speed cost — profiled ~linear in points_per_side^2: "
@@ -162,8 +152,14 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             'base_frame':          'base_link',
             'color_topic':         '/realsense/color/image_raw',
-            'depth_topic':         '/robot_mask_filter/depth_masked_sam',
+            'depth_topic':         '/realsense/aligned_depth_to_color/image_raw',
             'camera_info_topic':   '/realsense/color/camera_info',
+            'color_topic2':        LaunchConfiguration('cam2_color_topic'),
+            'depth_topic2':        LaunchConfiguration('cam2_depth_topic'),
+            'camera_info_topic2':  LaunchConfiguration('cam2_camera_info_topic'),
+            'color_topic3':        LaunchConfiguration('cam3_color_topic'),
+            'depth_topic3':        LaunchConfiguration('cam3_depth_topic'),
+            'camera_info_topic3':  LaunchConfiguration('cam3_camera_info_topic'),
             # Same workspace ROI as perception.launch.py's DBSCAN params —
             # keep these two in sync by hand if you retune the workspace box.
             'roi_x_min':  0.15,
@@ -174,7 +170,7 @@ def generate_launch_description() -> LaunchDescription:
             'roi_z_max':  0.50,
             'sam_model_type':  'vit_t',   # MobileSAM — CPU-friendly. 'vit_h' etc. also load, but are impractically slow on CPU.
             'sam_checkpoint':  LaunchConfiguration('sam_checkpoint'),
-            'sam_device':      'cpu',
+            'sam_device':      LaunchConfiguration('sam_device'),
             'points_per_side':  ParameterValue(LaunchConfiguration('points_per_side'), value_type=int),
             'points_per_batch': ParameterValue(LaunchConfiguration('points_per_batch'), value_type=int),
             'min_reseg_interval_sec': ParameterValue(LaunchConfiguration('min_reseg_interval_sec'), value_type=float),
@@ -184,11 +180,19 @@ def generate_launch_description() -> LaunchDescription:
             'min_cluster_pts': 30,
             'max_cluster_pts': 50000,
             'max_depth_gap_ratio': 0.3,
+            'table_plane_distance': 0.008,
             'smooth_alpha': 0.3,
         }, active_param],
     )
 
     return LaunchDescription([
+        sam_device_arg,
+        cam2_color_arg,
+        cam2_depth_arg,
+        cam2_info_arg,
+        cam3_color_arg,
+        cam3_depth_arg,
+        cam3_info_arg,
         sam_checkpoint_arg,
         active_at_start_arg,
         points_per_side_arg,

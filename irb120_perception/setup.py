@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'object_detector_dbscan = irb120_perception.object_detector_dbscan:main',
             'object_detector_sam = irb120_perception.object_detector_sam:main',
+            'object_detector_dbscan_sam_cull = irb120_perception.object_detector_dbscan_sam_cull:main',
             'robot_mask_filter = irb120_perception.robot_mask_filter:main',
             'contact_point_selector = irb120_perception.contact_point_selector:main',
         ],

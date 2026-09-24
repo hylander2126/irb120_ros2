@@ -7,14 +7,16 @@ their 3D convex hulls, centroids, and orientations.
 The independent [contact point selector](CONTACT_SELECTION.md) selects planar
 push, forward-tip and press contacts and estimates tipping axes from object clouds.
 
-Two segmentation backends exist, sharing plumbing (TF, ROI crop, PCA
+Three segmentation backends exist, sharing plumbing (TF, ROI crop, PCA
 orientation, convex hull, Detection3D/marker publishing, EMA smoothing) via
 `perception_common.py` (`ObjectDetectorBase`) so neither duplicates that logic:
 
 - `object_detector_dbscan` — pure geometry, no GPU required, fast.
-- `object_detector_sam` — vision-based (Segment Anything), added to compare
-  against DBSCAN on objects DBSCAN can't segment (touching objects — see
-  below). CPU-only capable but slower; not a replacement for DBSCAN.
+- `object_detector_sam` — full automatic MobileSAM, useful for visual
+  instance-segmentation experiments but expensive on CPU.
+- `object_detector_dbscan_sam_cull` — an offline DBSCAN refinement: one
+  prompted MobileSAM mask from cam1 removes DBSCAN points outside the visual
+  object silhouette.
 
 ---
 
@@ -26,10 +28,10 @@ Clusters the 3D pointcloud spatially using DBSCAN. Works well when objects
 are clearly separated by a gap in 3D space. Requires no GPU and runs in real
 time on CPU.
 
-**Three-camera fusion:** `robot_mask_filter` transforms all three cameras'
-clouds into `base_link` (using the existing eye-to-hand extrinsics),
-robot-masks each, concatenates them, and publishes one fused cloud —
-`object_detector_dbscan` itself has no camera-count awareness. This reduces
+**Three-camera fusion:** `object_detector_dbscan` transforms each raw camera
+cloud into `base_link`, caches the latest cloud per camera, then concatenates
+them before ROI cropping. The offline workflow assumes the arm is clear, so
+`robot_mask_filter` is not part of the default pipeline. This reduces
 occlusion (each camera's viewpoint covers extremities the others miss) and
 increases point density. See [robot_mask_filter's docstring](irb120_perception/robot_mask_filter.py)
 for the fusion details, and [Launching](#launching) to disable fusion for any
@@ -40,7 +42,7 @@ because their points merge into a single cluster with no spatial gap to split
 on — see the SAM backend below for an alternative that doesn't share this
 failure mode.
 
-### SAM (MobileSAM)
+### Automatic SAM (MobileSAM)
 
 Segments the color image with a promptable vision model (Segment Anything,
 "segment everything" mode) instead of clustering 3D points, then back-projects
@@ -60,7 +62,25 @@ incoming frame — see [`object_detector_sam.py`](irb120_perception/object_detec
 docstring for the full design rationale and current limitations (single
 camera only, class-agnostic masks).
 
-Requires pip packages not declared in `package.xml` (not rosdep-known) and a
+The automatic backend runs independently on each configured camera and merges
+matching 3-D instances. It is intentionally an experimental comparison
+backend: automatic point-grid mask generation is slow on CPU.
+
+### DBSCAN → prompted SAM cull
+
+This is the preferred offline path when DBSCAN gets the object broadly right
+but retains a depth-edge/flying-pixel blob. DBSCAN first produces its normal
+object cloud. The culler projects that cloud into cam1, uses its 2-D bounds as
+one MobileSAM box prompt, and retains only DBSCAN points inside the resulting
+mask. It avoids full-image "segment everything" inference; a live run
+measured about 300 ms for DBSCAN plus about 2 s for the cull on CPU.
+
+It is comparison-safe: it never modifies `/object_detector/*` or contact
+selection automatically. Review `/object_detector_dbscan_sam_cull/*` in RViz
+before choosing it for a consumer. It cannot remove a bad depth point that
+falls inside the object's visible 2-D silhouette from cam1.
+
+SAM variants require pip packages not declared in `package.xml` (not rosdep-known) and a
 downloaded checkpoint — see that module's docstring for exact commands
 before trying to run it.
 

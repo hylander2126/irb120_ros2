@@ -59,16 +59,16 @@ DEFAULT_TIMEOUT    = 5.0   # s, how long to wait for one ~/object_points message
 # transformed before it is compared with a world-frame hardcoded position.
 COMPARE_FRAME = 'world'
 
-# robot_mask_filter + object_detector are compute-heavy (point cloud math every
+# The object detector is compute-heavy (point cloud math every
 # frame, or a full SAM pass) but only actually needed for the moment it takes
 # to run this check — the robot is still clear of the object at this point in
 # every caller's sequence. Activate for the duration of the check, then idle
 # again immediately after, pass or fail.
-_PERCEPTION_ACTIVE_SERVICES = ('/robot_mask_filter/set_active', '/object_detector/set_active')
+_PERCEPTION_ACTIVE_SERVICES = ('/object_detector/set_active',)
 
 
 def _set_perception_active(node, active: bool, timeout_sec: float = 3.0) -> None:
-    """Best-effort toggle of robot_mask_filter + object_detector's on/off gate.
+    """Best-effort toggle of object_detector's on/off gate.
 
     Never raises — a missing or slow service just logs a warning and moves on;
     this is a compute-saving optimization, not something the check's safety

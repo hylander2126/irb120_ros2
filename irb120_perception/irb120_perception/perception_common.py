@@ -89,6 +89,56 @@ def apply_tf(pts: np.ndarray, tf) -> np.ndarray:
     return (R @ pts.T).T + np.array([t.x, t.y, t.z])
 
 
+def fit_dominant_horizontal_plane(pts: np.ndarray, distance: float = 0.008,
+                                  min_inliers: int = 200):
+    """Fit the dominant near-horizontal plane with deterministic RANSAC.
+
+    Returns ``(normal, offset)`` for ``normal.dot(point) + offset == 0``, or
+    ``None`` when no credible tabletop is present.  Constraining the normal to
+    base-frame Z prevents a large vertical object face from being mistaken for
+    the table.
+    """
+    if len(pts) < 3:
+        return None
+    sample = pts
+    if len(sample) > 20000:
+        sample = sample[np.random.default_rng(0).choice(len(sample), 20000, replace=False)]
+    rng = np.random.default_rng(1)
+    best = None
+    best_count = 0
+    for _ in range(128):
+        a, b, c = sample[rng.choice(len(sample), 3, replace=False)]
+        normal = np.cross(b - a, c - a)
+        length = np.linalg.norm(normal)
+        if length < 1e-8:
+            continue
+        normal /= length
+        if abs(normal[2]) < 0.85:
+            continue
+        offset = -float(normal @ a)
+        inliers = np.abs(sample @ normal + offset) <= distance
+        count = int(inliers.sum())
+        if count > best_count:
+            best_count, best = count, inliers
+    if best is None or best_count < min_inliers:
+        return None
+    inlier_pts = sample[best]
+    centroid = inlier_pts.mean(axis=0)
+    _, _, vh = np.linalg.svd(inlier_pts - centroid, full_matrices=False)
+    normal = vh[-1]
+    if normal[2] < 0:
+        normal = -normal
+    return normal, -float(normal @ centroid)
+
+
+def remove_plane(pts: np.ndarray, plane, distance: float) -> np.ndarray:
+    """Return points farther than ``distance`` from a fitted plane."""
+    if plane is None or len(pts) == 0:
+        return pts
+    normal, offset = plane
+    return pts[np.abs(pts @ normal + offset) > distance]
+
+
 def rotation_to_quaternion(R: np.ndarray):
     """3×3 rotation matrix → (x,y,z,w) quaternion."""
     # Shepperd's method: branch on the largest diagonal element to avoid
@@ -593,8 +643,11 @@ class ObjectDetectorBase(Node):
         for tri in tris:
             for i in range(3):
                 a, b = verts[tri[i]], verts[tri[(i+1)%3]]
-                m.points.append(Point(x=a[0], y=a[1], z=a[2]))
-                m.points.append(Point(x=b[0], y=b[1], z=b[2]))
+                # rosidl_generator_py accepts built-in Python floats here,
+                # not NumPy scalar types (which otherwise abort the process
+                # in geometry_msgs__msg__point__convert_from_py).
+                m.points.append(Point(x=float(a[0]), y=float(a[1]), z=float(a[2])))
+                m.points.append(Point(x=float(b[0]), y=float(b[1]), z=float(b[2])))
         return m
 
     def _mk_centroid(self, obj_id, stamp, frame, centroid, color):

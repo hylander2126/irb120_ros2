@@ -92,7 +92,7 @@ from sklearn.cluster import DBSCAN
 
 from irb120_perception.perception_common import (
     FrameAccumulator, ObjectDetectorBase, apply_tf, pointcloud2_to_xyz,
-    remove_sparse_outliers, voxel_downsample,
+    fit_dominant_horizontal_plane, remove_plane, remove_sparse_outliers, voxel_downsample,
 )
 
 
@@ -103,6 +103,12 @@ class DBSCANObjectDetector(ObjectDetectorBase):
 
         # ---- DBSCAN-specific parameters ---------------------------------------
         self.declare_parameter('input_cloud_pc', '/realsense/depth/color/points')
+        # Optional raw cameras.  Unlike the historical masked input, these are
+        # fused here after their individual TF transforms; no robot masking is
+        # performed.  Keeping this in the detector makes the mask filter an
+        # optional, separate safety tool rather than a pipeline dependency.
+        self.declare_parameter('input_cloud_pc2', '')
+        self.declare_parameter('input_cloud_pc3', '')
         self.declare_parameter('dbscan_eps',      0.02)
         self.declare_parameter('dbscan_min_pts',  20)
         self.declare_parameter('min_cluster_pts', 30)
@@ -110,6 +116,7 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.declare_parameter('single_object_mode', True)
         self.declare_parameter('outlier_k',         8)    # neighbours sampled per point for local-density check
         self.declare_parameter('outlier_std_ratio', 2.0)  # 0 disables the check
+        self.declare_parameter('table_plane_distance', 0.008)
         self.declare_parameter('accum_frames',   1)  # sliding-window length; 1 = off (single-frame, original behaviour)
         self.declare_parameter('accum_min_hits', 0)  # min distinct frames a voxel must appear in; 0 = auto (~60% of accum_frames)
 
@@ -121,6 +128,7 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.single_object_mode = p('single_object_mode').value
         self.outlier_k          = p('outlier_k').value
         self.outlier_std_ratio  = p('outlier_std_ratio').value
+        self.table_plane_distance = p('table_plane_distance').value
 
         accum_frames = int(p('accum_frames').value)
         if accum_frames > 1:
@@ -139,8 +147,17 @@ class DBSCANObjectDetector(ObjectDetectorBase):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        self._camera_clouds = {}
         self.create_subscription(
-            PointCloud2, p('input_cloud_pc').value, self._cloud_cb, sensor_qos)
+            PointCloud2, p('input_cloud_pc').value,
+            lambda msg: self._cloud_cb(msg, 'cam1'), sensor_qos)
+        for slot, parameter in (('cam2', 'input_cloud_pc2'), ('cam3', 'input_cloud_pc3')):
+            topic = p(parameter).value
+            if topic:
+                self.create_subscription(
+                    PointCloud2, topic,
+                    lambda msg, s=slot: self._cloud_cb(msg, s), sensor_qos)
+                self.get_logger().info(f'Raw multi-camera fusion enabled — {slot}: {topic}')
         self.get_logger().info('object_detector ready [DBSCAN]')
 
     # -------------------------------------------------------------------------
@@ -152,8 +169,9 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         # was active (a different object, or the same object before it moved).
         if self._accumulator is not None:
             self._accumulator.reset()
+        self._camera_clouds.clear()
 
-    def _cloud_cb(self, msg: PointCloud2):
+    def _cloud_cb(self, msg: PointCloud2, slot='cam1'):
         """Receives a PointCloud2 (possibly multi-camera fused), transforms to
         base_link if needed, crops to the workspace ROI, and segments."""
         if not self._active:
@@ -186,7 +204,17 @@ class DBSCANObjectDetector(ObjectDetectorBase):
             (pts_base[:,1] >= m['y'][0]) & (pts_base[:,1] <= m['y'][1]) &
             (pts_base[:,2] >= m['z'][0]) & (pts_base[:,2] <= m['z'][1])
         )
-        pts_roi = pts_base[mask]
+        self._camera_clouds[slot] = pts_base[mask]
+        # The scene is static during offline perception, so reusing the most
+        # recent cloud from each camera avoids a hardware-sync requirement.
+        pts_roi = np.concatenate(list(self._camera_clouds.values()), axis=0)
+
+        # Plane rejection happens before downsampling/DBSCAN, so table points
+        # cannot chain a flying-pixel island into a real object cluster.
+        plane = fit_dominant_horizontal_plane(
+            pts_roi, distance=self.table_plane_distance)
+        if plane is not None:
+            pts_roi = remove_plane(pts_roi, plane, self.table_plane_distance)
 
         if self._accumulator is not None:
             fused = self._accumulator.add(pts_roi)

@@ -146,11 +146,14 @@ import time
 
 import numpy as np
 import rclpy
+import message_filters
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from sensor_msgs.msg import Image, CameraInfo
 
-from irb120_perception.perception_common import ObjectDetectorBase, apply_tf
+from irb120_perception.perception_common import (
+    ObjectDetectorBase, apply_tf, fit_dominant_horizontal_plane, remove_plane,
+)
 
 try:
     from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
@@ -190,8 +193,15 @@ class SAMObjectDetector(ObjectDetectorBase):
 
         # ---- SAM-specific parameters -------------------------------------
         self.declare_parameter('color_topic', '/realsense/color/image_raw')
-        self.declare_parameter('depth_topic', '/robot_mask_filter/depth_masked_sam')
+        self.declare_parameter('depth_topic', '/realsense/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/realsense/color/camera_info')
+        self.declare_parameter('color_topic2', '')
+        self.declare_parameter('depth_topic2', '')
+        self.declare_parameter('camera_info_topic2', '')
+        self.declare_parameter('color_topic3', '')
+        self.declare_parameter('depth_topic3', '')
+        self.declare_parameter('camera_info_topic3', '')
+        self.declare_parameter('sync_slop_sec', 0.08)
         self.declare_parameter('sam_model_type', 'vit_t')  # 'vit_t' = MobileSAM; 'vit_b'/'vit_l'/'vit_h' = full SAM (too slow on CPU)
         self.declare_parameter('sam_checkpoint', '')        # path to .pt/.pth checkpoint; required
         self.declare_parameter('sam_device', 'cpu')
@@ -203,6 +213,7 @@ class SAMObjectDetector(ObjectDetectorBase):
         self.declare_parameter('min_cluster_pts', 30)          # post-back-projection — same meaning as DBSCAN's
         self.declare_parameter('max_cluster_pts', 50000)
         self.declare_parameter('max_depth_gap_ratio', 0.3)    # drop a mask if more than this fraction of its pixels have invalid/masked depth
+        self.declare_parameter('table_plane_distance', 0.008) # remove table pixels retained by a 2-D SAM mask
         self.declare_parameter('min_reseg_interval_sec', 5.0)  # throttle, not a one-shot — see this module's docstring
 
         p = self.get_parameter
@@ -220,11 +231,11 @@ class SAMObjectDetector(ObjectDetectorBase):
         self.min_pts             = p('min_cluster_pts').value
         self.max_pts             = p('max_cluster_pts').value
         self.max_depth_gap_ratio = p('max_depth_gap_ratio').value
+        self.table_plane_distance = p('table_plane_distance').value
         self.min_reseg_interval_sec = p('min_reseg_interval_sec').value
 
         self._mask_generator = None
-        self._cam_info = None
-        self._latest_color = None
+        self._cameras = {}
         self._last_run_end_time = None  # time.monotonic() of the last completed run, or None if never run
 
         if _SAM_IMPORT_ERROR is not None:
@@ -245,9 +256,16 @@ class SAMObjectDetector(ObjectDetectorBase):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        self.create_subscription(Image, self.color_topic, self._color_cb, sensor_qos)
-        self.create_subscription(Image, self.depth_topic, self._depth_cb, sensor_qos)
-        self.create_subscription(CameraInfo, self.camera_info_topic, self._cam_info_cb, sensor_qos)
+        self._add_camera('cam1', self.color_topic, self.depth_topic,
+                         self.camera_info_topic, sensor_qos)
+        for slot, suffix in (('cam2', '2'), ('cam3', '3')):
+            color = p(f'color_topic{suffix}').value
+            depth = p(f'depth_topic{suffix}').value
+            info = p(f'camera_info_topic{suffix}').value
+            if any((color, depth, info)):
+                if not all((color, depth, info)):
+                    raise ValueError(f'{slot} requires color, depth, and camera-info topics together')
+                self._add_camera(slot, color, depth, info, sensor_qos)
         self.get_logger().info(
             'object_detector_sam ready [SAM]' +
             ('' if self._mask_generator is not None else ' (model NOT loaded — see error above)'))
@@ -276,52 +294,107 @@ class SAMObjectDetector(ObjectDetectorBase):
             f'Loaded SAM model type={self.sam_model_type} device={self.sam_device} '
             f'checkpoint={self.sam_checkpoint}')
 
-    def _cam_info_cb(self, msg: CameraInfo):
-        self._cam_info = msg
+    def _add_camera(self, slot, color_topic, depth_topic, info_topic, sensor_qos):
+        """Register a camera with colour/depth timestamp synchronization."""
+        state = {'info': None, 'pair': None}
+        self._cameras[slot] = state
+        self.create_subscription(
+            CameraInfo, info_topic,
+            lambda msg, s=slot: self._camera_info_cb(s, msg), sensor_qos)
+        color_sub = message_filters.Subscriber(
+            self, Image, color_topic, qos_profile=sensor_qos)
+        depth_sub = message_filters.Subscriber(
+            self, Image, depth_topic, qos_profile=sensor_qos)
+        sync = message_filters.ApproximateTimeSynchronizer(
+            [color_sub, depth_sub], queue_size=3,
+            slop=float(self.get_parameter('sync_slop_sec').value))
+        sync.registerCallback(lambda color, depth, s=slot: self._image_pair_cb(s, color, depth))
+        # Keep strong references: otherwise message_filters subscriptions can
+        # be garbage-collected even though their callbacks were registered.
+        state['subscriptions'] = (color_sub, depth_sub, sync)
+        self.get_logger().info(f'SAM camera enabled — {slot}: {color_topic}')
 
-    def _color_cb(self, msg: Image):
-        # Just cached — _depth_cb (the higher-rate, always-arriving stream
-        # while robot_mask_filter is active) is what actually triggers a run.
-        self._latest_color = msg
+    def _camera_info_cb(self, slot, msg):
+        self._cameras[slot]['info'] = msg
 
-    def _depth_cb(self, msg: Image):
+    def _image_pair_cb(self, slot, color, depth):
+        self._cameras[slot]['pair'] = (color, depth)
         if not self._active:
             return
         now = time.monotonic()
         if self._last_run_end_time is not None and (now - self._last_run_end_time) < self.min_reseg_interval_sec:
             return
-        if self._mask_generator is None or self._cam_info is None or self._latest_color is None:
+        if self._mask_generator is None:
+            return
+        snapshots = [(name, state['pair'][0], state['pair'][1], state['info'])
+                     for name, state in self._cameras.items()
+                     if state['pair'] is not None and state['info'] is not None]
+        if not snapshots:
             return
         # Claim this throttle window immediately, even if segmentation below
         # fails partway — otherwise a transient TF failure would retry a
         # multi-second SAM pass on every subsequent ~33ms depth frame instead
         # of waiting out min_reseg_interval_sec like everything else does.
         self._last_run_end_time = now
-        self._segment_and_publish(self._latest_color, msg, self._cam_info)
+        self._segment_and_publish(snapshots)
 
     # -------------------------------------------------------------------------
 
-    def _segment_and_publish(self, color_msg: Image, depth_msg: Image, info_msg: CameraInfo):
+    def _segment_and_publish(self, snapshots):
         t0 = time.monotonic()
 
-        try:
-            color = _image_to_rgb(color_msg)
-        except ValueError as e:
-            self.get_logger().error(str(e))
-            return
-        depth = _image_to_depth_m(depth_msg)
+        clusters = []
+        raw_mask_count = 0
+        header = snapshots[0][2].header
+        for slot, color_msg, depth_msg, info_msg in snapshots:
+            try:
+                color = _image_to_rgb(color_msg)
+            except ValueError as e:
+                self.get_logger().error(f'{slot}: {e}')
+                continue
+            depth = _image_to_depth_m(depth_msg)
+            if color.shape[:2] != depth.shape:
+                self.get_logger().warn(f'{slot}: color/depth dimensions differ; skipping pair')
+                continue
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self.base_frame, depth_msg.header.frame_id,
+                    rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=0.5))
+            except Exception as e:
+                self.get_logger().warn(f'{slot}: TF lookup failed: {e}')
+                continue
+            masks = self._mask_generator.generate(color)
+            raw_mask_count += len(masks)
+            clusters.extend(self._masks_to_clusters(masks, depth, info_msg, tf))
 
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.base_frame, depth_msg.header.frame_id,
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.5))
-        except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}')
-            return
+        # SAM masks are 2-D regions and commonly include the table touching an
+        # object.  Estimate the shared horizontal support plane in 3-D, then
+        # remove it before instance association.  This is intentionally after
+        # SAM: a mask can still trace the object's visual boundary precisely.
+        plane_samples = (np.concatenate(clusters, axis=0) if clusters else
+                         np.empty((0, 3), dtype=np.float32))
+        plane = fit_dominant_horizontal_plane(
+            plane_samples, distance=self.table_plane_distance)
+        if plane is not None:
+            clusters = [remove_plane(c, plane, self.table_plane_distance)
+                        for c in clusters]
+            clusters = [c for c in clusters if self.min_pts <= len(c) <= self.max_pts]
+        clusters = self._fuse_camera_instances(clusters)
+        header.frame_id = self.base_frame
 
-        masks = self._mask_generator.generate(color)  # list of dicts, each with a bool HxW 'segmentation'
+        if not clusters:
+            self._reset_smoothing()
+            self._publish_empty(header)
+        else:
+            self._publish_results(header, clusters)
 
+        dt = (time.monotonic() - t0) * 1000
+        self.get_logger().info(
+            f'{len(clusters)} object(s) [SAM] in {dt:.0f} ms '
+            f'({raw_mask_count} raw masks, {len(snapshots)} camera(s))')
+
+    def _masks_to_clusters(self, masks, depth, info_msg, tf):
+        """Back-project one camera's SAM masks into base_link."""
         fx, fy, cx, cy = info_msg.k[0], info_msg.k[4], info_msg.k[2], info_msg.k[5]
         m = self.roi
         clusters = []
@@ -352,19 +425,30 @@ class SAMObjectDetector(ObjectDetectorBase):
             pts_base = pts_base[in_roi]
             if self.min_pts <= len(pts_base) <= self.max_pts:
                 clusters.append(pts_base)
+        return clusters
 
-        header = depth_msg.header
-        header.frame_id = self.base_frame
+    @staticmethod
+    def _fuse_camera_instances(clusters):
+        """Fuse only instances whose 3-D AABBs materially overlap.
 
-        if not clusters:
-            self._reset_smoothing()
-            self._publish_empty(header)
-        else:
-            self._publish_results(header, clusters)
-
-        dt = (time.monotonic() - t0) * 1000
-        self.get_logger().info(
-            f'{len(clusters)} object(s) [SAM] in {dt:.0f} ms ({len(masks)} raw masks)')
+        This deliberately does not use DBSCAN: spatial clustering at this
+        stage would again join two touching SAM instances.  AABB IoU is a
+        conservative cross-view identity test for the static tabletop scene.
+        """
+        fused = []
+        for cluster in clusters:
+            lo, hi = cluster.min(axis=0), cluster.max(axis=0)
+            for i, existing in enumerate(fused):
+                e_lo, e_hi = existing.min(axis=0), existing.max(axis=0)
+                inter = np.maximum(0.0, np.minimum(hi, e_hi) - np.maximum(lo, e_lo))
+                inter_vol = float(np.prod(inter))
+                union = float(np.prod(hi - lo) + np.prod(e_hi - e_lo) - inter_vol)
+                if union > 0.0 and inter_vol / union >= 0.15:
+                    fused[i] = np.concatenate((existing, cluster), axis=0)
+                    break
+            else:
+                fused.append(cluster)
+        return fused
 
 
 # ---------------------------------------------------------------------------

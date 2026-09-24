@@ -8,6 +8,7 @@ from moveit_configs_utils import MoveItConfigsBuilder
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    GroupAction,
     IncludeLaunchDescription,
     TimerAction,
 )
@@ -105,6 +106,18 @@ def generate_launch_description():
                 PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam3.launch.py"])
             )
         )
+
+    # rs_launch.py declares every RealSense driver parameter.  A normal nested
+    # include makes all of those implementation details appear in this
+    # top-level launch's `--show-args` output, and forwards unrelated launch
+    # configurations into rs_launch's validation loop.  The camera wrappers
+    # already supply every setting they require, so isolate this private
+    # implementation scope instead of exposing its arguments as our API.
+    camera_bringup_group = GroupAction(
+        actions=[bringup_cam1, bringup_cam2, bringup_cam3],
+        scoped=True,
+        forwarding=False,
+    )
 
     perception_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -243,7 +256,7 @@ def generate_launch_description():
         'perception_active_at_start',
         default_value='true',
         description=(
-            'Whether robot_mask_filter + object_detector start out processing '
+            'Whether object_detector starts out processing '
             'immediately (default) or idle until the first check_press_point() '
             'call activates them — see irb120_perception/perception.launch.py.'
         ),
@@ -258,9 +271,7 @@ def generate_launch_description():
 
         move_group_node,
         rviz_node,
-        bringup_cam1,
-        bringup_cam2,
-        bringup_cam3,
+        camera_bringup_group,
         perception_launch,
         net_ft_node,
         netft_preprocessor_node,

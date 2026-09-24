@@ -17,13 +17,13 @@ detections in RViz without running a control script):
 Pipeline topology:
 
   RealSense (cam1) ──┐
-  RealSense (cam2) ──┼──▶ robot_mask_filter ──▶ object_detector_dbscan
-  RealSense (cam3) ──┘        ~/points_masked_dbscan  (all three cameras fused)
+  RealSense (cam2) ──┼──▶ object_detector_dbscan (raw clouds fused in-node)
+  RealSense (cam3) ──┘
 
-  robot_mask_filter fuses all three cameras' point clouds (see its own
-  docstring) to reduce occlusion and increase point density. Set
-  cam2_cloud_topic:='' / cam3_cloud_topic:='' to disable fusion for that
-  camera individually.
+The robot is deliberately out of the workspace for offline perception, so
+the mask filter is not launched here.  Its executable and logic remain
+available for workflows that need it. Set cam2_cloud_topic:='' /
+cam3_cloud_topic:='' to disable an individual camera.
 """
 
 from launch import LaunchDescription
@@ -32,17 +32,12 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-# Masked topic published by robot_mask_filter
-MASKED_CLOUD = '/robot_mask_filter/points_masked_dbscan'
-
-
 def generate_launch_description() -> LaunchDescription:
     cam2_cloud_arg = DeclareLaunchArgument(
         'cam2_cloud_topic',
         default_value='/realsense2/depth/color/points',
         description=(
-            "Second camera's point cloud, fused into the DBSCAN input by "
-            "robot_mask_filter. Set to '' to disable fusion for this camera."
+            "Second raw camera cloud, fused by object_detector. Set to '' to disable it."
         ),
     )
 
@@ -50,8 +45,7 @@ def generate_launch_description() -> LaunchDescription:
         'cam3_cloud_topic',
         default_value='/realsense3/depth/color/points',
         description=(
-            "Third camera's point cloud, fused into the DBSCAN input by "
-            "robot_mask_filter. Set to '' to disable fusion for this camera."
+            "Third raw camera cloud, fused by object_detector. Set to '' to disable it."
         ),
     )
 
@@ -59,39 +53,18 @@ def generate_launch_description() -> LaunchDescription:
         'active_at_start',
         default_value='true',
         description=(
-            "Whether robot_mask_filter + object_detector start out processing "
+            "Whether object_detector starts out processing "
             "immediately (default, matches historical always-on behaviour) or "
             "idle until the first check_press_point() call activates them."
         ),
     )
     active_param = {'active': ParameterValue(LaunchConfiguration('active_at_start'), value_type=bool)}
 
-    # ---- Robot mask filter ---------------------------------------------------
-    mask_filter_node = Node(
-        package='irb120_perception',
-        executable='robot_mask_filter',
-        name='robot_mask_filter',
-        output='screen',
-        parameters=[{
-            'base_frame':  'base_link',
-            'input_cloud': '/realsense/depth/color/points',
-            'input_cloud2': LaunchConfiguration('cam2_cloud_topic'),
-            'input_cloud3': LaunchConfiguration('cam3_cloud_topic'),
-            'input_depth': '/realsense/aligned_depth_to_color/image_raw',
-            'camera_info': '/realsense/color/camera_info',
-            'robot_mask_padding': 0.08,  # arm mesh links — increase if arm still leaks through
-            # Capsule segments (wrist sensor stack + finger) are fixed in
-            # RobotMaskFilter.CAPSULE_SEGMENTS, not a launch param — see that
-            # node's docstring. (A 'robot_mask_capsules' key used to be passed
-            # here, but the node never declared/read it — dead config left
-            # over from before the finger/sensor assembly was rebuilt, and it
-            # still named the now-nonexistent ft_link/finger_link frames.)
-        }, active_param],
-    )
-
-    # ---- DBSCAN parameters — reads from masked, camera-fused pointcloud -----
+    # ---- DBSCAN parameters — reads raw, camera-fused pointclouds ------------
     dbscan_params = {
-        'input_cloud_pc':      MASKED_CLOUD,
+        'input_cloud_pc':      '/realsense/depth/color/points',
+        'input_cloud_pc2':     LaunchConfiguration('cam2_cloud_topic'),
+        'input_cloud_pc3':     LaunchConfiguration('cam3_cloud_topic'),
         'base_frame':          'base_link',
         'roi_x_min':  0.15,
         'roi_x_max':  0.80,
@@ -106,26 +79,14 @@ def generate_launch_description() -> LaunchDescription:
         'max_cluster_pts': 50000,
         'outlier_k':          8,    # neighbours sampled per point for local-density check
         'outlier_std_ratio':  2.0,  # 0 disables; lower = more aggressive stray-point removal
-        # Off (1) by default. Would fuse this many recent frames via
-        # voxel-occupancy consensus before clustering (see
-        # object_detector_dbscan's docstring, "Temporal accumulation") — but
-        # the naive latency estimate of accum_frames/publish_rate assumed
-        # robot_mask_filter sustains something near camera rate (30-90 Hz).
-        # Measured live instead: robot_mask_filter running continuously
-        # (active_at_start default) sustains only ~1-1.5 Hz with heavy
-        # jitter — it's the most expensive node in the chain (full-resolution
-        # mesh/capsule masking on every point, three cameras, one thread) and
-        # was never meant to run flat-out continuously, see its own
-        # docstring's "On/off gate". At that real rate, accum_frames=10 means
-        # 10+ seconds of total silence on ~/object_points before the first
-        # detection — looks exactly like segmentation being broken. Only
-        # raise this for a short, deliberate active window (e.g. around one
-        # press_point_check call) where you can afford to wait and know the
-        # input rate for that window; do not raise it for continuous bringup
-        # viewing without re-measuring `ros2 topic hz
-        # /robot_mask_filter/points_masked_dbscan` first.
-        'accum_frames':     1,
-        'accum_min_hits':   0,  # 0 = auto (~60% of accum_frames)
+        'table_plane_distance': 0.008,  # reject tabletop before DBSCAN can bridge through it
+        # Offline contact selection has a stationary scene. Keep a voxel only
+        # when it recurs in 12 of the last 20 fused observations: this removes
+        # edge flicker and free-space specks that survive one-frame density
+        # filtering. At normal direct-camera rates this warm-up is well below
+        # the contact-check timeout; increase either value only if needed.
+        'accum_frames':     20,
+        'accum_min_hits':   12,
         'smooth_alpha':    0.3,
         # Union all surviving clusters into one object — only safe if the
         # workspace is scoped to a single physical item per detection cycle.
@@ -151,6 +112,5 @@ def generate_launch_description() -> LaunchDescription:
         cam2_cloud_arg,
         cam3_cloud_arg,
         active_at_start_arg,
-        mask_filter_node,
         dbscan_node,
     ])

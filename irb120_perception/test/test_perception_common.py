@@ -3,7 +3,21 @@
 import numpy as np
 import pytest
 
-from irb120_perception.perception_common import FrameAccumulator
+from irb120_perception.perception_common import (
+    FrameAccumulator, fit_dominant_horizontal_plane, remove_plane,
+)
+
+
+def test_horizontal_table_plane_is_removed_without_removing_object_points():
+    grid = np.stack(np.meshgrid(np.linspace(0.15, 0.8, 30),
+                                np.linspace(-0.25, 0.25, 30)), axis=-1).reshape(-1, 2)
+    table = np.column_stack((grid, -0.02 + 0.01 * grid[:, 0]))
+    object_pts = np.array([[0.45, 0.0, 0.08], [0.46, 0.01, 0.10]])
+    points = np.concatenate((table, object_pts))
+    plane = fit_dominant_horizontal_plane(points, distance=0.003)
+    assert plane is not None
+    kept = remove_plane(points, plane, 0.003)
+    np.testing.assert_allclose(kept, object_pts, atol=1e-6)
 
 
 def test_warms_up_before_returning_a_result():
