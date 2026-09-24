@@ -102,15 +102,24 @@ Section IV-C is not implemented: the script reports candidates for all modes.
   additionally excludes tangential/top contacts that cannot provide a side push.
 - **Press:** use the same score for the estimated pull geometry, normal tolerance
   0.1, and upward-facing surfaces. Inset the feasible top region's XY convex hull
-  by `press_inset`, then retain points within 3 mm of the best remaining **pull**
-  moment arm. Among that band, evaluate the downward contact-establishing press
-  as `axis · ((point - pivot) × [0, 0, -1])` and retain the least anti-tipping
-  band. For an extended support edge, retain the candidate closest to that
-  edge's midpoint **along the edge direction**; this centers the press without
-  assuming a world-frame Y coordinate. This makes nominally flat tops prefer
-  the centered pivot-side edge rather than a slightly taller noisy interior or
-  corner point, without sacrificing pull moment beyond the 3 mm tolerance. The
-  inset is a simple heuristic for contact-patch room.
+  by `press_inset`, then **double-score** the remaining candidates: (1) the pull
+  moment arm (`scores`, height above the pivot — maximize, i.e. favor the top of
+  the object) combined with (2) the anti-tipping moment arm, `axis · ((point -
+  pivot) × [0, 0, -1])` — how far "inboard" of the pivot edge the point sits
+  along the pull direction (minimize, i.e. favor points near the edge, since the
+  object's own mass between the pivot and the contact resists tipping over that
+  edge). These are summed (weighted by `press_pivot_weight`, default `1.0`) into
+  one combined score and the band within 3 mm of its max is retained — a single
+  weighted score, not a height-first filter with pivot-proximity as a subordinate
+  tie-break. That distinction matters: a strict height-first filter can exclude
+  every true near-edge point once a noisy high point elsewhere on the top sits
+  more than 3 mm above them, even though the near-edge point is the physically
+  better contact; the combined score lets pivot-proximity outweigh a height
+  deficit larger than the 3 mm tolerance instead of being blocked from
+  competing at all. For an extended support edge, retain the candidate closest
+  to that edge's midpoint **along the edge direction**; this centers the press
+  without assuming a world-frame Y coordinate. The inset is a simple heuristic
+  for contact-patch room.
 
 Every mode returns `available`, `point`, `normal`, `ball_center`, and `score` when
 successful. For press, `score` is the pull moment and `press_score` is the signed
@@ -161,12 +170,13 @@ standoff, not ball center plus standoff. The calibrated controller motion target
 is unchanged. An unavailable press selection fails the check with its reason and
 candidate counts; there is no fallback to the old heuristic.
 
-The legacy `press_point_selector.py` and executable remain available for explicit
-compatibility use, but are no longer imported by the active press check. Their
-nearest-X preference differs from the new inset/median choice. Existing calibrated
-poses may therefore pass or fail differently, and missing support/top observations
-can now fail the check rather than produce a height-only estimate. This migration
-changes the estimator, not the check into a motion-target generator.
+The legacy `press_point_selector.py` and executable have been removed — it was
+no longer imported by the active press check, and its nearest-X preference
+differed from the new inset/median choice. Existing calibrated poses may
+therefore pass or fail differently than they did under the old estimator, and
+missing support/top observations can now fail the check rather than produce a
+height-only estimate. This migration changes the estimator, not the check into
+a motion-target generator.
 
 The new forward-tip axis remains an unverified partial-cloud hypothesis with the
 current camera layout. No far-axis estimate is used to command motion by this check.

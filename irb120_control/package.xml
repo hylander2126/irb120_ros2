@@ -39,7 +39,7 @@
   <depend>abb_robot_msgs</depend>
   <depend>ros2_control</depend>
   <depend>ros2_controllers</depend>
-  <depend>irb120_perception</depend>  <!-- select_press_point, for press_point_check -->
+  <depend>irb120_perception</depend>  <!-- select_contact_points, for press_point_check -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

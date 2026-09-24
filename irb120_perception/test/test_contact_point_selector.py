@@ -158,6 +158,43 @@ def test_press_prefers_edgeward_contact_despite_flat_top_height_noise():
     assert press['along_edge_offset'] == pytest.approx(0.)
 
 
+def test_press_double_scoring_favors_edge_over_noisy_interior_high_point():
+    """A depth-noise bump *larger* than score_tolerance, sitting away from the
+    pivot edge, must not steal the press point from the true near-edge
+    contact. A height-only filter (the old sequential behaviour) would
+    exclude every near-edge point once it falls more than score_tolerance
+    below the bump, leaving only the bump itself as a candidate -- exactly
+    the real-world failure this double-scoring heuristic fixes: the pull
+    moment-arm term alone can't tell a noisy interior high point from a
+    real one, but the pivot-proximity term decisively prefers the edge."""
+    points, normals = box()
+    top = normals[:, 2] > 0.7
+    # 1 cm bump at the top's centre (X=0.55) -- more than 3x score_tolerance,
+    # would fully exclude the X=0.505 edge points under height-only banding.
+    noisy_bump = top & np.isclose(points[:, 0], 0.55)
+    points[noisy_bump, 2] += 0.01
+    press = select_contact_points(points, normals=normals, table_z=0.)['press']
+    assert press['available']
+    assert press['point'][0] == pytest.approx(0.505)
+    assert press['point'][1] == pytest.approx(0.)
+    assert press['score'] == pytest.approx(0.2)
+    assert press['press_score'] == pytest.approx(-0.005)
+
+
+def test_press_pivot_weight_zero_reduces_to_pull_moment_only():
+    """press_pivot_weight=0 disables the pivot-proximity term entirely, so a
+    tall-enough noisy interior bump *does* win -- confirms the double-score
+    is actually doing the work in the test above, not some other filter."""
+    points, normals = box()
+    top = normals[:, 2] > 0.7
+    noisy_bump = top & np.isclose(points[:, 0], 0.55)
+    points[noisy_bump, 2] += 0.01
+    press = select_contact_points(
+        points, normals=normals, table_z=0., press_pivot_weight=0.)['press']
+    assert press['available']
+    assert press['point'][0] == pytest.approx(0.55)
+
+
 def test_press_failure_names_rejecting_filter():
     points, normals = box()
     side = normals[:, 2] == 0

@@ -35,27 +35,29 @@ Operates on both streams in parallel:
     in:  /realsense/aligned_depth_to_color/image_raw  +  color/camera_info
     out: ~/depth_masked_sam   (16UC1, masked pixels set to 0)
 
-Two-camera fusion (PointCloud2 path only):
-  When `input_cloud2` is set (non-empty), this node is also where the two
-  cameras' point clouds get fused for the DBSCAN backend. Each camera's cloud
-  is transformed into `base_frame` independently (accurate extrinsics assumed
-  — no ICP/registration refinement is done here), robot-masked using the same
-  camera-agnostic mesh/capsule test, then concatenated and published as one
-  cloud on ~/points_masked_dbscan — already in `base_frame`, not the original
-  camera-optical frame. `object_detector_dbscan` downstream is completely
-  unaware there were two cameras; it just clusters whatever cloud arrives.
+Multi-camera fusion (PointCloud2 path only):
+  When `input_cloud2` and/or `input_cloud3` are set (non-empty), this node is
+  also where the cameras' point clouds get fused for the DBSCAN backend. Each
+  camera's cloud is transformed into `base_frame` independently (accurate
+  extrinsics assumed — no ICP/registration refinement is done here),
+  robot-masked using the same camera-agnostic mesh/capsule test, then
+  concatenated and published as one cloud on ~/points_masked_dbscan — already
+  in `base_frame`, not the original camera-optical frame. `object_detector_dbscan`
+  downstream is completely unaware how many cameras there were; it just
+  clusters whatever cloud arrives.
 
-  The two camera topics are not hardware-synced, so rather than requiring a
-  matched pair (message_filters ApproximateTimeSynchronizer), each camera's
+  The camera topics are not hardware-synced, so rather than requiring a
+  matched set (message_filters ApproximateTimeSynchronizer), each camera's
   latest processed cloud is cached and the merged cloud is republished on
-  every new arrival from either camera, reusing the other camera's most
-  recent cache entry (up to ~1 frame stale, ~33ms at 30Hz). For a static or
+  every new arrival from any camera, reusing the other cameras' most recent
+  cache entries (up to ~1 frame stale, ~33ms at 30Hz). For a static or
   slow-moving tabletop scene this is preferable to dropping frames waiting
-  for an exact pair match. The SAM depth-image path is untouched by this —
-  single camera only.
+  for an exact multi-camera match. The SAM depth-image path is untouched by
+  this — single camera only.
 
-  Leave `input_cloud2` empty to disable fusion and run single-camera as before
-  (output is now always in `base_frame` though, even with fusion disabled).
+  Leave `input_cloud2` / `input_cloud3` empty to disable fusion for that
+  camera and run with fewer cameras (output is always in `base_frame`
+  regardless of how many cameras are fused).
 
 Tune radii live — no rebuild:
   ros2 param set /robot_mask_filter robot_mask_padding 0.10
@@ -280,6 +282,7 @@ class RobotMaskFilter(Node):
         self.declare_parameter('capsule_radius_conservative', 0.02)  # finger capsule — real ball radius is 0.01325m
         self.declare_parameter('input_cloud',  '/realsense/depth/color/points')
         self.declare_parameter('input_cloud2', '')  # second camera's cloud; '' = fusion disabled
+        self.declare_parameter('input_cloud3', '')  # third camera's cloud; '' = fusion disabled
         self.declare_parameter('input_depth',  '/realsense/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info',  '/realsense/color/camera_info')
         self.declare_parameter('tf_cache_rate_hz', 20.0)
@@ -302,13 +305,14 @@ class RobotMaskFilter(Node):
         self._tf_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._cloud_frame: str | None = None
         self._cloud2_frame: str | None = None
+        self._cloud3_frame: str | None = None
         self._depth_frame: str | None = None
         self._capsule_links = sorted({link for seg in self.CAPSULE_SEGMENTS for link in seg[:2]})
 
         # Per-camera cache of the latest masked, base_frame-transformed cloud —
-        # merged and republished whenever either camera's cloud arrives (see
-        # module docstring "Two-camera fusion"). 'cam2' stays empty/unused
-        # when input_cloud2 is not set.
+        # merged and republished whenever any camera's cloud arrives (see
+        # module docstring "Multi-camera fusion"). 'cam2'/'cam3' stay
+        # empty/unused when input_cloud2/input_cloud3 are not set.
         self._cam_pts_base: dict[str, np.ndarray] = {}
 
         # Load all collision meshes at startup
@@ -355,7 +359,12 @@ class RobotMaskFilter(Node):
         if cloud2_topic:
             self.create_subscription(
                 PointCloud2, cloud2_topic, self._cloud2_cb, sensor_qos)
-            self.get_logger().info(f'Two-camera fusion enabled — cloud2: {cloud2_topic}')
+            self.get_logger().info(f'Multi-camera fusion enabled — cloud2: {cloud2_topic}')
+        cloud3_topic = p('input_cloud3').value
+        if cloud3_topic:
+            self.create_subscription(
+                PointCloud2, cloud3_topic, self._cloud3_cb, sensor_qos)
+            self.get_logger().info(f'Multi-camera fusion enabled — cloud3: {cloud3_topic}')
         self.create_subscription(
             CameraInfo,  p('camera_info').value, self._cam_info_cb, sensor_qos)
         self.create_subscription(
@@ -408,6 +417,8 @@ class RobotMaskFilter(Node):
             links = links + [self._cloud_frame]
         if self._cloud2_frame is not None:
             links = links + [self._cloud2_frame]
+        if self._cloud3_frame is not None:
+            links = links + [self._cloud3_frame]
         if self._depth_frame is not None:
             links = links + [self._depth_frame]
         for link in set(links):
@@ -461,6 +472,14 @@ class RobotMaskFilter(Node):
             self._cloud2_frame = msg.header.frame_id
             self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
         self._process_and_publish(msg, 'cam2')
+
+    def _cloud3_cb(self, msg: PointCloud2):
+        if not self._active:
+            return
+        if self._cloud3_frame != msg.header.frame_id:
+            self._cloud3_frame = msg.header.frame_id
+            self._refresh_tf_cache()  # warm the cache immediately for a new frame_id
+        self._process_and_publish(msg, 'cam3')
 
     def _process_and_publish(self, msg: PointCloud2, slot: str):
         """Transform+mask one camera's cloud into base_frame, cache it under

@@ -90,7 +90,34 @@ def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
                 direction=direction, kind=kind, edge=edge)
 
 
-def select_contact_points(clouds, *, normals=None, 
+def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance):
+    """Boolean mask into `ids`: the double-scored press candidate band.
+
+    Double-scoring moment-arm heuristic, press mode only (forward_tip keeps
+    a single height-only score). Combines two moment arms, both in metres:
+
+      1. Tipping torque from the subsequent pull, proportional to contact
+         height above the pivot (`scores`) -- maximize.
+      2. Anti-tipping resistance, proportional to how far "inboard" of the
+         pivot edge the contact sits along the estimated pull direction --
+         the object's own mass between the pivot and the contact resists
+         rotating over that edge, so this should be minimized (i.e.
+         proximity to the edge maximized).
+
+    Weighing both together, rather than treating height as a hard cutoff
+    and pivot-proximity as a subordinate tie-break, keeps the choice robust
+    to top-surface noise/tilt: a single noisy high point elsewhere on the
+    top can otherwise exclude the true near-edge points from the candidate
+    band entirely once they fall more than score_tolerance below it, even
+    though they are the physically better contact.
+    """
+    pivot_proximity = np.cross(
+        points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
+    combined = scores[ids] + press_pivot_weight * pivot_proximity
+    return combined >= combined.max() - score_tolerance
+
+
+def select_contact_points(clouds, *, normals=None,
                           table_z=-0.021,
                           finger_radius=0.01325, 
                           table_buffer=0.003,
@@ -98,10 +125,11 @@ def select_contact_points(clouds, *, normals=None,
                           y_band=0.005,
                           support_band=0.02, 
                           min_edge_length=0.03,
-                          press_inset=0.0, # 0.005 was reasonable but failed for flashlight. 
+                          press_inset=0.0, # 0.005 was reasonable but failed for flashlight.
                           score_tolerance=0.003,
-                          pull_normal_epsilon=0.1, 
-                          normal_radius=0.025):
+                          pull_normal_epsilon=0.1,
+                          normal_radius=0.025,
+                          press_pivot_weight=1.0):
     """Return three independent selections and their estimated pivot geometry.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
@@ -110,16 +138,20 @@ def select_contact_points(clouds, *, normals=None,
     Missing candidates return {available: False, reason: ...} for that mode.
     min_ball_center_z can impose a previously collision-checked tool-height
     floor; this function itself checks only the fingertip against the table.
+
+    press_pivot_weight: weight (metres of pull-moment-arm per metre of
+    horizontal pivot-distance) applied to the press mode's double-scoring —
+    see the 'Press' comment below. Unused by forward_tip/planar_push.
     """
     scalars = [table_z, finger_radius, table_buffer, y_band, support_band,
                min_edge_length, press_inset, score_tolerance,
-               pull_normal_epsilon, normal_radius]
+               pull_normal_epsilon, normal_radius, press_pivot_weight]
     if not np.isfinite(scalars).all():
         raise ValueError('All parameters must be finite')
     if (finger_radius <= 0 or normal_radius <= 0 or support_band <= 0
             or min_edge_length <= 0 or min(table_buffer, y_band, press_inset,
                                           score_tolerance) < 0
-            or not 0 <= pull_normal_epsilon <= 1):
+            or not 0 <= pull_normal_epsilon <= 1 or press_pivot_weight < 0):
         raise ValueError('Invalid radius, band, tolerance or normal threshold')
     if min_ball_center_z is not None and not np.isfinite(min_ball_center_z):
         raise ValueError('min_ball_center_z must be finite')
@@ -213,7 +245,8 @@ def select_contact_points(clouds, *, normals=None,
                 ids = inset_top(ids)
             counts['inset'] = len(ids)
             if len(ids):
-                ids = ids[scores[ids] >= scores[ids].max() - score_tolerance]
+                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance)
+                          if mode == 'press' else scores[ids] >= scores[ids].max() - score_tolerance]
             counts['best_score_band'] = len(ids)
             if len(ids):
                 break
@@ -231,44 +264,30 @@ def select_contact_points(clouds, *, normals=None,
                 ids = inset_top(ids)
             counts['topmost_fallback'] = len(ids)
             if len(ids):
-                ids = ids[scores[ids] >= scores[ids].max() - score_tolerance]
+                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance)]
                 topmost = True
         if not len(ids):
             failed = next(stage for stage, count in counts.items() if count == 0)
             result[mode] = missing(f'No candidates after {failed} filter')
         else:
-            # The PDF score describes the subsequent horizontal pull.  A press-
-            # and-pull interaction also applies a downward force while making
-            # contact.  Among contacts whose pull moment is effectively tied,
-            # prefer the one whose downward press produces the least opposing
-            # moment about the desired axis.  This moves a flat-top-box contact
-            # toward the relevant support edge instead of letting height noise
-            # choose an interior point.  Do not trade a materially smaller pull
-            # moment for this preference: score_tolerance defines that tradeoff.
-            if mode == 'press':
-                press_scores = np.cross(
+            # `best_score_band` above already double-scores height and pivot
+            # proximity together for press. What remains here is centering
+            # along the pivot edge itself (an axis orthogonal to both terms).
+            if mode == 'press' and geometry['edge'] is not None:
+                edge_midpoint = geometry['edge'].mean(axis=0)
+                along_edge = (points[ids] - edge_midpoint) @ geometry['axis']
+                # The desired-axis moments do not distinguish locations
+                # along a straight pivot edge. Center there, in the edge's
+                # own coordinate system, rather than in a world axis.
+                ids = ids[np.abs(along_edge) <= np.abs(along_edge).min() + 1e-10]
+                counts['centered_on_edge'] = len(ids)
+                # If several points are equally centered, keep the most
+                # edgeward one; the median below then only resolves truly
+                # equivalent samples instead of drifting inward.
+                centered_press_scores = np.cross(
                     points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
-                # Keep a small edgeward band rather than one noise-determined
-                # extremal sample.  For a horizontal pivot geometry the score
-                # is a distance in metres per unit force, so score_tolerance is
-                # also an intuitive spatial band.
-                ids = ids[press_scores >= press_scores.max() - score_tolerance]
-                counts['least_anti_tipping_press'] = len(ids)
-                if geometry['edge'] is not None:
-                    edge_midpoint = geometry['edge'].mean(axis=0)
-                    along_edge = (points[ids] - edge_midpoint) @ geometry['axis']
-                    # The desired-axis moments do not distinguish locations
-                    # along a straight pivot edge. Center there, in the edge's
-                    # own coordinate system, rather than in a world axis.
-                    ids = ids[np.abs(along_edge) <= np.abs(along_edge).min() + 1e-10]
-                    counts['centered_on_edge'] = len(ids)
-                    # If several points are equally centered, keep the most
-                    # edgeward one; the median below then only resolves truly
-                    # equivalent samples instead of drifting inward.
-                    centered_press_scores = np.cross(
-                        points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
-                    ids = ids[centered_press_scores >= centered_press_scores.max() - 1e-10]
-                    counts['centered_edgeward'] = len(ids)
+                ids = ids[centered_press_scores >= centered_press_scores.max() - 1e-10]
+                counts['centered_edgeward'] = len(ids)
             target = np.median(points[ids], axis=0)
             if mode == 'forward_tip':
                 target[1] = 0.0

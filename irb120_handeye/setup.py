@@ -33,6 +33,7 @@ setup(
             'generate_charuco_target = irb120_handeye.generate_charuco_target:main',
             'run_handeye_calibration = irb120_handeye.run_handeye_calibration:main',
             'record_calibration_pose = irb120_handeye.record_calibration_pose:main',
+            'diagnose_handeye_samples = irb120_handeye.diagnose_handeye_samples:main',
         ],
     },
 )

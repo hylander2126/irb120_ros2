@@ -1,37 +1,24 @@
 #!/usr/bin/env python3
-"""Headless, dual-camera eye-to-hand calibration — no MoveIt HandEyeCalibration
-panel, no per-camera manual runs.
+"""Headless, multi-camera eye-to-hand calibration -- no MoveIt HandEyeCalibration
+panel, no manual "Take Sample" clicks.
 
-Drives the arm through one shared set of joint poses (reusing the same
-FollowJointTrajectory motion as run_calibration_poses.py) and, at every
-settled pose, automatically detects the target board in whichever cameras
-currently see it — there is no requirement that a pose be visible to both
-cameras at once. Each camera accumulates its own independent sample set and
-gets its own solve, so a pose set tailored to one camera's FOV (e.g. cam2's
-steep overhead view) costs nothing for the other.
+Drives the arm through a shared pose set and, at each settled pose, detects
+the target board in whichever requested camera(s) currently see it. A pose
+taught (via record_calibration_pose.py) as not seen by any requested camera
+is skipped -- no move. Each camera gets its own independent sample set and
+its own cv2.calibrateHandEye() solve, in its documented eye-to-hand mode.
 
---board-type defaults to 'aruco': the existing grid board (irb_target_image.png)
-already printed and mounted, used as a stopgap until a printer and a rigid
-flat backing are available to produce+mount the ChArUco board this pipeline
-otherwise prefers (see generate_charuco_target.py and "Future work" in the
-README). Pass --board-type charuco once that board exists.
-
-Solves per camera with cv2.calibrateHandEye() in ITS eye-to-hand mode: feed
-gripper<-base (inverted from the natural TF direction) instead of the usual
-gripper2base, leave target<-camera as OpenCV's PnP gives it, and the
-returned "cam2gripper" output IS base_link -> camera directly (this is
-OpenCV's own documented recipe for a static camera + gripper-mounted
-target, not a manual before/after inversion trick layered on top).
+Per-run knobs live in --cameras/--pose-file/--step/--dry-run below; anything
+else (motion speed, sampling, board type/measurements, solver method, output
+dir -- see the "Tunables" block) is fixed for this rig and meant to be edited
+here directly rather than passed as a flag.
 
 Usage:
   ros2 run irb120_handeye run_handeye_calibration
-  ros2 run irb120_handeye run_handeye_calibration --cameras realsense2 --samples-per-pose 5
+  ros2 run irb120_handeye run_handeye_calibration --cameras realsense3
 
-Prerequisites: same bringup as run_calibration_poses.py (abb_control +
-robot_state_publisher for base_link/tool0 TF) PLUS both realsense drivers
-running (bringup_cam1.launch.py / bringup_cam2.launch.py, or
-bringup_handeye.launch.py) so image_raw/camera_info/link->optical TF are
-all live. The MoveIt/RViz stack is NOT needed for this script.
+Prerequisites: abb_control bringup (base_link/tool0 TF) + the realsense
+driver(s) for every camera being calibrated. MoveIt/RViz not needed.
 """
 
 import argparse
@@ -57,14 +44,11 @@ from irb120_handeye.run_calibration_poses import (
     _resolve_pose_path,
 )
 
-# TSAI and DANIILIDIS are the textbook-standard choices (DANIILIDIS is what
-# cam1's existing MoveIt-panel calibration used) but on this OpenCV build
-# (4.6.0) both are numerically unreliable: fed perfect noiseless synthetic
-# ground truth, TSAI came back up to 144 degrees off and DANIILIDIS up to
-# 7 degrees / 40mm off, repeatably, across many random trials. PARK, HORAUD
-# and ANDREFF all recovered ground truth to machine precision every time.
-# Default to PARK; the other two are kept selectable but --method tsai/
-# daniilidis should not be trusted without re-verifying against this build.
+# PARK is the only solver verified reliable on this OpenCV build (4.6.0) --
+# fed noiseless synthetic ground truth, TSAI/DANIILIDIS came back tens of
+# degrees off, repeatably; PARK/HORAUD/ANDREFF recovered it to machine
+# precision. Kept as a dict (rather than just calling cv2.CALIB_HAND_EYE_PARK
+# directly) so METHOD below can still be swapped to one of these if re-verified.
 METHODS = {
     'tsai': cv2.CALIB_HAND_EYE_TSAI,
     'park': cv2.CALIB_HAND_EYE_PARK,
@@ -73,15 +57,31 @@ METHODS = {
     'daniilidis': cv2.CALIB_HAND_EYE_DANIILIDIS,
 }
 
-# camera_name (rs_launch.py) -> the link frame its eye-to-hand transform is
-# published against. Matches bringup_cam1.launch.py / bringup_cam2.launch.py.
-# The optical frame each camera's images/PnP are actually expressed in is
-# derived from this as f'{name}_color_optical_frame' (realsense2_camera's
-# own naming convention when camera_name is overridden).
-CAMERA_LINK_FRAMES = {'realsense': 'realsense_link', 'realsense2': 'realsense2_link'}
+# camera_name (rs_launch.py) -> its eye-to-hand link frame (bringup_cam1/2/3.launch.py).
+# Optical frame is derived as f'{name}_color_optical_frame'.
+CAMERA_LINK_FRAMES = {'realsense': 'realsense_link', 'realsense2': 'realsense2_link', 'realsense3': 'realsense3_link'}
 
 BASE_FRAME = 'base_link'
 GRIPPER_FRAME = 'tool0'
+
+# --- Tunables for this rig ----------------------------------------------
+# Fixed for this setup; edit here rather than passing flags. Only
+# --cameras/--pose-file/--step/--dry-run vary run-to-run (see _build_arg_parser).
+MOVE_TIME_SEC = 3.0            # minimum seconds per move
+MAX_JOINT_SPEED_RAD_S = 0.5    # long moves are slowed to stay under this (rad/s, no collision checking)
+SETTLE_TIME_SEC = 3.0          # wait after each move before sampling
+SAMPLES_PER_POSE = 5           # repeat detections per pose per camera; median-closest kept (jitter rejection)
+SAMPLE_DELAY_SEC = 0.2         # seconds between repeat captures
+MAX_SPREAD_MM = 3.0            # reject a pose/camera if repeat captures disagree by more than this
+MIN_SAMPLES_WARN = 8           # warn (not abort) if a camera ends up with fewer accepted poses than this
+BOARD_TYPE = 'aruco'           # the grid board on hand; switch to 'charuco' once that board is printed (see README)
+BOARD_YAML_OVERRIDE = None     # None -> calibrations/{BOARD_TYPE}_board.yaml next to this package
+SQUARE_LENGTH_M_OVERRIDE = None    # charuco only: caliper-measured square length, if remeasured
+MARKER_LENGTH_M_OVERRIDE = None    # caliper-measured marker length, if remeasured
+MARKER_SEPARATION_M_OVERRIDE = None  # aruco only: caliper-measured marker separation, if remeasured
+MIN_FEATURES = None            # None -> 6 for charuco, 3 for aruco (of the board's 12 markers)
+METHOD = 'park'                # see METHODS comment above
+OUT_DIR = os.path.expanduser('~')
 
 
 # --- SE(3) helpers -----------------------------------------------------
@@ -129,14 +129,7 @@ def _compose(R1: np.ndarray, t1: np.ndarray, R2: np.ndarray, t2: np.ndarray) -> 
 
 
 # --- Target board (ChArUco, or the ArUco grid board as a stopgap) -----
-#
-# FUTURE WORK: --board-type defaults to 'aruco' right now only because
-# there's no printer/rigid backing on hand yet to produce and mount the
-# ChArUco board this pipeline otherwise prefers (see generate_charuco_target.py
-# and this package's README "Future work" note). A GridBoard's pose comes
-# from marker corners alone, with no checkerboard-corner refinement, so it's
-# noisier and less occlusion-tolerant than ChArUco. Switch the default back
-# to 'charuco' once a ChArUco board is printed and mounted.
+# See BOARD_TYPE above re: which one's in use and why.
 
 class BoardSpec:
     def __init__(self, kind: str, board, dictionary):
@@ -166,6 +159,19 @@ def _load_board(board_type: str, board_yaml_path: str, square_length_m: Optional
                   f'(design value was {spec["marker_length_m"] * 1000:.2f}mm)')
         board = cv2.aruco.GridBoard_create(spec['markers_x'], spec['markers_y'], marker, separation, dictionary)
     return BoardSpec(board_type, board, dictionary)
+
+
+def _load_pose_detections(pose_path: str, n_poses: int) -> List[Optional[Dict[str, bool]]]:
+    """The per-pose 'detections' list record_calibration_pose.py writes (which
+    camera(s) saw the board when that pose was taught), or [None] * n_poses
+    when the pose file predates that field / wasn't taught interactively
+    (e.g. joints_5_6mm.yaml) or its length doesn't match joint_values."""
+    with open(pose_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+    detections = data.get('detections')
+    if not detections or len(detections) != n_poses:
+        return [None] * n_poses
+    return detections
 
 
 def _detect_board_pose(gray: np.ndarray, board_spec: BoardSpec, camera_matrix: np.ndarray,
@@ -277,6 +283,121 @@ def _pairwise_axxb_residual(R_g2b: List[np.ndarray], t_g2b: List[np.ndarray],
     return np.array(rot_deg), np.array(trans_mm)
 
 
+def _leave_one_out_diagnosis(s: Dict[str, List], method_key: str, max_pairs: int = 300):
+    """Solve with the full sample set, then re-solve once per sample with that
+    one sample left out, to see how much each pose is dragging on the result.
+
+    A pose that's actually bad (misdetection, board slipped, robot still
+    settling, ...) pulls the AX=XB residual up; solving without it should
+    make the residual noticeably *better*. A pose that's fine barely moves
+    the residual either way when dropped, or makes it worse. This is a
+    standard leave-one-out (LOO) outlier check, just applied to hand-eye
+    calibration's own AX=XB consistency metric instead of a prediction error.
+
+    Returns (R_sol, t_sol, rot_res, trans_res, ranked) where the first four
+    are the full-set solve and its residual (same quantities the caller
+    already printed pre-diagnosis), and ranked is a list of
+    (pose_idx, rot_deg_without_it, trans_mm_without_it, trans_mm_improvement)
+    sorted with the single biggest offender (most improvement from removal)
+    first. ranked is empty when there are too few samples (< 6) for the
+    leave-one-out solves to still be well-conditioned (each needs >= 3 left).
+    """
+    R_g2b, t_g2b, R_t2c, t_t2c = s['R_g2b'], s['t_g2b'], s['R_t2c'], s['t_t2c']
+    pose_idx = s['pose_idx']
+    n = len(R_g2b)
+
+    R_sol, t_sol = cv2.calibrateHandEye(R_g2b, t_g2b, R_t2c, t_t2c, method=METHODS[method_key])
+    t_sol = t_sol.reshape(3)
+    rot_res, trans_res = _pairwise_axxb_residual(R_g2b, t_g2b, R_t2c, t_t2c, R_sol, t_sol, max_pairs)
+
+    ranked = []
+    if n >= 6:
+        baseline_trans_mean = float(trans_res.mean())
+        for k in range(n):
+            idxs = [j for j in range(n) if j != k]
+            sub_R_g2b = [R_g2b[j] for j in idxs]
+            sub_t_g2b = [t_g2b[j] for j in idxs]
+            sub_R_t2c = [R_t2c[j] for j in idxs]
+            sub_t_t2c = [t_t2c[j] for j in idxs]
+            R_xk, t_xk = cv2.calibrateHandEye(sub_R_g2b, sub_t_g2b, sub_R_t2c, sub_t_t2c, method=METHODS[method_key])
+            rot_k, trans_k = _pairwise_axxb_residual(
+                sub_R_g2b, sub_t_g2b, sub_R_t2c, sub_t_t2c, R_xk, t_xk.reshape(3), max_pairs)
+            trans_k_mean = float(trans_k.mean())
+            ranked.append((pose_idx[k], float(rot_k.mean()), trans_k_mean, baseline_trans_mean - trans_k_mean))
+        ranked.sort(key=lambda r: -r[3])
+
+    return R_sol, t_sol, rot_res, trans_res, ranked
+
+
+def _print_loo_report(ns: str, baseline_rot_mean: float, baseline_trans_mean: float,
+                      ranked: List[Tuple[int, float, float, float]], s: Dict[str, List]) -> None:
+    n = len(s['pose_idx'])
+    spread_by_pose = dict(zip(s['pose_idx'], s['spread_mm']))
+    print(f'\n  [{ns}] leave-one-out diagnostic over {n} poses '
+          f'(full-set baseline: rot mean={baseline_rot_mean:.3f} deg, trans mean={baseline_trans_mean:.2f} mm):')
+    print(f'    {"pose#":>6}  {"trans w/o it":>13}  {"Δ vs baseline":>14}  {"rot w/o it":>11}  {"capture spread":>15}')
+    for pose_no, rot_m, trans_m, delta in ranked:
+        flag = '  <-- biggest single-pose offender' if (pose_no, rot_m, trans_m, delta) == ranked[0] and delta > 0 else ''
+        spread = spread_by_pose.get(pose_no)
+        spread_str = f'{spread:.2f} mm' if spread is not None else 'n/a'
+        print(f'    {pose_no:>6}  {trans_m:>10.2f} mm  {delta:>+11.2f} mm  {rot_m:>9.3f} deg  {spread_str:>15}{flag}')
+    offenders = [r for r in ranked if r[3] > 0.25]  # >0.25mm improvement from dropping it
+    if offenders:
+        offender_list = ",".join(str(r[0]) for r in offenders)
+        print(f'  Removing pose(s) {", ".join(str(r[0]) for r in offenders)} would meaningfully reduce the '
+              'residual -- drop them and re-solve (no robot needed): '
+              f'diagnose_handeye_samples --exclude-poses "{offender_list}".')
+        # "capture spread" (repeat-detection disagreement within that one pose) is a direct read on
+        # whether THAT capture was noisy (oblique angle, motion blur, still settling) as opposed to the
+        # taught joint pose itself being bad -- a flagged pose with unremarkable spread more likely means
+        # the joint pose genuinely conflicts with the others (re-teach or drop it); a flagged pose that
+        # also had high spread was probably just a noisy detection (retake it, or fix settle-time/angle).
+        median_spread = float(np.median(list(spread_by_pose.values())))
+        noisy = [r[0] for r in offenders if (spread_by_pose.get(r[0]) or 0) > 2 * median_spread]
+        if noisy:
+            print(f'  Pose(s) {", ".join(str(p) for p in noisy)} also had a capture spread well above the '
+                  f'{median_spread:.2f}mm median for this set -- that alone points at a noisy detection there '
+                  '(oblique angle / motion blur / still settling) rather than a bad taught pose; worth a '
+                  'retake before assuming that joint configuration itself is the problem.')
+    else:
+        print('  No single pose stands out; the error looks evenly spread across poses -- suspect the mounted '
+              'target measurement, camera intrinsics, or extrinsic frame instead of any one pose.')
+
+
+def _rt_to_dict(R: np.ndarray, t: np.ndarray) -> dict:
+    q = _matrix_to_quat(R)
+    return {'xyz': [float(v) for v in t], 'quat_xyzw': [float(v) for v in q]}
+
+
+def _samples_from_dicts(rows: List[dict]) -> Dict[str, List]:
+    s: Dict[str, List] = {'R_g2b': [], 't_g2b': [], 'R_t2c': [], 't_t2c': [], 'pose_idx': [], 'spread_mm': []}
+    for row in rows:
+        qx, qy, qz, qw = row['g2b']['quat_xyzw']
+        s['R_g2b'].append(_quat_to_matrix(qx, qy, qz, qw))
+        s['t_g2b'].append(np.array(row['g2b']['xyz'], dtype=float))
+        qx, qy, qz, qw = row['t2c']['quat_xyzw']
+        s['R_t2c'].append(_quat_to_matrix(qx, qy, qz, qw))
+        s['t_t2c'].append(np.array(row['t2c']['xyz'], dtype=float))
+        s['pose_idx'].append(row['pose_idx'])
+        s['spread_mm'].append(row.get('spread_mm'))
+    return s
+
+
+def _write_samples_yaml(path: str, ns: str, link: str, board_type: str, method: str, s: Dict[str, List]) -> None:
+    """Dump the raw per-pose AX/AB samples behind a solve, so a run can be
+    re-diagnosed or re-solved with poses excluded later without re-driving
+    the robot. See diagnose_handeye_samples.py."""
+    rows = [{
+        'pose_idx': s['pose_idx'][k],
+        'spread_mm': s['spread_mm'][k],
+        'g2b': _rt_to_dict(s['R_g2b'][k], s['t_g2b'][k]),
+        't2c': _rt_to_dict(s['R_t2c'][k], s['t_t2c'][k]),
+    } for k in range(len(s['R_g2b']))]
+    with open(path, 'w', encoding='utf-8') as f:
+        yaml.safe_dump({'camera': ns, 'link_frame': link, 'board_type': board_type, 'method': method,
+                        'samples': rows}, f, sort_keys=False)
+
+
 def _write_launch_file(out_dir: str, ns: str, link_frame: str, xyz: np.ndarray, quat: np.ndarray,
                        residual_mm: float, n_samples: int, method_name: str) -> str:
     path = os.path.join(out_dir, f'cam_tf_{ns}_{residual_mm:.0f}mm.launch.py')
@@ -324,68 +445,41 @@ def generate_launch_description() -> LaunchDescription:
 
 # --- Main --------------------------------------------------------------
 
+def _resolve_pose_source(pose: str) -> str:
+    """--pose-file as either an existing path, or a filename under
+    share/irb120_handeye/calibrations/ (the _resolve_pose_path convention
+    shared with run_calibration_poses.py / record_calibration_pose.py)."""
+    if os.path.isfile(pose):
+        return os.path.abspath(pose)
+    return _resolve_pose_path(None, pose)
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--pose-file', default='joints_5_6mm.yaml',
-                   help='Pose YAML under share/irb120_handeye/calibrations/. NOTE: this set was '
-                        'tuned for cam1s FOV -- design a combined/cam2-aware set before trusting '
-                        'cam2s result (see package README).')
-    p.add_argument('--pose-path', default=None)
-    p.add_argument('--cameras', default='realsense,realsense2',
-                   help='Comma-separated camera_name values (rs_launch.py), e.g. "realsense2" alone.')
-    p.add_argument('--move-time', type=float, default=3.0, help='Minimum seconds per move.')
-    p.add_argument('--max-joint-speed', type=float, default=0.5,
-                   help='rad/s cap: each move takes at least (largest joint delta / this), so long '
-                        'moves are automatically slowed down. Moves are straight joint-space '
-                        'interpolation with NO collision checking.')
+                   help='Pose YAML: an existing path (e.g. ~/joints_custom.yaml), or a filename under '
+                        'share/irb120_handeye/calibrations/.')
+    p.add_argument('--cameras', default=None,
+                   help='Comma-separated camera_name values, e.g. "realsense3". Defaults to all of: '
+                        + ', '.join(sorted(CAMERA_LINK_FRAMES)) + '. A pose taught '
+                        '(record_calibration_pose.py) as not seen by any of these is skipped -- no move.')
     p.add_argument('--step', action='store_true',
                    help='Print the planned joint move and wait for Enter before every pose '
                         '(Ctrl+C to abort). Use for first runs of a new pose set.')
     p.add_argument('--dry-run', action='store_true',
                    help='Move and report per-camera detections only; skip solving and file output.')
-    p.add_argument('--settle-time', type=float, default=3.0)
-    p.add_argument('--max-spread-mm', type=float, default=3.0,
-                   help='Reject a pose for a camera if repeat captures of the board differ by more than this.')
-    p.add_argument('--samples-per-pose', type=int, default=5,
-                   help='Detections captured per pose per camera; the one closest to the '
-                        'per-pose median translation is kept (cheap jitter rejection).')
-    p.add_argument('--sample-delay', type=float, default=0.2, help='Seconds between repeat captures.')
-    p.add_argument('--board-type', choices=['charuco', 'aruco'], default='aruco',
-                   help='aruco (default, TEMPORARY): the grid board already printed and mounted -- '
-                        'see "Future work" in the README. Switch to charuco once that board is '
-                        'printed on a rigid backing (generate_charuco_target.py); its pose estimate '
-                        'is more accurate and more occlusion-tolerant.')
-    p.add_argument('--min-features', type=int, default=None,
-                   help='Minimum interpolated ChArUco corners / detected ArUco markers to accept a '
-                        'detection. Defaults to 6 for charuco, 3 for aruco (of the boards 12 markers).')
-    p.add_argument('--min-samples', type=int, default=8,
-                   help='Warn (not abort) if a camera ends up with fewer accepted poses than this; '
-                        'calibrateHandEye itself needs >= 3.')
-    p.add_argument('--board-yaml', default=None,
-                   help='Defaults to calibrations/{charuco,aruco}_board.yaml next to this package, '
-                        'matching --board-type.')
-    p.add_argument('--square-length-m', type=float, default=None,
-                   help='charuco only: override the boards square length with a caliper-measured value.')
-    p.add_argument('--marker-length-m', type=float, default=None,
-                   help='Override the boards marker length with a caliper-measured value.')
-    p.add_argument('--marker-separation-m', type=float, default=None,
-                   help='aruco only: override the boards marker separation with a caliper-measured value.')
-    p.add_argument('--method', choices=sorted(METHODS), default='park',
-                   help='park (default): verified to recover ground truth to machine precision '
-                        'in this OpenCV build. tsai/daniilidis are unreliable here -- see METHODS '
-                        'comment in this file -- and should not be used without re-verifying.')
-    p.add_argument('--out-dir', default=None, help='Defaults to your home directory.')
     return p
 
 
 def main() -> int:
     args = _build_arg_parser().parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
-    board_yaml = args.board_yaml or os.path.normpath(
-        os.path.join(here, '..', 'calibrations', f'{args.board_type}_board.yaml'))
-    min_features = args.min_features if args.min_features is not None else (6 if args.board_type == 'charuco' else 3)
-    out_dir = args.out_dir or os.path.expanduser('~')
-    cameras = [c.strip() for c in args.cameras.split(',') if c.strip()]
+    board_yaml = BOARD_YAML_OVERRIDE or os.path.normpath(
+        os.path.join(here, '..', 'calibrations', f'{BOARD_TYPE}_board.yaml'))
+    min_features = MIN_FEATURES if MIN_FEATURES is not None else (6 if BOARD_TYPE == 'charuco' else 3)
+    out_dir = OUT_DIR
+    cameras = ([c.strip() for c in args.cameras.split(',') if c.strip()]
+               if args.cameras else sorted(CAMERA_LINK_FRAMES))
     for ns in cameras:
         if ns not in CAMERA_LINK_FRAMES:
             print(f'Unknown camera {ns!r}; known cameras: {sorted(CAMERA_LINK_FRAMES)}')
@@ -393,17 +487,20 @@ def main() -> int:
 
     if not os.path.isfile(board_yaml):
         print(f'Board spec not found: {board_yaml}.'
-              + (' Run generate_charuco_target first.' if args.board_type == 'charuco' else ''))
+              + (' Run generate_charuco_target first.' if BOARD_TYPE == 'charuco' else ''))
         return 1
-    board = _load_board(args.board_type, board_yaml, args.square_length_m, args.marker_length_m,
-                        args.marker_separation_m)
-    print(f'Board: {args.board_type} ({board_yaml})')
+    board = _load_board(BOARD_TYPE, board_yaml, SQUARE_LENGTH_M_OVERRIDE, MARKER_LENGTH_M_OVERRIDE,
+                        MARKER_SEPARATION_M_OVERRIDE)
+    print(f'Board: {BOARD_TYPE} ({board_yaml})')
 
-    pose_path = _resolve_pose_path(args.pose_path, args.pose_file)
+    pose_path = _resolve_pose_source(args.pose_file)
     if not os.path.isfile(pose_path):
         print(f'Pose file not found: {pose_path}')
         return 1
     joint_names, joint_values = _load_pose_yaml(pose_path)
+    pose_detections = _load_pose_detections(pose_path, len(joint_values))
+    skip_idxs = {idx for idx, det in enumerate(pose_detections)
+                 if det is not None and not any(det.get(ns, False) for ns in cameras)}
 
     rclpy.init()
     pose_runner = HandeyePoseRunner(joint_names)
@@ -411,6 +508,9 @@ def main() -> int:
 
     try:
         print(f'Loaded {len(joint_values)} poses from {pose_path}')
+        if skip_idxs:
+            print(f'  {len(skip_idxs)}/{len(joint_values)} poses were not recorded as seen by any of '
+                  f'{cameras} when taught -- skipping them (no move).')
         if not pose_runner.wait_for_joint_states(timeout_sec=10.0):
             print('No joint states received -- is abb_control bringup running?')
             return 2
@@ -429,16 +529,19 @@ def main() -> int:
             R_link_opt, t_link_opt = _transform_to_Rt(link_opt_tf)
             active.append((ns, link, optical, R_link_opt, t_link_opt))
 
-        samples: Dict[str, Dict[str, List[np.ndarray]]] = {
-            ns: {'R_g2b': [], 't_g2b': [], 'R_t2c': [], 't_t2c': []} for ns, *_ in active
+        samples: Dict[str, Dict[str, List]] = {
+            ns: {'R_g2b': [], 't_g2b': [], 'R_t2c': [], 't_t2c': [], 'pose_idx': [], 'spread_mm': []}
+            for ns, *_ in active
         }
         missed: Dict[str, int] = {ns: 0 for ns, *_ in active}
 
         total = len(joint_values)
         for i, target in enumerate(joint_values, start=1):
+            if (i - 1) in skip_idxs:
+                continue
             current = pose_runner._current_positions()
             max_delta = max(abs(a - b) for a, b in zip(target, current))
-            move_time = max(0.5, args.move_time, max_delta / max(args.max_joint_speed, 1e-3))
+            move_time = max(0.5, MOVE_TIME_SEC, max_delta / max(MAX_JOINT_SPEED_RAD_S, 1e-3))
             print(f'Pose {i}/{total}: largest joint delta {np.degrees(max_delta):.1f} deg, '
                   f'move time {move_time:.1f}s')
             if args.step:
@@ -448,7 +551,7 @@ def main() -> int:
             if not pose_runner.move_to(target, move_time_sec=move_time):
                 print(f'  move failed, skipping pose {i}')
                 continue
-            cam_node.spin_for(max(0.0, args.settle_time))
+            cam_node.spin_for(max(0.0, SETTLE_TIME_SEC))
 
             g2b_tf = cam_node.lookup(GRIPPER_FRAME, BASE_FRAME)  # deliberately inverted: see module docstring
             if g2b_tf is None:
@@ -458,8 +561,8 @@ def main() -> int:
 
             for ns, link, optical, R_link_opt, t_link_opt in active:
                 hits = []
-                for _ in range(max(1, args.samples_per_pose)):
-                    cam_node.spin_for(args.sample_delay)
+                for _ in range(max(1, SAMPLES_PER_POSE)):
+                    cam_node.spin_for(SAMPLE_DELAY_SEC)
                     gray = cam_node.latest_image(ns)
                     K, D = cam_node.intrinsics(ns)
                     if gray is None:
@@ -473,7 +576,7 @@ def main() -> int:
                     continue
                 tvecs = np.array([t for _, t in hits])
                 spread_mm = float(np.linalg.norm(tvecs - tvecs.mean(axis=0), axis=1).max() * 1000)
-                if spread_mm > args.max_spread_mm:
+                if spread_mm > MAX_SPREAD_MM:
                     print(f'  [{ns}] pose {i} rejected: board position spread {spread_mm:.1f}mm across '
                           f'{len(hits)} captures (still settling, or noisy detection)')
                     missed[ns] += 1
@@ -489,12 +592,16 @@ def main() -> int:
                 samples[ns]['t_g2b'].append(t_g2b)
                 samples[ns]['R_t2c'].append(R_link_target)
                 samples[ns]['t_t2c'].append(t_link_target)
+                samples[ns]['pose_idx'].append(i)
+                samples[ns]['spread_mm'].append(spread_mm)
                 print(f'  [{ns}] sample {len(samples[ns]["R_g2b"])} captured (spread {spread_mm:.1f}mm)')
 
         if args.dry_run:
-            print('\nDry run summary (accepted detections per camera):')
+            attempted = total - len(skip_idxs)
+            print(f'\nDry run summary (accepted detections per camera, {attempted}/{total} poses attempted '
+                  f'-- {len(skip_idxs)} skipped as not recorded for these cameras):')
             for ns, *_ in active:
-                print(f'  [{ns}] {len(samples[ns]["R_g2b"])}/{total} poses, {missed[ns]} missed')
+                print(f'  [{ns}] {len(samples[ns]["R_g2b"])}/{attempted} poses, {missed[ns]} missed')
             return 0
 
         print('\nSolving...')
@@ -506,25 +613,30 @@ def main() -> int:
             if n < 3:
                 print(f'  not enough samples to solve (need >= 3) -- check framing/board visibility for this camera')
                 continue
-            if n < args.min_samples:
-                print(f'  WARNING: only {n} samples (< --min-samples {args.min_samples}); '
+            if n < MIN_SAMPLES_WARN:
+                print(f'  WARNING: only {n} samples (< MIN_SAMPLES_WARN={MIN_SAMPLES_WARN}); '
                       'solve will run but is likely poorly conditioned -- add more poses for this camera')
 
-            R_sol, t_sol = cv2.calibrateHandEye(
-                s['R_g2b'], s['t_g2b'], s['R_t2c'], s['t_t2c'], method=METHODS[args.method])
-            t_sol = t_sol.reshape(3)
+            R_sol, t_sol, rot_res, trans_res, loo_ranked = _leave_one_out_diagnosis(s, METHOD)
             quat = _matrix_to_quat(R_sol)
 
-            rot_res, trans_res = _pairwise_axxb_residual(s['R_g2b'], s['t_g2b'], s['R_t2c'], s['t_t2c'], R_sol, t_sol)
             print(f'  base_link -> {link}:')
             print(f'    xyz = [{t_sol[0]:.6f}, {t_sol[1]:.6f}, {t_sol[2]:.6f}]')
             print(f'    quat(xyzw) = [{quat[0]:.6f}, {quat[1]:.6f}, {quat[2]:.6f}, {quat[3]:.6f}]')
             print(f'    AX=XB residual over {len(rot_res)} pose pairs: '
                   f'rotation mean={rot_res.mean():.3f} deg max={rot_res.max():.3f} deg, '
                   f'translation mean={trans_res.mean():.2f} mm max={trans_res.max():.2f} mm')
+            if loo_ranked:
+                _print_loo_report(ns, float(rot_res.mean()), float(trans_res.mean()), loo_ranked, s)
+            else:
+                print(f'  (skipping leave-one-out diagnostic: need >= 6 accepted poses, have {n})')
 
-            path = _write_launch_file(out_dir, ns, link, t_sol, quat, float(trans_res.mean()), n, args.method)
+            path = _write_launch_file(out_dir, ns, link, t_sol, quat, float(trans_res.mean()), n, METHOD)
             print(f'  wrote {path}')
+            samples_path = os.path.join(out_dir, f'handeye_samples_{ns}.yaml')
+            _write_samples_yaml(samples_path, ns, link, BOARD_TYPE, METHOD, s)
+            print(f'  wrote {samples_path} (raw per-pose samples -- re-diagnose or re-solve with poses '
+                  f'excluded, no robot needed: ros2 run irb120_handeye diagnose_handeye_samples --in {samples_path})')
 
         return 0
     except KeyboardInterrupt:

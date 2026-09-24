@@ -132,27 +132,82 @@ produced are easy to pair up.
 
 `ros2 run irb120_handeye run_handeye_calibration` replaces steps 1-4 above
 with a scripted OpenCV solve — no MoveIt/RViz, no manual "Take Sample"
-clicks, and both cameras solved from one shared pose set instead of two
-separate per-camera runs. See the module docstring for the full recipe
-(`cv2.calibrateHandEye` in its documented eye-to-hand mode) and
-`generate_charuco_target.py` for the print-ready ChArUco target it prefers.
+clicks, and all cameras (the default; pass `--cameras realsense3` etc. to
+calibrate a subset) solved from one shared pose set instead of separate
+per-camera runs. If the pose file was taught with
+`record_calibration_pose.py`, a pose is automatically skipped (no move)
+when none of `--cameras` was recorded as seeing the board when that pose
+was taught — so `--cameras realsense3` against a pose set that mixes
+cam1/cam2 poses with cam3 poses only drives through the cam3 ones. There's
+no requirement that every remaining pose be visible to every requested
+camera; each camera accumulates its own sample set and gets its own
+independent solve. Most other knobs (motion speed, sampling, board
+type/measurements, solver method, output dir) are hardcoded constants near
+the top of the module rather than flags — edit them there. See the module
+docstring for the full recipe (`cv2.calibrateHandEye` in its documented
+eye-to-hand mode) and `generate_charuco_target.py` for the print-ready
+ChArUco target it prefers.
+
+Bring up the camera(s) you're calibrating first — either the per-camera
+`bringup_cam1.launch.py` / `bringup_cam2.launch.py` / `bringup_cam3.launch.py`
+(each also republishes that camera's existing TF, harmless to leave running
+during calibration) or the full `bringup_stack.launch.py`, plus
+`abb_control.launch.py`/`abb_rws.launch.py` for the arm itself.
+
+`record_calibration_pose.py` (the interactive MoveIt/RViz pose teacher) also
+defaults to all three cameras and shows a live per-camera detection status
+line while you jog the arm.
+
+### Finding poses that are dragging down the solve
+
+Every camera's solve also runs a **leave-one-out (LOO) diagnostic**: for
+each accepted pose it re-solves with just that one pose left out and
+reports how much the AX=XB residual improves. A pose that's actually bad
+(misdetection, board slipped, arm not fully settled, a TF glitch) drags the
+residual up, so dropping it makes the residual noticeably better; a fine
+pose barely moves it either way. The report is printed live, ranked
+worst-offender-first, right under each camera's solved transform.
+
+Every run also writes `handeye_samples_<camera>.yaml` (raw per-pose
+AX/AB data) next to the `cam_tf_*.launch.py` it produces. That file lets
+you re-run the diagnostic, try dropping specific poses, and re-solve —
+**without moving the robot again**:
+
+```bash
+ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml
+ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml \
+    --exclude-poses "4,9" --write-launch
+```
+
+`--exclude-poses` takes the "Pose i/total" number printed live for that
+pose (i.e. its 1-based index into the `--pose-file` used for that run), not
+a position in the accepted-samples list — some poses may have been
+missed/rejected for a given camera and so don't consume a "pose#" at all
+for it. Quote the list (`"4,9"`, not `4,9`) so the shell passes it through
+as a single argument. If dropping the flagged pose(s) doesn't bring the
+residual down to a reasonable level, the error is probably not any single
+pose — suspect the
+mounted target's measured size, the camera intrinsics, or the extrinsic
+frame convention (see the "Gotcha" section below) instead.
 
 ### Future work
 
-- **Switch `--board-type` back to `charuco` (its long-term default) once a
-  printer and a rigid flat backing (acrylic/Dibond/plywood, not foam-core)
-  are available.** It currently defaults to `aruco` — the existing grid
-  board (`irb_target_image.png`) already printed and mounted — purely
-  because that's the only board on hand right now. A GridBoard's pose comes
-  from marker corners alone with no checkerboard-corner refinement, so it's
-  noisier and less occlusion-tolerant than ChArUco; once the ChArUco target
-  is printed (`generate_charuco_target.py`, printed at 100% and mounted
-  rigidly per its header comment) and mounted, re-run with `--board-type
-  charuco` and prefer that result.
-- **Design a combined/cam2-aware pose set.** `joints_5_6mm.yaml` was tuned
-  for cam1's FOV; cam2 is mounted steep/overhead and likely needs its own
-  pose subset (board presented closer to face-on to cam2's viewing angle,
-  arm held higher/closer) rather than reusing cam1's poses as-is.
+- **Switch `run_handeye_calibration.py`'s `BOARD_TYPE` constant back to
+  `'charuco'` (its long-term default) once a printer and a rigid flat
+  backing (acrylic/Dibond/plywood, not foam-core) are available.** It's
+  currently `'aruco'` — the existing grid board (`irb_target_image.png`)
+  already printed and mounted — purely because that's the only board on
+  hand right now. A GridBoard's pose comes from marker corners alone with
+  no checkerboard-corner refinement, so it's noisier and less
+  occlusion-tolerant than ChArUco; once the ChArUco target is printed
+  (`generate_charuco_target.py`, printed at 100% and mounted rigidly per
+  its header comment) and mounted, switch the constant and prefer that
+  result.
+- **Design a combined/multi-camera-aware pose set.** `joints_5_6mm.yaml` was
+  tuned for cam1's FOV; cam2 (steep/overhead) and cam3 likely each need
+  their own pose subset (board presented closer to face-on to that camera's
+  viewing angle, arm held/positioned accordingly) rather than reusing cam1's
+  poses as-is.
 
 ## Gotcha: check the parent frame before trusting a new result
 

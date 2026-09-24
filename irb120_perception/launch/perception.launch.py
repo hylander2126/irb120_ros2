@@ -1,14 +1,9 @@
 """
 Perception launch file.
 
-Switch between segmentation backends via the 'method' argument:
+Launches the DBSCAN segmentation backend:
 
-  ros2 launch irb120_perception perception.launch.py method:=dbscan
-  ros2 launch irb120_perception perception.launch.py method:=sam
-
-Enable the debug pipeline (perception_debugger node) with:
-
-  ros2 launch irb120_perception perception.launch.py method:=sam debug_perception:=true
+  ros2 launch irb120_perception perception.launch.py
 
 robot_mask_filter and object_detector are compute-heavy but only actually
 needed briefly (see their own docstrings' "On/off gate" section) —
@@ -19,60 +14,44 @@ detections in RViz without running a control script):
 
   ros2 launch irb120_perception perception.launch.py active_at_start:=false
 
-DBSCAN: runs under system python, no GPU needed.
-SAM:    runs under the venv python (~/.venvs/.venv_torch_SAM/bin/python3),
-        requires CUDA GPU and SAM 2 weights.
-
 Pipeline topology:
 
-  RealSense (cam1) ──┬──▶ robot_mask_filter ──▶ object_detector_dbscan
-  RealSense (cam2) ──┘        │ ~/points_masked_dbscan  (both cameras fused, DBSCAN input)
-                               └ ~/depth_masked_sam      (cam1 only, SAM input)
+  RealSense (cam1) ──┐
+  RealSense (cam2) ──┼──▶ robot_mask_filter ──▶ object_detector_dbscan
+  RealSense (cam3) ──┘        ~/points_masked_dbscan  (all three cameras fused)
 
-  DBSCAN gets both cameras' point clouds fused (see robot_mask_filter's
-  docstring) to reduce occlusion and increase point density. SAM stays
-  single-camera — set cam2_cloud_topic:='' to disable fusion entirely.
+  robot_mask_filter fuses all three cameras' point clouds (see its own
+  docstring) to reduce occlusion and increase point density. Set
+  cam2_cloud_topic:='' / cam3_cloud_topic:='' to disable fusion for that
+  camera individually.
 """
 
-import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
-from launch.substitutions import EqualsSubstitution, LaunchConfiguration
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from ament_index_python.packages import get_package_share_directory
 
-PKG_SHARE      = get_package_share_directory('irb120_perception')
-SAM_WEIGHTS    = os.path.join(PKG_SHARE, 'weights', 'sam2.1_hiera_tiny.pt')
-VENV_SITE_PKGS = os.path.expanduser(
-    '~/.venvs/.venv_torch_SAM/lib/python3.12/site-packages')
-
-# Masked topic names published by robot_mask_filter
+# Masked topic published by robot_mask_filter
 MASKED_CLOUD = '/robot_mask_filter/points_masked_dbscan'
-MASKED_DEPTH = '/robot_mask_filter/depth_masked_sam'
 
 
 def generate_launch_description() -> LaunchDescription:
-    method_arg = DeclareLaunchArgument(
-        'method',
-        default_value='dbscan',
-        description="Segmentation backend: 'dbscan' or 'sam'",
-    )
-
-    debug_arg = DeclareLaunchArgument(
-        'debug_perception',
-        default_value='false',
-        description='Launch the perception_debugger node for on-demand SAM pipeline inspection.',
-    )
-
     cam2_cloud_arg = DeclareLaunchArgument(
         'cam2_cloud_topic',
         default_value='/realsense2/depth/color/points',
         description=(
             "Second camera's point cloud, fused into the DBSCAN input by "
-            "robot_mask_filter. Set to '' to disable fusion and run DBSCAN "
-            "on camera 1 alone."
+            "robot_mask_filter. Set to '' to disable fusion for this camera."
+        ),
+    )
+
+    cam3_cloud_arg = DeclareLaunchArgument(
+        'cam3_cloud_topic',
+        default_value='/realsense3/depth/color/points',
+        description=(
+            "Third camera's point cloud, fused into the DBSCAN input by "
+            "robot_mask_filter. Set to '' to disable fusion for this camera."
         ),
     )
 
@@ -87,7 +66,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     active_param = {'active': ParameterValue(LaunchConfiguration('active_at_start'), value_type=bool)}
 
-    # ---- Robot mask filter (always running, both backends benefit) ----------
+    # ---- Robot mask filter ---------------------------------------------------
     mask_filter_node = Node(
         package='irb120_perception',
         executable='robot_mask_filter',
@@ -97,6 +76,7 @@ def generate_launch_description() -> LaunchDescription:
             'base_frame':  'base_link',
             'input_cloud': '/realsense/depth/color/points',
             'input_cloud2': LaunchConfiguration('cam2_cloud_topic'),
+            'input_cloud3': LaunchConfiguration('cam3_cloud_topic'),
             'input_depth': '/realsense/aligned_depth_to_color/image_raw',
             'camera_info': '/realsense/color/camera_info',
             'robot_mask_padding': 0.08,  # arm mesh links — increase if arm still leaks through
@@ -124,6 +104,28 @@ def generate_launch_description() -> LaunchDescription:
         'dbscan_min_pts':  20,
         'min_cluster_pts': 30,
         'max_cluster_pts': 50000,
+        'outlier_k':          8,    # neighbours sampled per point for local-density check
+        'outlier_std_ratio':  2.0,  # 0 disables; lower = more aggressive stray-point removal
+        # Off (1) by default. Would fuse this many recent frames via
+        # voxel-occupancy consensus before clustering (see
+        # object_detector_dbscan's docstring, "Temporal accumulation") — but
+        # the naive latency estimate of accum_frames/publish_rate assumed
+        # robot_mask_filter sustains something near camera rate (30-90 Hz).
+        # Measured live instead: robot_mask_filter running continuously
+        # (active_at_start default) sustains only ~1-1.5 Hz with heavy
+        # jitter — it's the most expensive node in the chain (full-resolution
+        # mesh/capsule masking on every point, three cameras, one thread) and
+        # was never meant to run flat-out continuously, see its own
+        # docstring's "On/off gate". At that real rate, accum_frames=10 means
+        # 10+ seconds of total silence on ~/object_points before the first
+        # detection — looks exactly like segmentation being broken. Only
+        # raise this for a short, deliberate active window (e.g. around one
+        # press_point_check call) where you can afford to wait and know the
+        # input rate for that window; do not raise it for continuous bringup
+        # viewing without re-measuring `ros2 topic hz
+        # /robot_mask_filter/points_masked_dbscan` first.
+        'accum_frames':     1,
+        'accum_min_hits':   0,  # 0 = auto (~60% of accum_frames)
         'smooth_alpha':    0.3,
         # Union all surviving clusters into one object — only safe if the
         # workspace is scoped to a single physical item per detection cycle.
@@ -131,82 +133,24 @@ def generate_launch_description() -> LaunchDescription:
         'single_object_mode': True,
     }
 
-    # ---- SAM parameters — reads from masked depth image --------------------
-    sam_params = {
-        'input_cloud':    MASKED_DEPTH,
-        'input_image':    '/realsense/color/image_raw',
-        'camera_info':    '/realsense/color/camera_info',
-        'base_frame':     'base_link',
-        'roi_x_min':  0.15,
-        'roi_x_max':  0.80,
-        'roi_y_min': -0.25,
-        'roi_y_max':  0.25,
-        'roi_z_min': -0.01,  # Table at Z≈-0.02; objects start above -0.01
-        'roi_z_max':  0.50,
-        'voxel_size':          0.005,
-        'sam_weights':         SAM_WEIGHTS,
-        'sam_config':          'configs/sam2.1/sam2.1_hiera_t.yaml',
-        'sam_points_per_side':  8,
-        'sam_iou_thresh':       0.85,
-        'sam_min_mask_area':    1000,
-        'sam_min_cluster_pts':  30,
-        'sam_prominent_only':   True,
-        'depth_median_ksize':   5,
-        'outlier_std_ratio':    2.0,
-        'smooth_alpha':         0.3,
-    }
-
-    # ---- DBSCAN node (system python) ----------------------------------------
     dbscan_node = Node(
         package='irb120_perception',
         executable='object_detector_dbscan',
         name='object_detector',
         output='screen',
         parameters=[dbscan_params, active_param],
-        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('method'), 'dbscan')),
     )
 
-    # ---- SAM node -----------------------------------------------------------
-    sam_node = Node(
-        package='irb120_perception',
-        executable='object_detector_sam',
-        name='object_detector',
-        output='screen',
-        parameters=[sam_params, active_param],
-        additional_env={'PYTHONPATH': VENV_SITE_PKGS + ':' + os.environ.get('PYTHONPATH', '')},
-        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('method'), 'sam')),
-    )
-
-    # ---- Debug node (optional) ----------------------------------------------
-    debugger_node = Node(
-        package='irb120_perception',
-        executable='perception_debugger',
-        name='perception_debugger',
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('debug_perception')),
-    )
-
-    # ---- Press point selector -----------------------------------------------
-    # NOT launched here: it's a one-shot node (compute once, print, publish,
-    # exit — see its module docstring), so including it in this persistent
-    # bringup would just fire it once at launch startup, likely before any
-    # object is even detected. Invoke it deliberately instead, once detections
-    # are live, either:
-    #
-    #   ros2 run irb120_perception press_point_selector
-    #
-    # or programmatically from another node's code — import
-    # `select_press_point` (pure function) or `PressPointSelector` (full
-    # node, `.run_once()` method) from irb120_perception.press_point_selector.
-    # See that module's docstring for both.
+    # ---- Contact point selection ---------------------------------------------
+    # NOT launched here: `contact_point_selector` is invoked directly by
+    # `irb120_control/util/press_point_check.py` (select_contact_points()) as
+    # part of a press check, not run as a standalone persistent node. See
+    # CONTACT_SELECTION.md.
 
     return LaunchDescription([
-        method_arg,
-        debug_arg,
         cam2_cloud_arg,
+        cam3_cloud_arg,
         active_at_start_arg,
         mask_filter_node,
         dbscan_node,
-        sam_node,
-        debugger_node,
     ])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Teach calibration poses: move the arm with MoveIt/RViz, press a key to save.
 
-Run alongside the full stack (hardware + MoveIt + both cameras). Drag the
+Run alongside the full stack (hardware + MoveIt + all cameras). Drag the
 tool0 interactive marker in RViz and Plan & Execute as usual; this node shows,
 live, whether each camera currently sees the board (and at what distance and
 viewing angle), and saves the arm's current joint values on a keypress.
@@ -85,15 +85,15 @@ def _write(path: str, joint_names, joint_values, detections) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', default=None, help='Pose YAML to create/append to (default: ~/joints_custom.yaml).')
-    p.add_argument('--cameras', default='realsense,realsense2')
+    p.add_argument('--cameras', default='realsense,realsense2,realsense3')
     p.add_argument('--board-type', choices=['charuco', 'aruco'], default='aruco')
     p.add_argument('--board-yaml', default=None)
     p.add_argument('--marker-length-m', type=float, default=None)
     p.add_argument('--marker-separation-m', type=float, default=None)
     p.add_argument('--square-length-m', type=float, default=None)
     p.add_argument('--min-features', type=int, default=None)
-    p.add_argument('--joint-names-from', default='joints_5_6mm.yaml',
-                   help='Existing pose file to copy the joint name order from.')
+    # p.add_argument('--joint-names-from', default='joints_5_6mm.yaml',
+                #    help='Existing pose file to copy the joint name order from.')
     args = p.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -108,7 +108,7 @@ def main() -> int:
     board = _load_board(args.board_type, board_yaml, args.square_length_m, args.marker_length_m,
                         args.marker_separation_m)
 
-    joint_names, _ = _load_pose_yaml(_resolve_pose_path(None, args.joint_names_from))
+    joint_names = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']# _load_pose_yaml(_resolve_pose_path(None, args.joint_names_from))
     out_path = os.path.abspath(args.out) if args.out else _default_out_path()
     joint_values: List[List[float]] = []
     detections: List[dict] = []

@@ -10,8 +10,45 @@ remaining points spatially with DBSCAN, then for each object computes:
   - Orientation     (PCA principal axes → quaternion, X = longest axis)
 
 Pure geometry, fast, no GPU needed. Works well when objects are separated by a
-gap; fails when objects touch or have similar depth (use the SAM backend,
-`object_detector_sam.py`, for that case instead).
+gap; fails when objects touch or have similar depth, since their points merge
+into a single cluster with no spatial gap to split on.
+
+Before clustering, `remove_sparse_outliers` strips locally-sparse points (e.g.
+a depth-camera "flying pixel" noise trail bleeding off an object edge) that
+would otherwise chain-link onto a real cluster via DBSCAN's single-linkage
+behaviour — see that function's docstring in `perception_common.py`.
+
+Temporal accumulation (`accum_frames`): since the robot is stationary and out
+of frame while this runs, single-frame noise can be distinguished from real
+geometry by whether it *recurs* across frames, not just by local density
+within one frame. When `accum_frames > 1`, each incoming ROI-cropped frame is
+pushed into a `FrameAccumulator` (see its docstring) and segmentation only
+runs on the fused, persistence-filtered cloud once the sliding window fills.
+Off (`accum_frames = 1`, single-frame, original behaviour) by default,
+including in `perception.launch.py` — do not enable it for continuous
+bringup viewing without reading the next paragraph first.
+
+Budget for this: the naive estimate is `accum_frames / rate` seconds of
+latency before the first usable detection, using the fused-cloud publish
+rate. That estimate is only as good as your assumption about `rate` —
+`robot_mask_filter` does NOT sustain anywhere near camera rate when run
+continuously (`active_at_start` default): measured live it was ~1-1.5 Hz
+with heavy jitter, not 30-90 Hz, because it's the most expensive node in the
+chain (full-resolution mesh/capsule masking, three cameras, one thread — see
+its own docstring's "On/off gate") and was designed to be toggled on briefly
+per check, not run flat-out. `accum_frames=10` against a wrongly-assumed
+near-camera-rate input once meant 10+ seconds of total silence on
+`~/object_points` in practice — indistinguishable from segmentation being
+broken. Re-measure with `ros2 topic hz <input_cloud_pc topic>` under the
+actual conditions you'll run in before setting this above 1; a short,
+deliberate active window (e.g. around one `press_point_check` call, where a
+several-second wait is expected and budgeted via `timeout_sec`) is a much
+safer place to use it than continuous bringup viewing. While the window is
+filling, this node publishes nothing at all (not even an empty detection) on
+`~/object_points`/`~/detections`, so a consumer that reads "the first message
+after activation" (e.g. `press_point_check.check_press_point`) never mistakes
+a warm-up frame for "no objects detected" — but that same silence is
+indistinguishable from a hang if the window never fills in a reasonable time.
 
 Single-object workspaces (`single_object_mode`): DBSCAN naturally reports one
 cluster per disconnected point group, so a rigid object with a real 3D gap
@@ -54,7 +91,8 @@ from sensor_msgs.msg import PointCloud2
 from sklearn.cluster import DBSCAN
 
 from irb120_perception.perception_common import (
-    ObjectDetectorBase, apply_tf, pointcloud2_to_xyz, voxel_downsample,
+    FrameAccumulator, ObjectDetectorBase, apply_tf, pointcloud2_to_xyz,
+    remove_sparse_outliers, voxel_downsample,
 )
 
 
@@ -70,6 +108,10 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.declare_parameter('min_cluster_pts', 30)
         self.declare_parameter('max_cluster_pts', 50000)
         self.declare_parameter('single_object_mode', True)
+        self.declare_parameter('outlier_k',         8)    # neighbours sampled per point for local-density check
+        self.declare_parameter('outlier_std_ratio', 2.0)  # 0 disables the check
+        self.declare_parameter('accum_frames',   1)  # sliding-window length; 1 = off (single-frame, original behaviour)
+        self.declare_parameter('accum_min_hits', 0)  # min distinct frames a voxel must appear in; 0 = auto (~60% of accum_frames)
 
         p = self.get_parameter
         self.dbscan_eps     = p('dbscan_eps').value
@@ -77,6 +119,19 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.min_pts        = p('min_cluster_pts').value
         self.max_pts         = p('max_cluster_pts').value
         self.single_object_mode = p('single_object_mode').value
+        self.outlier_k          = p('outlier_k').value
+        self.outlier_std_ratio  = p('outlier_std_ratio').value
+
+        accum_frames = int(p('accum_frames').value)
+        if accum_frames > 1:
+            accum_min_hits = int(p('accum_min_hits').value)
+            if accum_min_hits <= 0:
+                accum_min_hits = max(2, int(np.ceil(0.6 * accum_frames)))
+            self._accumulator = FrameAccumulator(accum_frames, self.voxel_size, accum_min_hits)
+            self.get_logger().info(
+                f'Temporal accumulation on: {accum_frames} frames, min_hits={accum_min_hits}')
+        else:
+            self._accumulator = None
 
         # ---- QoS --------------------------------------------------------------
         sensor_qos = QoSProfile(
@@ -89,6 +144,14 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.get_logger().info('object_detector ready [DBSCAN]')
 
     # -------------------------------------------------------------------------
+
+    def _on_activate(self):
+        # Fresh activation window -> fresh temporal window. Otherwise the
+        # first fused cloud of a new check could blend in frames buffered
+        # from whatever the scene looked like the *previous* time this node
+        # was active (a different object, or the same object before it moved).
+        if self._accumulator is not None:
+            self._accumulator.reset()
 
     def _cloud_cb(self, msg: PointCloud2):
         """Receives a PointCloud2 (possibly multi-camera fused), transforms to
@@ -125,12 +188,24 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         )
         pts_roi = pts_base[mask]
 
+        if self._accumulator is not None:
+            fused = self._accumulator.add(pts_roi)
+            if fused is None:
+                # Sliding window still warming up — publish nothing at all
+                # (not even empty) so a consumer waiting for "the first
+                # message" after activation doesn't grab a warm-up frame.
+                # See this module's docstring, "Temporal accumulation".
+                return
+            pts_for_seg = fused
+        else:
+            pts_for_seg = pts_roi
+
         # Not enough points to form even one cluster — publish empty and bail
-        if pts_roi.shape[0] < self.min_pts:
+        if pts_for_seg.shape[0] < self.min_pts:
             self._publish_empty(msg.header)
             return
 
-        clusters = self._segment_dbscan(pts_roi)
+        clusters = self._segment_dbscan(pts_for_seg)
 
         if not clusters:
             # No clusters found — reset EMA state so stale smoothing doesn't
@@ -151,8 +226,24 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         cameras both see the same surface, their transformed points land in
         (or very near) the same voxel cells and collapse to one representative
         point, rather than just doubling density everywhere.
+
+        When temporal accumulation is on, `pts_roi` here is already the fused,
+        one-point-per-surviving-voxel output of `FrameAccumulator.fuse()` at
+        this same `voxel_size` — this call is then a cheap near-no-op (each
+        point already occupies its own voxel) rather than a real downsample,
+        kept only so this function's contract doesn't depend on whether the
+        caller accumulated first.
         """
         pts_down = voxel_downsample(pts_roi, self.voxel_size)
+
+        # Strip locally-sparse points (e.g. a depth-camera "flying pixel" noise
+        # trail bleeding off an object edge) *before* clustering. DBSCAN's
+        # single-linkage chaining would otherwise happily absorb a sparse trail
+        # like that into a real object's cluster one point-hop at a time, or
+        # bridge two genuinely separate objects into one. See
+        # `remove_sparse_outliers`'s docstring.
+        if self.outlier_std_ratio > 0:
+            pts_down = remove_sparse_outliers(pts_down, self.outlier_k, self.outlier_std_ratio)
 
         if len(pts_down) < self.min_pts:
             return []

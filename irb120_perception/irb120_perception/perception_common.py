@@ -1,18 +1,19 @@
 """
-Shared geometry helpers and publishing base class for the object detector backends.
-====================================================================================
-`object_detector_dbscan.py` and `object_detector_sam.py` are separate nodes (different
-runtime deps — DBSCAN needs only numpy/scipy/sklearn, SAM needs torch+cv2+sam2 in a
-GPU venv) but they share:
+Shared geometry helpers and publishing base class for the object detector backend(s).
+=======================================================================================
+`object_detector_dbscan.py` subclasses `ObjectDetectorBase(Node)` here for:
 
   - PointCloud2 <-> numpy conversion, TF application, PCA orientation, convex hulls
   - The Detection3DArray / MarkerArray publishing logic and EMA pose smoothing
 
-That shared surface lives here as free functions plus one `ObjectDetectorBase(Node)`
-that each backend subclasses. Backend-specific segmentation stays in the subclass.
+That shared surface lives here as free functions plus one `ObjectDetectorBase(Node)`,
+split out from the DBSCAN-specific segmentation code so a future alternate backend
+(e.g. a different segmentation method) can subclass it without duplicating this
+plumbing.
 """
 
 import struct
+from collections import deque
 
 import numpy as np
 import rclpy
@@ -28,7 +29,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs  # noqa: F401
 
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, cKDTree
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ def xyzl_to_pointcloud2(clusters: list, frame_id: str, stamp) -> PointCloud2:
 
     Fields: x, y, z, label (int32 = index into `clusters`, i.e. the same
     obj_id used for Detection3D.id). Lets downstream nodes (e.g.
-    press_point_selector) recover per-object raw points from a single topic
+    contact_point_selector) recover per-object raw points from a single topic
     without redoing segmentation.
     """
     if clusters:
@@ -244,13 +245,109 @@ def voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
     return pts[unique]
 
 
-def remove_outliers(pts: np.ndarray, std_ratio: float) -> np.ndarray:
-    """Remove points further than std_ratio * std from the centroid."""
-    if len(pts) < 4:
+def remove_sparse_outliers(pts: np.ndarray, k: int, std_ratio: float) -> np.ndarray:
+    """Remove points sitting in a locally sparse region — e.g. a RealSense
+    "flying pixel" noise trail bleeding off a depth edge, which DBSCAN's
+    single-linkage chaining can otherwise merge onto a real dense object one
+    point-to-point hop at a time, even though the trail as a whole sits far
+    from the object.
+
+    Unlike a centroid-distance filter, this looks at *local* density (mean
+    distance to each point's k nearest neighbours), so it doesn't penalise
+    points that are legitimately far from the centroid but still embedded in
+    the dense body — e.g. either end of a tall/elongated object.
+    """
+    if len(pts) <= k:
         return pts
-    dists = np.linalg.norm(pts - pts.mean(axis=0), axis=1)
-    # Keep only points within mean + N*std of the centroid distance distribution
-    return pts[dists < dists.mean() + std_ratio * dists.std()]
+    tree = cKDTree(pts)
+    # k+1 because a point's own nearest "neighbour" (distance 0) is itself
+    dists, _ = tree.query(pts, k=k + 1)
+    mean_knn_dist = dists[:, 1:].mean(axis=1)
+    thresh = mean_knn_dist.mean() + std_ratio * mean_knn_dist.std()
+    return pts[mean_knn_dist <= thresh]
+
+
+class FrameAccumulator:
+    """Fuses a sliding window of single-frame point clouds from a static scene
+    into one denoised cloud, using voxel occupancy *persistence* rather than
+    single-frame density.
+
+    Rationale: with the robot at rest and out of frame, the scene genuinely
+    isn't changing, so any difference between consecutive frames is sensor
+    noise (RealSense "flying pixels", specular dropouts, per-frame depth
+    jitter) rather than signal. A real surface point lands in the same voxel
+    cell on nearly every frame; noise doesn't — it's spatially transient even
+    when, within a single frame, it's locally dense enough to survive
+    `remove_sparse_outliers`. Requiring a voxel to be hit by at least
+    `min_hits` of the last `n_frames` frames catches exactly the noise that a
+    single-frame filter structurally cannot: a noise cluster that looks dense
+    *within one frame* but doesn't recur across frames.
+
+    This replaces the single-frame `voxel_downsample` step (its output is
+    already one point per surviving voxel), not `remove_sparse_outliers`,
+    which is still worth running afterward to catch any residual noise voxel
+    that happens to be spatially isolated but temporally persistent (e.g. a
+    reflective speck that fools the depth sensor the same way every frame).
+    """
+
+    def __init__(self, n_frames: int, voxel_size: float, min_hits: int):
+        self.n_frames = max(1, int(n_frames))
+        self.voxel_size = voxel_size
+        self.min_hits = max(1, min(int(min_hits), self.n_frames))
+        self._frames: deque[np.ndarray] = deque(maxlen=self.n_frames)
+
+    def reset(self):
+        """Drop all buffered frames — call when a new activation window starts
+        so a stale frame from before the object moved/was reset doesn't blend
+        into the first fused cloud of the new window."""
+        self._frames.clear()
+
+    def add(self, pts: np.ndarray) -> np.ndarray | None:
+        """Push one frame's (already ROI-cropped, base-frame) points.
+
+        Returns the fused cloud once `n_frames` frames have been buffered
+        (a full sliding window thereafter, refused on every call), or None
+        while still warming up — callers must treat None as "no result yet",
+        not "zero detections", so a warm-up frame is never mistaken for an
+        empty scene.
+        """
+        self._frames.append(pts)
+        if len(self._frames) < self.n_frames:
+            return None
+        return self.fuse()
+
+    def fuse(self) -> np.ndarray:
+        """Voxel-occupancy-consensus fusion of every currently buffered frame."""
+        frames = [f for f in self._frames if len(f)]
+        if not frames:
+            return np.zeros((0, 3), dtype=np.float32)
+
+        # Step 1: collapse each frame to one representative point per voxel it
+        # touches (mirrors voxel_downsample, done per-frame so a dense cluster
+        # within a single frame can't inflate that frame's "vote").
+        idx_fv, pts_fv = [], []
+        for fi, pts in enumerate(frames):
+            idx = np.floor(pts / self.voxel_size).astype(np.int64)
+            _, unique = np.unique(idx, axis=0, return_index=True)
+            idx_fv.append(idx[unique])
+            pts_fv.append(pts[unique])
+        idx_fv = np.concatenate(idx_fv, axis=0)
+        pts_fv = np.concatenate(pts_fv, axis=0)
+
+        # Step 2: group those per-frame representatives by voxel (now ignoring
+        # which frame each came from) and count *distinct frames* per voxel —
+        # each frame contributed at most one point per voxel above, so this
+        # count is exactly the persistence count, not a raw point count.
+        voxel_ids, inverse = np.unique(idx_fv, axis=0, return_inverse=True)
+        hit_counts = np.bincount(inverse, minlength=len(voxel_ids))
+
+        # Represent each surviving voxel by the mean of its per-frame points —
+        # averages down inter-frame positional jitter as a side benefit.
+        sums = np.zeros((len(voxel_ids), 3), dtype=np.float64)
+        np.add.at(sums, inverse, pts_fv.astype(np.float64))
+        means = sums / hit_counts[:, np.newaxis]
+
+        return means[hit_counts >= self.min_hits].astype(np.float32)
 
 
 def label_color(idx: int) -> ColorRGBA:
@@ -269,7 +366,7 @@ def label_color(idx: int) -> ColorRGBA:
 
 class ObjectDetectorBase(Node):
     """
-    Common plumbing for both segmentation backends: ROI/voxel/smoothing params,
+    Common plumbing for object detector backend(s): ROI/voxel/smoothing params,
     TF, the Detection3D/MarkerArray/object_points publishers, per-object EMA
     pose smoothing, and marker construction.
 
@@ -277,18 +374,18 @@ class ObjectDetectorBase(Node):
     `self._publish_results(header, clusters)` / `self._publish_empty(header)`
     with a list of per-object (Ni,3) point arrays in `self.base_frame`.
 
-    On/off gate: this is compute-heavy (point cloud math every frame at best,
-    a full SAM inference pass at worst) but is only actually needed briefly —
-    e.g. right before `press_point_check.check_press_point()` runs, while the
-    robot is out of the way of the object. `active` (declared param, default
-    True — matches the historical always-on behaviour) gates whether
-    subclasses' data callbacks do any work at all; toggle at runtime via:
+    On/off gate: this is compute-heavy (point cloud math every frame) but is
+    only actually needed briefly — e.g. right before
+    `press_point_check.check_press_point()` runs, while the robot is out of
+    the way of the object. `active` (declared param, default True — matches
+    the historical always-on behaviour) gates whether subclasses' data
+    callbacks do any work at all; toggle at runtime via:
 
         ros2 service call /object_detector/set_active std_srvs/srv/SetBool "{data: false}"
 
     Subclasses must add `if not self._active: return` at the top of whatever
     callback triggers segmentation (this base class has no opinion on which
-    callback that is, since DBSCAN and SAM key off different messages).
+    callback that is).
     """
 
     def __init__(self, node_name: str):
@@ -342,7 +439,10 @@ class ObjectDetectorBase(Node):
         self._smooth_axes.clear()
 
     def _on_set_active(self, req, res):
+        was_active = self._active
         self._active = bool(req.data)
+        if self._active and not was_active:
+            self._on_activate()
         if not self._active:
             # Don't leave a stale detection/hull hanging around once we stop
             # updating it — clear immediately rather than freezing in place.
@@ -355,6 +455,13 @@ class ObjectDetectorBase(Node):
         res.success = True
         res.message = f"active={self._active}"
         return res
+
+    def _on_activate(self):
+        """Hook for subclasses: called on the inactive -> active transition,
+        before any new data callback runs. Override to reset any per-activation
+        state (e.g. a temporal accumulator) that must not carry over from a
+        previous activation window."""
+        pass
 
     # -------------------------------------------------------------------------
     # Publish

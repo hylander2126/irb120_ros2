@@ -11,7 +11,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     TimerAction,
 )
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_param_builder import ParameterBuilder
@@ -87,20 +87,6 @@ def generate_launch_description():
             arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit.rviz")],
             parameters=[moveit_config.to_dict()],
         )],
-        condition=UnlessCondition(LaunchConfiguration('debug_perception')),
-    )
-
-    rviz_debug_node = TimerAction(
-        period=5.0,
-        actions=[Node(
-            package="rviz2",
-            executable="rviz2",
-            name="rviz2",
-            output="log",
-            arguments=["-d", os.path.join(moveit_cfg_pkg, "rviz", "moveit_debug_perception.rviz")],
-            parameters=[moveit_config.to_dict()],
-        )],
-        condition=IfCondition(LaunchConfiguration('debug_perception')),
     )
 
     ## RealSense Bringup (both cameras and both TFs)
@@ -114,18 +100,17 @@ def generate_launch_description():
             PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam2.launch.py"])
         )
     )
+    bringup_cam3 = IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam3.launch.py"])
+            )
+        )
 
     perception_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([perception_pkg, "launch", "perception.launch.py"])
         ),
         launch_arguments={
-            # NOTE: perception.launch.py's own arg is named 'method', not
-            # 'perception_method' — this key must match that name or the
-            # value passed through here is silently ignored and perception.launch.py
-            # just keeps its own 'dbscan' default regardless of what's passed below.
-            'method': LaunchConfiguration('perception_method'),
-            'debug_perception': LaunchConfiguration('debug_perception'),
             'active_at_start': LaunchConfiguration('perception_active_at_start'),
         }.items(),
     )
@@ -254,20 +239,6 @@ def generate_launch_description():
             'Arrow keys: ↑/↓ = +Z/-Z,  ←/→ = -X/+X.'
         ),
     )
-    perception_method_arg = DeclareLaunchArgument(
-        'perception_method',
-        default_value='dbscan',
-        description="Perception segmentation backend: 'dbscan' or 'sam'",
-    )
-    debug_perception_arg = DeclareLaunchArgument(
-        'debug_perception',
-        default_value='false',
-        description=(
-            'Launch the perception_debugger node and the debug RViz config. '
-            'Trigger a snapshot at runtime with: '
-            'ros2 topic pub --once /object_detector/sam_debug_snapshot std_msgs/msg/Empty \'{}\''
-        ),
-    )
     perception_active_at_start_arg = DeclareLaunchArgument(
         'perception_active_at_start',
         default_value='true',
@@ -279,8 +250,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        perception_method_arg,
-        debug_perception_arg,
         perception_active_at_start_arg,
         egm_cond_time_arg,
         start_servo_arg,
@@ -289,9 +258,9 @@ def generate_launch_description():
 
         move_group_node,
         rviz_node,
-        rviz_debug_node,
         bringup_cam1,
         bringup_cam2,
+        bringup_cam3,
         perception_launch,
         net_ft_node,
         netft_preprocessor_node,

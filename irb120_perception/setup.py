@@ -12,7 +12,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.py')),
         ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
-        ('share/' + package_name + '/weights', glob('weights/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,9 +24,7 @@ setup(
         'console_scripts': [
             'object_detector_dbscan = irb120_perception.object_detector_dbscan:main',
             'object_detector_sam = irb120_perception.object_detector_sam:main',
-            'perception_debugger = irb120_perception.perception_debugger:main',
             'robot_mask_filter = irb120_perception.robot_mask_filter:main',
-            'press_point_selector = irb120_perception.press_point_selector:main',
             'contact_point_selector = irb120_perception.contact_point_selector:main',
         ],
     },
