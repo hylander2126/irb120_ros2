@@ -56,6 +56,12 @@ BAG_TOPICS = [f"/{ns}/{t}" for ns in CAMERAS.values()
                         "aligned_depth_to_color/image_raw", "aligned_depth_to_color/camera_info")] + [
     "/tf", "/tf_static", "/joint_states", DBSCAN_TOPIC, CULL_TOPIC, "/netft_data_transformed"]
 
+# Lowest finger-ball center the selector may pick (base_link; table top is z=-0.021). Below
+# this the horizontal push puts the wrist/sensor into the table: at ~18 mm above the table
+# MoveIt found no valid pose. 0.06 (81 mm above the table) is the lowest the old
+# hand-tuned pushes used. Also applies to the press/forward contacts, which sit far higher.
+MIN_BALL_CENTER_Z = 0.06
+
 CONTACT_COLORS = {"planar_push": (0, 200, 0), "forward_tip": (13, 140, 255), "press": (255, 0, 255)}  # BGR
 
 
@@ -176,7 +182,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     """Run one perceive stage in `episode`; returns its snapshot.json record (ok=True on success)."""
     stage = episode.begin_stage("perceive", label=label)
     out = stage.path
-    record = {"ok": False, "label": label}
+    record = {"ok": False, "label": label, "min_ball_center_z": MIN_BALL_CENTER_Z}
     frames = {cam: {} for cam in CAMERAS}
     dbscan, cull = [], []
     subs = [node.create_subscription(PointCloud2, DBSCAN_TOPIC, dbscan.append, 10),
@@ -231,7 +237,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         record["error"] = "SAM cull removed the whole object"
     else:
         try:
-            contacts = _jsonable(select_contact_points(obj))
+            contacts = _jsonable(select_contact_points(obj, min_ball_center_z=MIN_BALL_CENTER_Z))
             record["ok"] = True
         except ValueError as exc:
             record["error"] = f"contact selection failed: {exc}"
@@ -279,6 +285,12 @@ def latest_contacts(episode):
         return None
     with open(episode.path / stages[-1]["dir"] / "contacts.json") as f:
         return json.load(f)
+
+
+def latest_object_cloud(episode) -> np.ndarray:
+    """The object cloud (base_link) from the episode's most recent successful perceive stage."""
+    stage = next(s for s in reversed(episode.load()["stages"]) if s["kind"] == "perceive" and s["status"] == "ok")
+    return np.load(episode.path / stage["dir"] / "object_cloud.npz")["xyz"]
 
 
 def begin_motion_stage(node, episode, kind: str):

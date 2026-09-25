@@ -45,7 +45,8 @@ from irb120_control.controllers.servo_command_publisher import ServoCommandPubli
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
 from irb120_control.util.ft_tare import tare_netft
-from irb120_control.util.perception_snapshot import begin_motion_stage, lookup, take_snapshot
+from irb120_control.util.object_obstacle import object_obstacle
+from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, lookup, take_snapshot
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
     arc_velocity_xz,
@@ -88,7 +89,7 @@ DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
-SQUASH_STANDOFF = 0.02       # m, pre-squash ball center sits this far above the detected press contact
+SQUASH_STANDOFF = 0.03       # m, pre-squash ball center sits this far above the detected press contact (~14 mm clear of the object's collision box)
 PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
@@ -175,6 +176,7 @@ class ArcStatic(Node):
         # Both set from the detected press contact by set_targets_from_contacts().
         self._pre_squash_pos = None  # world frame
         self._arc_center = None      # world frame (x, y, z)
+        self._object_xyz = None      # detected object cloud (base_link), avoided on the approach
 
         self._tf_buffer       = Buffer()
         self._tf_listener     = TransformListener(self._tf_buffer, self)
@@ -266,18 +268,27 @@ class ArcStatic(Node):
     # ------------------------------------------------------------------ #
 
     def move_to_pre_squash(self) -> bool:
-        return plan_and_execute_pose_goal(
-            self,
-            self._move_group_client,
-            target_position=self._pre_squash_pos,
-            target_orientation=PRE_SQUASH_ORIENTATION,
-            velocity_scale=0.1,
-            acceleration_scale=0.1,
-        )
+        """Plan around the detected object (a collision box only for this move). Also used for
+        retries and between batch trials, from the RETRACT pose ~24 mm above the object."""
+        try:
+            with object_obstacle(self, self._object_xyz):
+                return plan_and_execute_pose_goal(
+                    self,
+                    self._move_group_client,
+                    target_position=self._pre_squash_pos,
+                    target_orientation=PRE_SQUASH_ORIENTATION,
+                    velocity_scale=0.1,
+                    acceleration_scale=0.1,
+                )
+        except RuntimeError as exc:
+            self.get_logger().error(str(exc))
+            return False
 
-    def set_targets_from_contacts(self, contacts: dict) -> bool:
+    def set_targets_from_contacts(self, contacts: dict, object_xyz) -> bool:
         """Pre-squash position and arc center from the detected press contact
-        (selector output is in base_link; this node works in world)."""
+        (selector output is in base_link; this node works in world), and the
+        object cloud to plan the approach around."""
+        self._object_xyz = object_xyz
         press = contacts["press"]
         pivot = (press.get("geometry") or {}).get("pivot")
         if not press["available"] or pivot is None:
@@ -296,14 +307,20 @@ class ArcStatic(Node):
 
     def move_to_home(self) -> bool:
         """Return to the robot's all-zero joint configuration, gently — same
-        velocity/acceleration scale as the pre-squash approach."""
-        return plan_and_execute_joint_goal(
-            self,
-            self._move_group_client,
-            joint_positions=HOME_JOINT_POSITIONS,
-            velocity_scaling_factor=0.1,
-            acceleration_scaling_factor=0.1,
-        )
+        velocity/acceleration scale as the pre-squash approach — planning around
+        the object (back at rest after the tip; RETRACT leaves the finger above its box)."""
+        try:
+            with object_obstacle(self, self._object_xyz):
+                return plan_and_execute_joint_goal(
+                    self,
+                    self._move_group_client,
+                    joint_positions=HOME_JOINT_POSITIONS,
+                    velocity_scaling_factor=0.1,
+                    acceleration_scaling_factor=0.1,
+                )
+        except RuntimeError as exc:
+            self.get_logger().error(str(exc))
+            return False
 
     # ------------------------------------------------------------------ #
     #  Subscribers
@@ -863,7 +880,7 @@ def main(args=None) -> int:
         if stage is None:
             node.get_logger().error("No usable perception snapshot -- not moving.")
             return 1
-        if not node.set_targets_from_contacts(contacts):
+        if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
         if not tare_netft(node):

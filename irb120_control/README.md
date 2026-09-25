@@ -53,6 +53,8 @@ There are no hardcoded poses: each motion script takes its targets from the
 episode's latest perception snapshot (taken first if needed) and takes another
 after returning home. `push` pushes at the detected `planar_push` contact;
 `arc_static` squashes at the detected `press` contact and arcs about its pivot.
+The approach moves plan around the detected object (its padded bounding box is
+a MoveIt collision object during the approach only; `util/object_obstacle.py`).
 
 ```bash
 ros2 run irb120_control episode snapshot flashlight           # perception only, no motion

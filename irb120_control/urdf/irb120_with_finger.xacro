@@ -119,6 +119,22 @@
     <child link="root_sensor"/>
   </joint>
 
+  <!-- The adapters, sensor plate and NetFT body have no collision geometry of their own; one
+       oversized cylinder covers all of them: 90 mm diameter, from the tool0 flange face to the
+       sensor's output face where the finger / ChArUco mount attaches (85.8 mm along tool0 +X). -->
+  <xacro:property name="tool_stack_length" value="0.0858"/>
+  <link name="tool_stack_collision">
+    <collision>
+      <origin xyz="${tool_stack_length / 2} 0 0" rpy="0 ${pi/2} 0"/>
+      <geometry><cylinder radius="0.045" length="${tool_stack_length}"/></geometry>
+    </collision>
+  </link>
+  <joint name="tool0_to_tool_stack_collision" type="fixed">
+    <parent link="tool0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="tool_stack_collision"/>
+  </joint>
+
   <xacro:if value="${use_charuco_mount}">
     <!-- Calibration-only terminal attachment. Its mounting plane is the NetFT output face. -->
     <link name="charuco_mount">

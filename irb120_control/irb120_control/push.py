@@ -36,7 +36,8 @@ from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
-from irb120_control.util.perception_snapshot import begin_motion_stage, take_snapshot
+from irb120_control.util.object_obstacle import object_obstacle
+from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, take_snapshot
 from irb120_control.util.runtime_log_dir import (
     module_constants,
     save_ft_pose_log,
@@ -52,7 +53,7 @@ EE_LINK    = "finger_ball_center"
 GROUP_NAME = "manipulator"
 
 PUSH_DISTANCE            = 0.080   # m
-PUSH_STANDOFF            = 0.030   # m, pre-push ball center sits this far behind (-X) the detected contact
+PUSH_STANDOFF            = 0.040   # m, pre-push ball center sits this far behind (-X) the detected contact (~14 mm clear of the object's collision box)
 PUSH_ORIENTATION         = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 PUSH_VELOCITY_SCALE      = 0.01    # fraction of joint limits (~5 mm/s at this pose)
 PUSH_MAX_CARTESIAN_SPEED = 0.010   # m/s hard ceiling — secondary safety cap
@@ -84,6 +85,7 @@ class Push(Node):
         super().__init__("push")
         self._object = object_name
         self._pre_push_pos = None  # set from the detected planar_push contact in main()
+        self._object_xyz = None    # detected object cloud (base_link), avoided on the approach
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
         self._wrench_sub        = self.create_subscription(
@@ -199,13 +201,19 @@ class Push(Node):
     # ------------------------------------------------------------------ MoveIt helpers
 
     def move_to_pre_push(self, velocity_scale: float = APPROACH_VELOCITY_SCALE) -> bool:
-        return plan_and_execute_pose_goal(
-            self,
-            self._move_group_client,
-            target_position=self._pre_push_pos,
-            target_orientation=PUSH_ORIENTATION,
-            velocity_scale=velocity_scale,
-        )
+        """Plan around the detected object (a collision box only for this move)."""
+        try:
+            with object_obstacle(self, self._object_xyz):
+                return plan_and_execute_pose_goal(
+                    self,
+                    self._move_group_client,
+                    target_position=self._pre_push_pos,
+                    target_orientation=PUSH_ORIENTATION,
+                    velocity_scale=velocity_scale,
+                )
+        except RuntimeError as exc:
+            self.get_logger().error(str(exc))
+            return False
 
     def _cartesian_move(self, x_distance: float, velocity_scale: float) -> bool:
         """Move the EE straight in X by x_distance (signed) at the given velocity scale."""
@@ -297,6 +305,7 @@ def main(args=None) -> int:
             return 1
         ball = contact["ball_center"]
         node._pre_push_pos = (ball[0] - PUSH_STANDOFF, ball[1], ball[2])
+        node._object_xyz = latest_object_cloud(episode)
         node.get_logger().info(f"planar_push contact ball center {ball}; pre-push {node._pre_push_pos}")
 
         if not ensure_egm_active(node):
@@ -348,10 +357,17 @@ def main(args=None) -> int:
     finally:
         stop_recording(node)
         if node._push_started and rclpy.ok():
-            # Home, so the post-push snapshot sees the object without the arm in the way.
-            home_ok = plan_and_execute_joint_goal(
-                node, node._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
-                velocity_scaling_factor=APPROACH_VELOCITY_SCALE, acceleration_scaling_factor=APPROACH_VELOCITY_SCALE)
+            # Home, so the post-push snapshot sees the object without the arm in the way. The pushed
+            # object is somewhere in its old box stretched PUSH_DISTANCE in +X: plan around all of that.
+            try:
+                with object_obstacle(node, node._object_xyz, extend_x=PUSH_DISTANCE):
+                    home_ok = plan_and_execute_joint_goal(
+                        node, node._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
+                        velocity_scaling_factor=APPROACH_VELOCITY_SCALE,
+                        acceleration_scaling_factor=APPROACH_VELOCITY_SCALE)
+            except RuntimeError as exc:
+                node.get_logger().error(str(exc))
+                home_ok = False
             if not home_ok:
                 node.get_logger().error("Return home failed -- skipping the post-push snapshot.")
         deactivate_egm(node)

@@ -31,6 +31,9 @@
     <disable_collisions link1="link_4" link2="link_6" reason="Never"/>
     <disable_collisions link1="link_5" link2="link_6" reason="Adjacent"/>
     <disable_collisions link1="link_6" link2="adapter_robot" reason="Adjacent"/>
+    <disable_collisions link1="link_5" link2="tool_stack_collision" reason="Adjacent"/> <!-- tool-stack cylinder, see irb120_with_finger.xacro -->
+    <disable_collisions link1="link_6" link2="tool_stack_collision" reason="Adjacent"/>
+    <disable_collisions link1="tool_stack_collision" link2="charuco_mount" reason="Adjacent"/>
     <disable_collisions link1="link_6" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_robot" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_sensor" link2="sensor_plate" reason="Adjacent"/>

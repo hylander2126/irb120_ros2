@@ -33,7 +33,7 @@ from irb120_control.arc_static import ArcStatic, run_adaptive_press
 from irb120_control.util.egm_client import deactivate_egm, ensure_egm_active
 from irb120_control.util.episode import Episode
 from irb120_control.util.ft_tare import tare_netft
-from irb120_control.util.perception_snapshot import latest_contacts, take_snapshot
+from irb120_control.util.perception_snapshot import latest_contacts, latest_object_cloud, take_snapshot
 from irb120_control.util.runtime_log_dir import (
     VALID_OBJECTS,
     module_constants,
@@ -71,7 +71,7 @@ def main(args=None) -> int:
         if contacts is None:
             node.get_logger().error("No usable perception snapshot -- not moving.")
             return 1
-        if not node.set_targets_from_contacts(contacts):
+        if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
         if not tare_netft(node):

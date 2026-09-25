@@ -6,6 +6,36 @@ cost time to discover and would cost time again.
 
 ---
 
+## 2026-09-25 — Push test: failed return home, object swirl (open, to discuss)
+
+### Failed return home after the push
+
+Not timing. `move_group` found a path home (0.04 s) but `ValidateSolution` rejected it:
+"Invalid states at index 6 of 54 ... contact between 'detected_object' and 'ball'". The
+home move starts at the pre-push pose, only ~14 mm from the object's padded collision box;
+OMPL's coarser collision checking accepted a path that clips the box corner, and the finer
+post-plan validation caught it. Failed safe (no motion).
+
+Ideas:
+- Retreat straight back in -X (Cartesian, e.g. an extra 50 mm on the return) before planning home.
+- `arc_static`'s move home likely has the same problem: RETRACT (8 mm/s × 3 s = 24 mm) leaves
+  the ball ~14 mm above the box. A longer RETRACT (e.g. 6 s ≈ 48 mm) would clear it, but changes
+  tip timing.
+
+### Object swirls (yaws) during the push
+
+The push line is off the object's center. The selector's planar_push only requires the
+contact within ±5 mm of world y=0 (`y_band`); on the test run the ball center was at
+y=+9 mm while the flashlight's bounding box was centered at y≈-4 mm, a ~13 mm offset.
+
+Ideas:
+- Push along the object's center line: pre-push y = bounding-box middle in y (≈ CoM
+  projection for roughly symmetric objects), keeping x/z from the detected contact.
+- If it still yaws: friction asymmetry under the base, or the ball sliding on a curved side;
+  a flat pusher plate resists both better than a single ball.
+
+---
+
 ## 2026-09-18 — EGM startup command gate
 
 The 11:44 bringup logs showed EGM hardware activation about 0.96 s before the
