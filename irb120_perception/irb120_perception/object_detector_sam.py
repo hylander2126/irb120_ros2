@@ -359,20 +359,9 @@ class SAMObjectDetector(ObjectDetectorBase):
                 continue
             masks = self._mask_generator.generate(color)
             raw_mask_count += len(masks)
-            clusters.extend(self._masks_to_clusters(masks, depth, info_msg, tf))
+            clusters.extend(self._remove_table(
+                self._masks_to_clusters(masks, depth, info_msg, tf)))
 
-        # SAM masks are 2-D regions and commonly include the table touching an
-        # object.  Estimate the shared horizontal support plane in 3-D, then
-        # remove it before instance association.  This is intentionally after
-        # SAM: a mask can still trace the object's visual boundary precisely.
-        plane_samples = (np.concatenate(clusters, axis=0) if clusters else
-                         np.empty((0, 3), dtype=np.float32))
-        plane = fit_dominant_horizontal_plane(
-            plane_samples, distance=self.table_plane_distance)
-        if plane is not None:
-            clusters = [remove_plane(c, plane, self.table_plane_distance)
-                        for c in clusters]
-            clusters = [c for c in clusters if self.min_pts <= len(c) <= self.max_pts]
         clusters = self._fuse_camera_instances(clusters)
         header.frame_id = self.base_frame
 
@@ -420,6 +409,26 @@ class SAMObjectDetector(ObjectDetectorBase):
             if self.min_pts <= len(pts_base) <= self.max_pts:
                 clusters.append(pts_base)
         return clusters
+
+    def _remove_table(self, clusters):
+        """Fit and strip the tabletop from one camera's clusters.
+
+        SAM masks are 2-D regions and commonly include the table touching an
+        object, so the support plane is removed in 3-D after SAM (a mask can
+        still trace the object's visual boundary precisely).  The plane is fit
+        per camera, before fusion: each camera's small extrinsic error puts
+        the table at a slightly different height/tilt, and a single plane over
+        the fused cloud would need a band wide enough to cover all of them.
+        """
+        samples = (np.concatenate(clusters, axis=0) if clusters else
+                   np.empty((0, 3), dtype=np.float32))
+        plane = fit_dominant_horizontal_plane(
+            samples, distance=self.table_plane_distance)
+        if plane is None:
+            return clusters
+        clusters = [remove_plane(c, plane, self.table_plane_distance)
+                    for c in clusters]
+        return [c for c in clusters if self.min_pts <= len(c) <= self.max_pts]
 
     @staticmethod
     def _fuse_camera_instances(clusters):

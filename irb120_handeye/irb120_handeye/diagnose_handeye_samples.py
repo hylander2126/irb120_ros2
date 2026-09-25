@@ -26,14 +26,27 @@ Usage:
   ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml
   ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml \\
       --exclude-poses "4,9" --write-launch
+  ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense.yaml --fit-focal
+
+--fit-focal re-runs the refinement with one extra unknown: a scale on the
+color camera's factory focal length (fx, fy together). The robot's known
+motion between poses at different distances is the metric reference, so a
+wrong focal length -- which scales every PnP distance along the optical axis
+-- shows up as a nonzero scale. Informational only; the launch file written
+by --write-launch still uses the factory intrinsics.
 """
 import argparse
 import os
+
+import cv2
+import numpy as np
+from scipy.optimize import least_squares
 
 from irb120_handeye.run_handeye_calibration import (
     METHODS,
     _print_reprojection_report,
     _print_solution_summary,
+    _reprojection_errors,
     _samples_from_dicts,
     _solve_handeye,
     _write_launch_file,
@@ -60,6 +73,40 @@ def _exclude(s: dict, pose_nums: set) -> dict:
     return {key: [vals[k] for k in keep] for key, vals in s.items()}
 
 
+def _fit_focal_scale(s: dict, sol) -> None:
+    """Refine X, Y and one focal-length scale together; report the scale."""
+    n = len(s['R_g2b'])
+    K0 = s['K']
+
+    def residuals(x):
+        R_x, R_y = cv2.Rodrigues(x[0:3])[0], cv2.Rodrigues(x[6:9])[0]
+        f = 1.0 + x[12]
+        s['K'] = [np.diag([f, f, 1.0]) @ K for K in K0]
+        return np.concatenate([_reprojection_errors(s, k, R_x, x[3:6], R_y, x[9:12]).ravel()
+                               for k in range(n)])
+
+    x0 = np.concatenate([cv2.Rodrigues(sol.R_x)[0].ravel(), sol.t_x,
+                         cv2.Rodrigues(sol.R_y)[0].ravel(), sol.t_y, [0.0]])
+    try:
+        result = least_squares(residuals, x0, loss='huber', f_scale=1.0, x_scale='jac')
+        rms = float(np.sqrt(2 * np.mean(residuals(result.x) ** 2)))  # per-corner, like sol.rms_px
+        # 1-sigma from the Gauss-Newton covariance, scaled by the residual variance.
+        J = result.jac
+        dof = max(J.shape[0] - J.shape[1], 1)
+        cov = np.linalg.pinv(J.T @ J) * (2 * result.cost / dof)
+    finally:
+        s['K'] = K0
+    scale, sigma = result.x[12] * 100, float(np.sqrt(cov[12, 12])) * 100
+    print(f'\n  [focal fit] factory fx,fy x (1 {scale:+.2f} %)  +/- {sigma:.2f} % (1 sigma); '
+          f'RMS {sol.rms_px:.2f} -> {rms:.2f} px')
+    if abs(scale) < 2 * sigma:
+        print('  -> not distinguishable from zero: the factory focal length is consistent with the robot.')
+    else:
+        print(f'  -> factory focal length reads {"SHORT" if scale > 0 else "LONG"} by {abs(scale):.2f} %: '
+              f'PnP distances read {"near" if scale > 0 else "far"} by ~{abs(scale):.2f} %, so '
+              f'check_depth_vs_pnp would report a depth bias of ~{scale:+.2f} % from this alone.')
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--in', dest='in_path', required=True, help='handeye_samples_<camera>.yaml to load.')
@@ -73,6 +120,9 @@ def main() -> int:
     p.add_argument('--write-launch', action='store_true',
                    help='Write a new cam_tf_<ns>_<err>mm.launch.py from this solve, same as '
                         'run_handeye_calibration.py.')
+    p.add_argument('--fit-focal', action='store_true',
+                   help='Also fit a scale on the factory focal length, using the robot as the metric '
+                        'reference (see above).')
     p.add_argument('--out-dir', default=None, help='Defaults to the samples file\'s own directory.')
     args = p.parse_args()
 
@@ -100,6 +150,8 @@ def main() -> int:
     print(f'\n[{ns}] {n} poses')
     _print_solution_summary(link, sol, method_key)
     _print_reprojection_report(ns, sol, s)
+    if args.fit_focal:
+        _fit_focal_scale(s, sol)
 
     if args.write_launch:
         out_dir = args.out_dir or os.path.dirname(in_path)

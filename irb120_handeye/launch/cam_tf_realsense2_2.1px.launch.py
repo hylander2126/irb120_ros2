@@ -1,9 +1,9 @@
 """Static transform acquired via run_handeye_calibration.py (headless).
 
-EYE-TO-HAND: base_link -> realsense_link. Solved with cv2.calibrateHandEye
-(method=park), 16 samples, mean pairwise AX=XB translation
-residual ~4.5mm (algebraic solve-consistency metric, not the
-MoveIt panel's pixel reprojection error -- see run_handeye_calibration.py).
+EYE-TO-HAND: base_link -> realsense2_link. Seeded with cv2.calibrateHandEye
+(method=park), then refined by minimizing board-corner reprojection
+error; 18 samples, RMS reprojection error 2.12 px
+(~1.60 mm at the board).
 
 Not wired into bringup automatically. Point the matching
 bringup_camN.launch.py's cameraN_tf.launch.py include at this file (or copy
@@ -22,14 +22,14 @@ def generate_launch_description() -> LaunchDescription:
             output="log",
             arguments=[
                 "--frame-id", "base_link",
-                "--child-frame-id", "realsense_link",
-                "--x", "0.056033",
-                "--y", "-0.229916",
-                "--z", "0.242406",
-                "--qx", "-0.008187",
-                "--qy", "0.079331",
-                "--qz", "0.198977",
-                "--qw", "0.976754",
+                "--child-frame-id", "realsense2_link",
+                "--x", "0.630145",
+                "--y", "0.326873",
+                "--z", "0.795220",
+                "--qx", "0.348765",
+                "--qy", "0.335450",
+                "--qz", "-0.618309",
+                "--qw", "0.619298",
             ],
         ),
     ]

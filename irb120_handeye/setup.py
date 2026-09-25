@@ -34,6 +34,7 @@ setup(
             'run_handeye_calibration = irb120_handeye.run_handeye_calibration:main',
             'record_calibration_pose = irb120_handeye.record_calibration_pose:main',
             'diagnose_handeye_samples = irb120_handeye.diagnose_handeye_samples:main',
+            'check_depth_vs_pnp = irb120_handeye.check_depth_vs_pnp:main',
         ],
     },
 )

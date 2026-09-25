@@ -180,7 +180,7 @@ def generate_launch_description() -> LaunchDescription:
             'min_cluster_pts': 30,
             'max_cluster_pts': 50000,
             'max_depth_gap_ratio': 0.3,
-            'table_plane_distance': 0.008,
+            'table_plane_distance': 0.005,  # per-camera plane fit; band only covers depth noise, not cross-camera calibration error
             'smooth_alpha': 0.3,
         }, active_param],
     )
