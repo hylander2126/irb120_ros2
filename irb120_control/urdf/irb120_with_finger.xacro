@@ -10,6 +10,7 @@
   <xacro:arg name="rws_password" default="robotics"/>
   <xacro:arg name="egm_port" default="6511"/>
   <xacro:arg name="configure_via_rws" default="true"/>
+  <xacro:arg name="use_charuco_mount" default="false"/>
 
   <xacro:property name="prefix" value="$(arg prefix)"/>
   <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
@@ -20,6 +21,7 @@
   <xacro:property name="rws_password" value="$(arg rws_password)"/>
   <xacro:property name="egm_port" value="$(arg egm_port)"/>
   <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
+  <xacro:property name="use_charuco_mount" value="$(arg use_charuco_mount)"/>
 
   <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58_macro.xacro"/>
   <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58.ros2_control.xacro"/>
@@ -38,7 +40,7 @@
     configure_via_rws="${configure_via_rws}"/>
 
   <!-- ====== Params to tweak ====== -->
-  <xacro:property name="ft_body_length_xyz" value="0 0 -0.02975"/>  <!-- Literallly just the sensor body length. Sensor body 'origin' is its robot-side face. -->
+  <xacro:property name="ft_body_length_xyz" value="0 0 -0.0333244"/>  <!-- Literallly just the sensor body length. Sensor body 'origin' is its robot-side face. -->
   <xacro:property name="finger_mass" value="0.066"/>           <!-- kg (measured finger+ball+screws) -->
   <xacro:property name="finger_cog" value="0.0275"/>         <!-- meters in finger frame (measured) -->
   <xacro:property name="finger_length" value="0.100"/>         <!-- finger length (measured)-->
@@ -92,34 +94,60 @@
   </link>
 
 
-  <!-- ====== FT sensor + adapter stack, mounted to tool0 + finger and ball ====== -->
+  <!-- ====== Keep-out wall on the robot's +y side (camera stand) ====== -->
+  <!-- Collision-only (no visual), so MoveIt plans around it without it cluttering RViz.
+       Its robot-facing surface is the x-z plane at y = wall_y. -->
+  <xacro:property name="wall_y" value="0.375"/>
+  <xacro:property name="wall_thickness" value="0.05"/>
+  <xacro:property name="wall_height" value="1.2"/>
+  <link name="keepout_wall_left">
+    <collision>
+      <origin xyz="0 ${wall_thickness / 2} ${wall_height / 2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 ${wall_thickness} ${wall_height}"/>
+      </geometry>
+    </collision>
+  </link>
+
+
+  <!-- The physical calibration and production chains share the robot adapters and NetFT. -->
   <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly.urdf"/>
-  <xacro:include filename="$(find irb120_control)/urdf/finger_assembly.urdf"/>
 
-
-  <!-- ==================================== JOINTS ==================================== -->
-
-  <!-- connect tool0 to the Onshape assembly's root mate connector -->
   <joint name="tool0_to_sensor_root" type="fixed">
     <parent link="tool0"/>
     <origin xyz="0 0 0" rpy="0 0 ${pi/2}"/>
     <child link="root_sensor"/>
   </joint>
-  <!-- connect sensor_body to finger_link (sensor body origin is its robot-side face) -->
-  <joint name="sensor_body_to_finger_root" type="fixed">
-    <parent link="sensor_body"/>
-    <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} 0"/> <!--0.3971356 ${pi/2} -1.1736581"-->
-    <child link="root_finger"/>
-  </joint>
 
-  <!-- finger_ball_center for EE pose (like mujoco 'site') -->
-  <link name="finger_ball_center"/>
+  <xacro:if value="${use_charuco_mount}">
+    <!-- Calibration-only terminal attachment. Its mounting plane is the NetFT output face. -->
+    <link name="charuco_mount">
+      <visual>
+        <geometry><mesh filename="package://irb120_control/meshes/aruco_mount.stl"/></geometry>
+        <material name="CharucoMount"><color rgba="0.95 0.55 0.05 1.0"/></material>
+      </visual>
+      <collision><geometry><mesh filename="package://irb120_control/meshes/aruco_mount.stl"/></geometry></collision>
+    </link>
+    <joint name="sensor_body_to_charuco_mount" type="fixed">
+      <parent link="sensor_body"/><child link="charuco_mount"/>
+      <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
+    </joint>
+  </xacro:if>
 
-  <joint name="finger_to_ball_center" type="fixed">
-    <parent link="root_finger"/>
-    <origin xyz="${finger_ball_center_xyz}" rpy="${pi/2} ${-pi/2} 0"/>
-    <child link="finger_ball_center"/>
-  </joint>
+  <xacro:unless value="${use_charuco_mount}">
+    <xacro:include filename="$(find irb120_control)/urdf/finger_assembly.urdf"/>
+    <joint name="sensor_body_to_finger_root" type="fixed">
+      <parent link="sensor_body"/>
+      <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
+      <child link="root_finger"/>
+    </joint>
+    <link name="finger_ball_center"/>
+    <joint name="finger_to_ball_center" type="fixed">
+      <parent link="root_finger"/>
+      <origin xyz="${finger_ball_center_xyz}" rpy="${pi/2} ${-pi/2} 0"/>
+      <child link="finger_ball_center"/>
+    </joint>
+  </xacro:unless>
 
   <!-- World and table should coincide, at the top table surface -->
   <joint name="world_to_table" type="fixed">
@@ -132,6 +160,13 @@
     <parent link="world"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <child link="bracket"/>
+  </joint>
+
+  <!-- Spans the table's length (same x center), standing on the table top -->
+  <joint name="world_to_keepout_wall_left" type="fixed">
+    <parent link="world"/>
+    <origin xyz="${table_center_xyz.split()[0]} ${wall_y} 0" rpy="0 0 0"/>
+    <child link="keepout_wall_left"/>
   </joint>
 
   <joint name="world_to_base" type="fixed">

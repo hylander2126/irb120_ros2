@@ -16,7 +16,6 @@ RWS_PORT = "80"
 
 
 def generate_launch_description():
-
     # Use Picknik's abb_control launch for the hardware stack, but:
     #  - pass our controllers yaml and URDF
     #  - disable their JTC spawner (initial_joint_controller:=none) so we

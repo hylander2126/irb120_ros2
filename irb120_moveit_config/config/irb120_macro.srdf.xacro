@@ -16,6 +16,9 @@
 
     <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link"/>
 
+    <!-- The keep-out wall is fixed to the world and overlaps the table/bracket edges by design. -->
+    <disable_collisions link1="keepout_wall_left" link2="table" reason="Adjacent"/>
+    <disable_collisions link1="keepout_wall_left" link2="bracket" reason="Adjacent"/>
     <disable_collisions link1="base_link" link2="link_1" reason="Adjacent"/>
     <disable_collisions link1="link_1" link2="link_2" reason="Adjacent"/>
     <disable_collisions link1="link_2" link2="link_3" reason="Adjacent"/>

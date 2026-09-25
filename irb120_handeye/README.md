@@ -15,8 +15,10 @@ via the `handeye_to_realsense_tf` include.
   MoveIt/RViz stack (equivalent to Terminal 3), so you do **not** also need
   `abb_control.launch.py` or `bringup_stack.launch.py` running — those would
   conflict with this package's own `move_group`/RViz instance.
-- A printed copy of the ArUco target board: [`calibrations/irb_target_image.png`](calibrations/irb_target_image.png).
-  Mount it rigidly at/near the end effector (`tool0`) — since calibration is
+- The rigidly mounted, caliper-validated ChArUco target specified by
+  [`calibrations/charuco_board.yaml`](calibrations/charuco_board.yaml) and
+  [`generate_charuco_target.py`](irb120_handeye/generate_charuco_target.py).
+  Mount it at/near the end effector (`tool0`) — since calibration is
   eye-to-hand, the target moves with the arm through each pose while the
   camera stays fixed.
 
@@ -45,13 +47,14 @@ rebuild the panel from scratch, set:
 
 | Field | Value |
 |---|---|
-| `target_type` | `HandEyeTarget/Aruco` |
+| `target_type` | `HandEyeTarget/Charuco` |
 | `ArUco dictionary` | `DICT_5X5_250` |
-| `markers, X` / `markers, Y` | `3` / `4` |
-| `marker size (px)` / `marker separation (px)` | `200` / `20` |
+| `squares, X` / `squares, Y` | `5` / `7` |
+| `square size (px)` / `marker size (px)` | `320` / `240` |
+| `margin size (px)` | `0` |
 | `marker border (bits)` | `1` |
-| `measured marker size (m)` | `0.034` |
-| `measured separation (m)` | `0.0034` |
+| `longest board side (m)` | `0.224` |
+| `measured marker size (m)` | `0.024` |
 | `image_topic` | `/realsense/color/image_raw` |
 | `sensor_mount_type` | `0` (Eye-to-hand) |
 | `sensor` | `realsense_color_optical_frame` |
@@ -61,9 +64,9 @@ rebuild the panel from scratch, set:
 | `object` | `handeye_target` |
 | `solver` | `OpenCV/Daniilidis1998` |
 
-The measured marker size/separation must match your actual printout — if you
-reprint the target at a different scale, remeasure with calipers and update
-these two fields, or the solved transform will be systematically off.
+The longest board side and marker size must match the caliper-validated target:
+224 mm and 24 mm. If the target changes, remeasure and update both fields or
+the solved transform will be systematically off.
 
 ## 3. Run calibration poses
 
@@ -83,7 +86,7 @@ Options:
 
 For each pose the script: moves the arm, waits `--settle-time`, then (unless
 `--auto-continue`) prompts you to press Enter. **Before** pressing Enter,
-confirm the ArUco board is detected in RViz's `Camera` view and click **Take
+confirm the ChArUco board is detected in RViz's `Camera` view and click **Take
 Sample** in the `HandEyeCalibration` panel — then press Enter to advance.
 
 Once all poses are sampled, click **Solve** in the panel. It reports the
@@ -145,8 +148,8 @@ independent solve. Most other knobs (motion speed, sampling, board
 type/measurements, solver method, output dir) are hardcoded constants near
 the top of the module rather than flags — edit them there. See the module
 docstring for the full recipe (`cv2.calibrateHandEye` in its documented
-eye-to-hand mode) and `generate_charuco_target.py` for the print-ready
-ChArUco target it prefers.
+eye-to-hand mode) and the calibrated ChArUco target definition in
+`generate_charuco_target.py`.
 
 Bring up the camera(s) you're calibrating first — either the per-camera
 `bringup_cam1.launch.py` / `bringup_cam2.launch.py` / `bringup_cam3.launch.py`
@@ -160,16 +163,23 @@ line while you jog the arm.
 
 ### Finding poses that are dragging down the solve
 
-Every camera's solve also runs a **leave-one-out (LOO) diagnostic**: for
-each accepted pose it re-solves with just that one pose left out and
-reports how much the AX=XB residual improves. A pose that's actually bad
-(misdetection, board slipped, arm not fully settled, a TF glitch) drags the
-residual up, so dropping it makes the residual noticeably better; a fine
-pose barely moves it either way. The report is printed live, ranked
-worst-offender-first, right under each camera's solved transform.
+Each camera's solve starts from `cv2.calibrateHandEye` (Park), then refines
+the camera pose and the board-in-`tool0` pose together by minimizing the
+**reprojection error** of every detected board corner. The report under each
+camera's solved transform lists every pose's RMS reprojection error in pixels
+(and roughly in mm at the board's distance). A pose is flagged as an outlier
+when its error is above 3x the set's median and above 2 px: misdetection,
+board slipped, arm not fully settled, a TF glitch. Unlike the old pairwise
+AX=XB residual, this doesn't grow with how different a pose is from the
+others, so informative poses aren't penalized. `record_calibration_pose`
+prints the same per-pose check live after each save.
+
+As a rough guide, an overall RMS below ~1 px is good. If it's high with no
+single outlier, the error is systematic: check the board YAML against the
+real board, board flatness, and intrinsics.
 
 Every run also writes `handeye_samples_<camera>.yaml` (raw per-pose
-AX/AB data) next to the `cam_tf_*.launch.py` it produces. That file lets
+transforms and corner pixels) next to the `cam_tf_*.launch.py` it produces. That file lets
 you re-run the diagnostic, try dropping specific poses, and re-solve —
 **without moving the robot again**:
 
@@ -190,19 +200,23 @@ pose — suspect the
 mounted target's measured size, the camera intrinsics, or the extrinsic
 frame convention (see the "Gotcha" section below) instead.
 
+### Recalibrate all cameras
+
+The prior camera extrinsics are invalid because the cameras have new poses.
+Teach a fresh ChArUco-visible pose set, then run the headless calibrator with
+its default three-camera selection:
+
+```bash
+ros2 run irb120_handeye record_calibration_pose --out ~/joints_charuco_2026.yaml
+ros2 run irb120_handeye run_handeye_calibration --pose-path ~/joints_charuco_2026.yaml
+```
+
+This independently solves `realsense`, `realsense2`, and `realsense3`. Review
+each generated transform/diagnostic before replacing the three active camera
+TF launch files.
+
 ### Future work
 
-- **Switch `run_handeye_calibration.py`'s `BOARD_TYPE` constant back to
-  `'charuco'` (its long-term default) once a printer and a rigid flat
-  backing (acrylic/Dibond/plywood, not foam-core) are available.** It's
-  currently `'aruco'` — the existing grid board (`irb_target_image.png`)
-  already printed and mounted — purely because that's the only board on
-  hand right now. A GridBoard's pose comes from marker corners alone with
-  no checkerboard-corner refinement, so it's noisier and less
-  occlusion-tolerant than ChArUco; once the ChArUco target is printed
-  (`generate_charuco_target.py`, printed at 100% and mounted rigidly per
-  its header comment) and mounted, switch the constant and prefer that
-  result.
 - **Design a combined/multi-camera-aware pose set.** `joints_5_6mm.yaml` was
   tuned for cam1's FOV; cam2 (steep/overhead) and cam3 likely each need
   their own pose subset (board presented closer to face-on to that camera's

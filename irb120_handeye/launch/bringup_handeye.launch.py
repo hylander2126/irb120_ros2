@@ -28,7 +28,7 @@ def generate_launch_description():
                 get_package_share_directory("irb120_control"),
                 "urdf",
                 "irb120_with_finger.xacro",
-            )
+            ),
         )
         .robot_description_semantic(
             file_path=os.path.join(moveit_cfg_pkg, "config", "irb120_handeye.srdf.xacro")

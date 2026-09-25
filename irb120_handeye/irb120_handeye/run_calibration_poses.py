@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Run saved hand-eye calibration joint poses with manual sample gating.
 
+Every move is planned by move_group (collision-checked against the robot
+model, including the table and bracket) and executed through it; nothing is
+sent straight to the trajectory controller. Requires bringup_stack's
+move_group.
+
 Usage examples:
   ros2 run irb120_handeye run_calibration_poses
   ros2 run irb120_handeye run_calibration_poses --pose-file joints_8_32mm.yaml
-  ros2 run irb120_handeye run_calibration_poses --move-time 5.0 --settle-time 2.0
+  ros2 run irb120_handeye run_calibration_poses --velocity-scaling 0.1 --settle-time 2.0
 """
 
 import argparse
@@ -15,13 +20,18 @@ from typing import Dict, List, Optional, Tuple
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from builtin_interfaces.msg import Duration
-from control_msgs.action import FollowJointTrajectory
+from moveit_msgs.action import ExecuteTrajectory
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes, RobotTrajectory
+from moveit_msgs.srv import GetMotionPlan
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectoryPoint
 import yaml
+
+PLANNING_GROUP = "manipulator"
+PLANNING_TIME_SEC = 5.0
+PLANNING_ATTEMPTS = 3
+GOAL_JOINT_TOLERANCE_RAD = 1e-3
 
 
 def _status_name(status: int) -> str:
@@ -74,11 +84,8 @@ class HandeyePoseRunner(Node):
         self._joint_map: Dict[str, float] = {}
 
         self._joint_sub = self.create_subscription(JointState, "/joint_states", self._on_joint_state, 20)
-        self._traj_client = ActionClient(
-            self,
-            FollowJointTrajectory,
-            "/joint_trajectory_controller/follow_joint_trajectory",
-        )
+        self._plan_client = self.create_client(GetMotionPlan, "/plan_kinematic_path")
+        self._execute_client = ActionClient(self, ExecuteTrajectory, "/execute_trajectory")
 
     def _on_joint_state(self, msg: JointState) -> None:
         for name, pos in zip(msg.name, msg.position):
@@ -95,35 +102,56 @@ class HandeyePoseRunner(Node):
     def _current_positions(self) -> List[float]:
         return [self._joint_map[name] for name in self.joint_names]
 
-    def move_to(self, target_positions: List[float], move_time_sec: float) -> bool:
-        if not self._traj_client.wait_for_server(timeout_sec=8.0):
-            self.get_logger().error("Trajectory action server not available")
-            return False
+    def wait_for_move_group(self, timeout_sec: float = 10.0) -> bool:
+        return (self._plan_client.wait_for_service(timeout_sec=timeout_sec)
+                and self._execute_client.wait_for_server(timeout_sec=timeout_sec))
 
-        current = self._current_positions()
+    def plan(self, target_positions: List[float], velocity_scaling: float, acceleration_scaling: float,
+             start_positions: Optional[List[float]] = None) -> Tuple[Optional[RobotTrajectory], str]:
+        """Collision-checked joint-space plan to target_positions.
 
-        goal = FollowJointTrajectory.Goal()
-        goal.trajectory.joint_names = self.joint_names
-        goal.trajectory.points = [
-            JointTrajectoryPoint(
-                positions=current,
-                time_from_start=Duration(sec=0, nanosec=200_000_000),
-            ),
-            JointTrajectoryPoint(
-                positions=target_positions,
-                time_from_start=Duration(sec=int(move_time_sec), nanosec=int((move_time_sec % 1.0) * 1e9)),
-            ),
-        ]
+        Plans from start_positions if given (used to check a whole pose
+        sequence before moving), else from move_group's current robot state.
+        Returns (trajectory, "") or (None, reason).
+        """
+        req = GetMotionPlan.Request()
+        mpr = req.motion_plan_request
+        mpr.group_name = PLANNING_GROUP
+        mpr.num_planning_attempts = PLANNING_ATTEMPTS
+        mpr.allowed_planning_time = PLANNING_TIME_SEC
+        mpr.max_velocity_scaling_factor = velocity_scaling
+        mpr.max_acceleration_scaling_factor = acceleration_scaling
+        if start_positions is None:
+            mpr.start_state.is_diff = True
+        else:
+            mpr.start_state.joint_state.name = list(self.joint_names)
+            mpr.start_state.joint_state.position = [float(v) for v in start_positions]
+        mpr.goal_constraints = [Constraints(joint_constraints=[
+            JointConstraint(joint_name=name, position=float(pos), tolerance_above=GOAL_JOINT_TOLERANCE_RAD,
+                            tolerance_below=GOAL_JOINT_TOLERANCE_RAD, weight=1.0)
+            for name, pos in zip(self.joint_names, target_positions)])]
 
-        send_future = self._traj_client.send_goal_async(goal)
+        future = self._plan_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=PLANNING_TIME_SEC + 10.0)
+        if not future.done() or future.result() is None:
+            return None, "no response from move_group /plan_kinematic_path"
+        response = future.result().motion_plan_response
+        if response.error_code.val != MoveItErrorCodes.SUCCESS:
+            return None, f"planning failed (MoveIt error code {response.error_code.val})"
+        return response.trajectory, ""
+
+    def execute(self, trajectory: RobotTrajectory) -> bool:
+        """Execute a planned trajectory through move_group (which checks the
+        robot is still at the trajectory's start before moving)."""
+        send_future = self._execute_client.send_goal_async(ExecuteTrajectory.Goal(trajectory=trajectory))
         rclpy.spin_until_future_complete(self, send_future, timeout_sec=8.0)
         if not send_future.done() or send_future.result() is None:
-            self.get_logger().error("Failed to send trajectory goal")
+            self.get_logger().error("Failed to send execute_trajectory goal")
             return False
 
         handle = send_future.result()
         if not handle.accepted:
-            self.get_logger().error("Trajectory goal rejected")
+            self.get_logger().error("execute_trajectory goal rejected")
             return False
 
         result_future = handle.get_result_async()
@@ -131,14 +159,23 @@ class HandeyePoseRunner(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
 
         if not result_future.done() or result_future.result() is None:
-            self.get_logger().error("Trajectory result not received")
+            self.get_logger().error("execute_trajectory result not received")
             return False
 
-        status = result_future.result().status
-        if status != 4:
-            self.get_logger().error(f"Trajectory finished with status={_status_name(status)}")
+        wrapped = result_future.result()
+        if wrapped.status != 4 or wrapped.result.error_code.val != MoveItErrorCodes.SUCCESS:
+            self.get_logger().error(f"Execution finished with status={_status_name(wrapped.status)}, "
+                                    f"MoveIt error code {wrapped.result.error_code.val}")
             return False
         return True
+
+
+def trajectory_duration(trajectory: RobotTrajectory) -> float:
+    points = trajectory.joint_trajectory.points
+    if not points:
+        return 0.0
+    t = points[-1].time_from_start
+    return t.sec + t.nanosec * 1e-9
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -153,7 +190,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Absolute or relative path to a pose YAML (overrides --pose-file).",
     )
-    p.add_argument("--move-time", type=float, default=4.0, help="Seconds per move.")
+    p.add_argument("--velocity-scaling", type=float, default=0.15, help="MoveIt max velocity scaling factor.")
     p.add_argument("--settle-time", type=float, default=1.5, help="Seconds to wait after each move.")
     p.add_argument(
         "--auto-continue",
@@ -187,6 +224,9 @@ def main() -> int:
         if not node.wait_for_joint_states(timeout_sec=10.0):
             node.get_logger().error("No complete joint state received. Is bringup running?")
             return 2
+        if not node.wait_for_move_group(timeout_sec=10.0):
+            node.get_logger().error("move_group not available. Is bringup_stack running?")
+            return 2
 
         if not args.auto_continue:
             input(
@@ -197,7 +237,10 @@ def main() -> int:
         total = len(joint_values)
         for i, target in enumerate(joint_values, start=1):
             node.get_logger().info(f"Moving to pose {i}/{total}")
-            ok = node.move_to(target, move_time_sec=max(0.5, args.move_time))
+            trajectory, reason = node.plan(target, args.velocity_scaling, args.velocity_scaling)
+            if trajectory is None:
+                node.get_logger().error(f"Pose {i}: {reason}")
+            ok = trajectory is not None and node.execute(trajectory)
             if not ok:
                 if args.auto_continue:
                     continue

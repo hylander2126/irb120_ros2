@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Offline re-diagnosis / re-solve of a saved hand-eye sample set.
 
-run_handeye_calibration.py now writes one handeye_samples_<camera>.yaml
-(raw per-pose AX/AB data) next to every cam_tf_*.launch.py it produces, and
-already prints a leave-one-out (LOO) diagnostic live: for each accepted
-pose, it re-solves with that one pose left out and reports how much the
-AX=XB residual improves -- a pose whose removal meaningfully helps is a
-likely "polluter" (misdetection, board slipped, arm not settled, TF
-glitch, ...).
+run_handeye_calibration.py writes one handeye_samples_<camera>.yaml (raw
+per-pose transforms and board-corner pixels) next to every cam_tf_*.launch.py
+it produces, and prints a per-pose reprojection-error report: a pose whose
+corners reproject well above the set's median disagrees with the others
+(misdetection, board slipped, arm not settled, TF glitch, ...).
 
 This script reloads that same raw data -- no robot, no cameras, nothing
 live needed -- and lets you:
-  - reprint that diagnostic (e.g. to revisit a run after the fact), and
-  - actually drop specific poses (--exclude-poses) and see the resulting
-    residual, then write the corresponding cam_tf_<ns>_<err>mm.launch.py
-    (--write-launch) once you're happy with it.
+  - reprint that report (e.g. to revisit a run after the fact), and
+  - actually drop specific poses (--exclude-poses) and re-solve, then write
+    the corresponding cam_tf_<ns>_<err>px.launch.py (--write-launch) once
+    you're happy with it.
+
+Sample files written before the reprojection diagnostic don't contain
+corner pixels and can't be loaded; re-run run_handeye_calibration.
 
 The "pose#" in all of this is the "Pose i/total" index run_handeye_calibration.py
 printed live for that pose (1-based, into the --pose-file used for that run)
@@ -31,10 +32,10 @@ import os
 
 from irb120_handeye.run_handeye_calibration import (
     METHODS,
-    _leave_one_out_diagnosis,
-    _matrix_to_quat,
-    _print_loo_report,
+    _print_reprojection_report,
+    _print_solution_summary,
     _samples_from_dicts,
+    _solve_handeye,
     _write_launch_file,
 )
 
@@ -67,7 +68,8 @@ def main() -> int:
                         'comma-separated, in quotes so the shell passes it through as one argument, '
                         'e.g. --exclude-poses "4,9,17".')
     p.add_argument('--method', choices=sorted(METHODS), default=None,
-                   help='Defaults to the method recorded in the samples file.')
+                   help='Closed-form solver that seeds the reprojection refinement. '
+                        'Defaults to the method recorded in the samples file.')
     p.add_argument('--write-launch', action='store_true',
                    help='Write a new cam_tf_<ns>_<err>mm.launch.py from this solve, same as '
                         'run_handeye_calibration.py.')
@@ -75,7 +77,11 @@ def main() -> int:
     args = p.parse_args()
 
     in_path = os.path.abspath(args.in_path)
-    ns, link, board_type, saved_method, s = _load(in_path)
+    try:
+        ns, link, board_type, saved_method, s = _load(in_path)
+    except ValueError as exc:
+        print(f'Cannot load {in_path}: {exc}')
+        return 1
     method_key = args.method or saved_method or 'park'
     n_total = len(s['R_g2b'])
     print(f'Loaded {n_total} samples for [{ns}] from {in_path} (board={board_type}, method={method_key})')
@@ -90,24 +96,15 @@ def main() -> int:
         print(f'Only {n} samples remain -- cv2.calibrateHandEye needs >= 3. Exclude fewer poses.')
         return 1
 
-    R_sol, t_sol, rot_res, trans_res, loo_ranked = _leave_one_out_diagnosis(s, method_key)
-    quat = _matrix_to_quat(R_sol)
-
-    print(f'\n[{ns}] {n} poses -> base_link -> {link}:')
-    print(f'  xyz = [{t_sol[0]:.6f}, {t_sol[1]:.6f}, {t_sol[2]:.6f}]')
-    print(f'  quat(xyzw) = [{quat[0]:.6f}, {quat[1]:.6f}, {quat[2]:.6f}, {quat[3]:.6f}]')
-    print(f'  AX=XB residual over {len(rot_res)} pose pairs: '
-          f'rotation mean={rot_res.mean():.3f} deg max={rot_res.max():.3f} deg, '
-          f'translation mean={trans_res.mean():.2f} mm max={trans_res.max():.2f} mm')
-    if loo_ranked:
-        _print_loo_report(ns, float(rot_res.mean()), float(trans_res.mean()), loo_ranked, s)
-    else:
-        print(f'  (skipping leave-one-out diagnostic: need >= 6 poses, have {n})')
+    sol = _solve_handeye(s, method_key)
+    print(f'\n[{ns}] {n} poses')
+    _print_solution_summary(link, sol, method_key)
+    _print_reprojection_report(ns, sol, s)
 
     if args.write_launch:
         out_dir = args.out_dir or os.path.dirname(in_path)
         os.makedirs(out_dir, exist_ok=True)
-        path = _write_launch_file(out_dir, ns, link, t_sol, quat, float(trans_res.mean()), n, method_key)
+        path = _write_launch_file(out_dir, ns, link, sol, n, method_key)
         print(f'\nwrote {path}')
 
     return 0

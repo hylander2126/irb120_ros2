@@ -20,6 +20,8 @@ setup(
         ('share/' + package_name + '/meshes/irb120_3_58/visual', glob('meshes/irb120_3_58/visual/*')),
         ('share/' + package_name + '/meshes/sensor_and_adapter_assembly', glob('meshes/sensor_and_adapter_assembly/*')),
         ('share/' + package_name + '/meshes/finger_assembly', glob('meshes/finger_assembly/*')),
+        ('share/' + package_name + '/meshes', glob('meshes/*.stl')),
+        ('share/' + package_name + '/meshes/ft_sensor', glob('meshes/ft_sensor/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

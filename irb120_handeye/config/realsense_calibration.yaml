@@ -1,0 +1,16 @@
+# Realsense driver params for hand-eye calibration (bringup_stack.launch.py calibration:=true).
+# Replaces realsense_common.yaml rather than layering on it: rs_launch.py applies config_file
+# params after its launch args, so a launch arg can't override a value set in a yaml.
+
+# 16:9 is the D435 color sensor's native aspect: 1280x720 uses its full ~69 deg HFOV, where the
+# default 640x480 (4:3) crops the sides. Extrinsics don't depend on resolution, so a result
+# calibrated here stays valid at production 640x480. 1920x1080x30 also works if USB bandwidth
+# allows with all three cameras.
+rgb_camera.color_profile: 1280x720x30
+
+# Calibration only reads color. Depth off frees USB bandwidth for the larger color stream and
+# turns off the IR emitter pattern.
+enable_depth: false
+pointcloud.enable: false
+align_depth.enable: false
+enable_sync: false

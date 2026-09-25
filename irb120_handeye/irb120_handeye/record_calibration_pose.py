@@ -37,10 +37,18 @@ from sensor_msgs.msg import JointState
 
 from irb120_handeye.run_calibration_poses import _load_pose_yaml, _resolve_pose_path
 from irb120_handeye.run_handeye_calibration import (
+    BASE_FRAME,
     CAMERA_LINK_FRAMES,
+    DEFAULT_MIN_CHARUCO_CORNERS,
+    GRIPPER_FRAME,
+    METHOD,
     HandEyeCameraNode,
+    _append_sample,
     _detect_board_pose,
     _load_board,
+    _new_samples,
+    _solve_handeye,
+    _transform_to_Rt,
 )
 
 WARN_ANGLE_DEG = 60.0  # beyond this the board is viewed too obliquely for good corner accuracy
@@ -64,7 +72,7 @@ class PoseRecorder(HandEyeCameraNode):
 
 
 def _view_status(det) -> str:
-    R, t = det
+    R, t = det.R, det.t
     dist = float(np.linalg.norm(t))
     to_cam = -t / dist
     angle = float(np.degrees(np.arccos(np.clip(abs(R[:, 2] @ to_cam), 0.0, 1.0))))
@@ -82,11 +90,38 @@ def _write(path: str, joint_names, joint_values, detections) -> None:
                         'detections': detections}, f, sort_keys=False)
 
 
+def _report_live_solution(ns: str, samples: dict) -> None:
+    """Print incremental solve quality after a newly saved sample."""
+    n = len(samples["R_g2b"])
+    if n < 3:
+        print(f"  [{ns}] {n}/3 samples: collecting the minimum solve set")
+        return
+    try:
+        sol = _solve_handeye(samples, METHOD)
+    except Exception as exc:
+        print(f"  [{ns}] live solve unavailable: {exc}")
+        return
+    print(f"  [{ns}] live {n}-sample solve: reprojection RMS {sol.rms_px:.2f} px "
+          f"(~{sol.rms_mm:.2f} mm at the board)")
+    latest_pose = samples["pose_idx"][-1]
+    median = float(np.median(sol.pose_rms_px))
+    newest = (f"newest pose {latest_pose}: {sol.pose_rms_px[-1]:.2f} px "
+              f"({sol.pose_rms_px[-1] / median:.1f}x median), {len(samples['img_pts'][-1])} corners")
+    if n < 6:
+        print(f"  [{ns}] {newest} -- provisional: add {6 - n} more samples before outlier flagging")
+        return
+    print(f"  [{ns}] {newest} -- {'OUTLIER, consider undo' if latest_pose in sol.outliers else 'OK'}")
+    earlier = [p for p in sol.outliers if p != latest_pose]
+    if earlier:
+        print(f"  [{ns}] earlier pose(s) {earlier} now flagged as outliers")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', default=None, help='Pose YAML to create/append to (default: ~/joints_custom.yaml).')
     p.add_argument('--cameras', default='realsense,realsense2,realsense3')
-    p.add_argument('--board-type', choices=['charuco', 'aruco'], default='aruco')
+    p.add_argument('--board-type', choices=['charuco', 'aruco'], default='charuco',
+                   help='Calibration target type (default: the calibrated ChArUco board).')
     p.add_argument('--board-yaml', default=None)
     p.add_argument('--marker-length-m', type=float, default=None)
     p.add_argument('--marker-separation-m', type=float, default=None)
@@ -99,7 +134,7 @@ def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     board_yaml = args.board_yaml or os.path.normpath(
         os.path.join(here, '..', 'calibrations', f'{args.board_type}_board.yaml'))
-    min_features = args.min_features if args.min_features is not None else (6 if args.board_type == 'charuco' else 3)
+    min_features = args.min_features if args.min_features is not None else (DEFAULT_MIN_CHARUCO_CORNERS if args.board_type == 'charuco' else 3)
     cameras = [c.strip() for c in args.cameras.split(',') if c.strip()]
     for ns in cameras:
         if ns not in CAMERA_LINK_FRAMES:
@@ -130,6 +165,10 @@ def main() -> int:
     fd = sys.stdin.fileno()
     old_tty = termios.tcgetattr(fd)
     counts = {ns: sum(1 for d in detections if d and d.get(ns)) for ns in cameras}
+    # Raw transforms captured in this teaching session for incremental solves.
+    # Older pose YAML files contain only visibility booleans and are intentionally
+    # not mixed with these measured AX=XB samples.
+    live_samples = {ns: _new_samples() for ns in cameras}
     print('Keys: s/Space = save pose, u = undo last, q = quit\n')
     try:
         tty.setcbreak(fd)
@@ -163,12 +202,36 @@ def main() -> int:
                     detections.append(seen)
                     for ns in cameras:
                         counts[ns] += int(seen[ns])
+                    pose_no = len(joint_values)
+                    g2b_tf = node.lookup(GRIPPER_FRAME, BASE_FRAME)
+                    if g2b_tf is None:
+                        print("  live solve skipped: no tool0 <- base_link TF")
+                    else:
+                        R_g2b, t_g2b = _transform_to_Rt(g2b_tf)
+                        for ns in cameras:
+                            if latest[ns] is None:
+                                continue
+                            link = CAMERA_LINK_FRAMES[ns]
+                            optical = f"{ns}_color_optical_frame"
+                            link_opt_tf = node.lookup(link, optical)
+                            if link_opt_tf is None:
+                                print(f"  [{ns}] live solve skipped: no {link} <- {optical} TF")
+                                continue
+                            R_link_opt, t_link_opt = _transform_to_Rt(link_opt_tf)
+                            _append_sample(live_samples[ns], pose_no, None, R_g2b, t_g2b, latest[ns],
+                                           *node.intrinsics(ns), R_link_opt, t_link_opt)
+                            _report_live_solution(ns, live_samples[ns])
                     _write(out_path, joint_names, joint_values, detections)
                     sys.stdout.write(f'\r\x1b[Ksaved pose {len(joint_values)} '
                                      f'(seen by: {[ns for ns in cameras if seen[ns]] or "no camera"})\n')
-                elif key == 'u' and joint_values:
+                elif key == "u" and joint_values:
+                    removed_pose_no = len(joint_values)
                     joint_values.pop()
                     removed = detections.pop()
+                    for s in live_samples.values():
+                        if s["pose_idx"] and s["pose_idx"][-1] == removed_pose_no:
+                            for values in s.values():
+                                values.pop()
                     for ns in cameras:
                         counts[ns] -= int(bool(removed and removed.get(ns)))
                     _write(out_path, joint_names, joint_values, detections)

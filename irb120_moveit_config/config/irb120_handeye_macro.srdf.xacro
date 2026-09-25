@@ -16,6 +16,9 @@
 
     <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link"/>
 
+    <!-- The keep-out wall is fixed to the world and overlaps the table/bracket edges by design. -->
+    <disable_collisions link1="keepout_wall_left" link2="table" reason="Adjacent"/>
+    <disable_collisions link1="keepout_wall_left" link2="bracket" reason="Adjacent"/>
     <disable_collisions link1="base_link" link2="link_1" reason="Adjacent"/>
     <disable_collisions link1="link_1" link2="link_2" reason="Adjacent"/>
     <disable_collisions link1="link_2" link2="link_3" reason="Adjacent"/>
@@ -27,7 +30,11 @@
     <disable_collisions link1="link_4" link2="link_5" reason="Adjacent"/>
     <disable_collisions link1="link_4" link2="link_6" reason="Never"/>
     <disable_collisions link1="link_5" link2="link_6" reason="Adjacent"/>
-    <disable_collisions link1="link_6" link2="ft_link" reason="Adjacent"/>
-    <disable_collisions link1="ft_link" link2="finger_link" reason="Adjacent"/>
+    <disable_collisions link1="link_6" link2="adapter_robot" reason="Adjacent"/>
+    <disable_collisions link1="link_6" link2="adapter_sensor" reason="Adjacent"/>
+    <disable_collisions link1="adapter_robot" link2="adapter_sensor" reason="Adjacent"/>
+    <disable_collisions link1="adapter_sensor" link2="sensor_plate" reason="Adjacent"/>
+    <disable_collisions link1="sensor_plate" link2="sensor_body" reason="Adjacent"/>
+    <disable_collisions link1="sensor_body" link2="charuco_mount" reason="Adjacent"/>
   </xacro:macro>
 </robot>

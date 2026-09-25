@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <robot xmlns:xacro="http://wiki.ros.org/xacro" name="abb_irb120_3_58">
+  <xacro:arg name="use_charuco_mount" default="false"/>
+  <xacro:property name="use_charuco_mount" value="$(arg use_charuco_mount)"/>
   <xacro:include filename="$(find irb120_moveit_config)/config/irb120_macro.srdf.xacro"/>
-  <xacro:irb120_srdf/>
+  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_handeye_macro.srdf.xacro"/>
+  <xacro:if value="${use_charuco_mount}">
+    <xacro:irb120_handeye_srdf/>
+  </xacro:if>
+  <xacro:unless value="${use_charuco_mount}">
+    <xacro:irb120_srdf/>
+  </xacro:unless>
 </robot>

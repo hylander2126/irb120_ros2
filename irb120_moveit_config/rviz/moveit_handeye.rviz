@@ -308,17 +308,18 @@ Visualization Manager:
       group: manipulator
       image_topic: /realsense/color/image_raw
       marker border (bits): 1
-      marker separation (px): 20
-      marker size (px): 200
-      markers, X: 3
-      markers, Y: 4
-      measured marker size (m): 0.034000
-      measured separation (m): 0.003400
+      longest board side (m): 0.224000
+      margin size (px): 0
+      marker size (px): 240
+      measured marker size (m): 0.024000
       object: "handeye_target"
       sensor: "realsense_color_optical_frame"
       sensor_mount_type: 0
       solver: OpenCV/Daniilidis1998
-      target_type: HandEyeTarget/Aruco
+      square size (px): 320
+      squares, X: 5
+      squares, Y: 7
+      target_type: HandEyeTarget/Charuco
     - Class: rviz_default_plugins/TF
       Enabled: true
       Filter (blacklist): ""

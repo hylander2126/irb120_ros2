@@ -137,6 +137,7 @@ Optional arguments:
 | Argument | Default | Description |
 |---|---|---|
 | `start_servo` | `false` | Start MoveIt Servo for Cartesian motions |
+| `calibration` | `false` | Hand-eye calibration mode: ChArUco board + mount instead of the finger (MoveIt, RViz, and T2's `robot_state_publisher`), cameras at 1280x720 color with depth off, perception skipped |
 | `debug_perception` | `false` | Launch perception debugger + debug RViz config |
 | `perception_method` | `dbscan` | Segmentation backend: `dbscan` or `sam` |
 
@@ -174,7 +175,7 @@ Options:
 ```
 --pose-file   YAML filename under share/irb120_handeye/calibrations/  (default: joints_20_14mm.yaml)
 --pose-path   Absolute path to a pose YAML (overrides --pose-file)
---move-time   Seconds per move  (default: 4.0)
+--velocity-scaling  MoveIt velocity scaling; every move is planned collision-free by move_group  (default: 0.15)
 --settle-time Seconds to settle after each move  (default: 1.5)
 --auto-continue  Skip Enter prompts between poses
 ```

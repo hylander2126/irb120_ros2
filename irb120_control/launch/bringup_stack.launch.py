@@ -1,5 +1,8 @@
 import os
+import sys
+import tempfile
 
+import xacro
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
@@ -10,12 +13,61 @@ from launch.actions import (
     ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
+    OpaqueFunction,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_param_builder import ParameterBuilder
+
+
+# Sets RSP's robot_description through the SetParameters service directly.
+# `ros2 param set/load` re-parse string values as YAML, which breaks on the ": "
+# inside URDF comments.
+_SET_RSP_DESCRIPTION = """
+import os
+import sys
+import rclpy
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
+
+rclpy.init()
+node = rclpy.create_node("rsp_description_updater")
+client = node.create_client(SetParameters, "/robot_state_publisher/set_parameters")
+if not client.wait_for_service(timeout_sec=10.0):
+    sys.exit("robot_state_publisher not found; is abb_control.launch.py (T2) running?")
+with open(sys.argv[1]) as f:
+    urdf = f.read()
+os.remove(sys.argv[1])
+value = ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=urdf)
+future = client.call_async(SetParameters.Request(
+    parameters=[Parameter(name="robot_description", value=value)]))
+rclpy.spin_until_future_complete(node, future, timeout_sec=10.0)
+result = future.result()
+if result is None or not result.results[0].successful:
+    sys.exit(f"robot_state_publisher rejected robot_description: {result}")
+print("robot_state_publisher robot_description updated")
+"""
+
+
+def _push_robot_description(context, urdf_path):
+    """Swap the URDF on T2's already-running robot_state_publisher.
+
+    abb_control.launch.py (Picknik's abb_bringup) hardcodes its xacro call, so it
+    always starts with the finger. RSP accepts robot_description updates at
+    runtime, so push the model matching this launch's `calibration` arg; this also
+    restores the finger when bringup_stack is relaunched without calibration.
+    """
+    calibration = LaunchConfiguration("calibration").perform(context)
+    urdf = xacro.process_file(urdf_path, mappings={"use_charuco_mount": calibration}).toxml()
+    with tempfile.NamedTemporaryFile("w", prefix="rsp_description_", suffix=".urdf", delete=False) as f:
+        f.write(urdf)
+    return [ExecuteProcess(
+        cmd=[sys.executable, "-c", _SET_RSP_DESCRIPTION, f.name],
+        name="rsp_description_updater",
+        output="screen",
+    )]
 
 
 def generate_launch_description():
@@ -24,13 +76,17 @@ def generate_launch_description():
     handeye_cfg_pkg = get_package_share_directory("irb120_handeye")
     perception_pkg = get_package_share_directory("irb120_perception")
 
+    urdf_path = os.path.join(pkg_share, "urdf", "irb120_with_finger.xacro")
+    # calibration:=true swaps the finger for the ChArUco board + mount in both the
+    # URDF and SRDF (collision pairs differ).
+    description_mappings = {"use_charuco_mount": LaunchConfiguration("calibration")}
+
     moveit_config = (
         MoveItConfigsBuilder("irb120", package_name="irb120_moveit_config")
-        .robot_description(
-            file_path=os.path.join(pkg_share, "urdf", "irb120_with_finger.xacro")
-        )
+        .robot_description(file_path=urdf_path, mappings=description_mappings)
         .robot_description_semantic(
-            file_path=os.path.join(moveit_cfg_pkg, "config", "irb120.srdf.xacro")
+            file_path=os.path.join(moveit_cfg_pkg, "config", "irb120.srdf.xacro"),
+            mappings=description_mappings,
         )
         .planning_pipelines(
             pipelines=["ompl"], default_planning_pipeline="ompl"
@@ -113,10 +169,17 @@ def generate_launch_description():
     # configurations into rs_launch's validation loop.  The camera wrappers
     # already supply every setting they require, so isolate this private
     # implementation scope instead of exposing its arguments as our API.
+    # Only `calibration` is passed through (switches the cameras to the
+    # calibration profile: 1280x720 color, depth off).
     camera_bringup_group = GroupAction(
         actions=[bringup_cam1, bringup_cam2, bringup_cam3],
         scoped=True,
         forwarding=False,
+        launch_configurations={"calibration": LaunchConfiguration("calibration")},
+    )
+
+    rsp_description_update = OpaqueFunction(
+        function=_push_robot_description, args=[urdf_path]
     )
 
     perception_launch = IncludeLaunchDescription(
@@ -126,6 +189,8 @@ def generate_launch_description():
         launch_arguments={
             'active_at_start': LaunchConfiguration('perception_active_at_start'),
         }.items(),
+        # Perception needs the depth cloud, which the calibration camera profile turns off.
+        condition=UnlessCondition(LaunchConfiguration('calibration')),
     )
 
     # FT sensor nodes (REALLY wants to be run as executable, not as Node)
@@ -233,6 +298,16 @@ def generate_launch_description():
 
     # Declare the launch arguments
 
+    calibration_arg = DeclareLaunchArgument(
+        "calibration",
+        default_value="false",
+        description=(
+            "Hand-eye calibration mode: load the robot with the ChArUco board + mount "
+            "instead of the finger (MoveIt, RViz, and the running robot_state_publisher), "
+            "run the cameras at 1280x720 color with depth off, and skip perception."
+        ),
+    )
+
     egm_cond_time_arg = DeclareLaunchArgument(
         'egm_cond_time',
         default_value='180.0',
@@ -264,6 +339,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         perception_active_at_start_arg,
+        calibration_arg,
         egm_cond_time_arg,
         start_servo_arg,
 
@@ -272,6 +348,7 @@ def generate_launch_description():
         move_group_node,
         rviz_node,
         camera_bringup_group,
+        rsp_description_update,
         perception_launch,
         net_ft_node,
         netft_preprocessor_node,
