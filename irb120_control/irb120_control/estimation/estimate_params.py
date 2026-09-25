@@ -1342,6 +1342,9 @@ def find_trial_logs(obj: str, workspace_root: str) -> list:
     including it would double-weight that trial in every mean and shrink every std.
     Falls back to most_recent.npz only when no timestamped log exists, so
     single-trial datasets recorded before the batch runs still work.
+
+    Trials recorded as episode stages (util/episode.py) follow the legacy
+    folder's, in episode then stage order -- i.e. chronologically.
     """
     import glob
     squash_dir = os.path.join(workspace_root, "runtime_logs", obj, "arc_squash")
@@ -1349,10 +1352,28 @@ def find_trial_logs(obj: str, workspace_root: str) -> list:
         f for f in glob.glob(os.path.join(squash_dir, "arc_static*.npz"))
         if os.path.basename(f) != "most_recent.npz"
     )
+    trials += sorted(
+        f for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, "episodes", "*",
+                                          "*_press_pull_tip", "arc_static*.npz"))
+        if os.path.basename(f) != "most_recent.npz"
+    )
     if trials:
         return trials
     fallback = os.path.join(squash_dir, "most_recent.npz")
     return [fallback] if os.path.exists(fallback) else []
+
+
+def find_push_log(obj: str, workspace_root: str) -> str:
+    """The newest push log for `obj`: the legacy push/most_recent.npz or a push
+    recorded as an episode stage, whichever was written last. Returns the legacy
+    path (possibly nonexistent) when there is neither, as before."""
+    import glob
+    legacy = os.path.join(workspace_root, "runtime_logs", obj, "push", "most_recent.npz")
+    candidates = [f for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, "episodes", "*",
+                                                    "*_push", "push_ft_pose_*.npz"))]
+    if os.path.exists(legacy):
+        candidates.append(legacy)
+    return max(candidates, key=os.path.getmtime) if candidates else legacy
 
 
 def _spread(values: list) -> dict:
@@ -1518,7 +1539,7 @@ def run_object(obj: str, workspace_root: str, verbose_trials: bool = False,
                free_com_x: bool = False, pivot_mode: str = "relative") -> dict | None:
     """Run every recorded trial for `obj` and return the aggregated record."""
     trial_files = find_trial_logs(obj, workspace_root)
-    push_file   = os.path.join(workspace_root, "runtime_logs", obj, "push", "most_recent.npz")
+    push_file   = find_push_log(obj, workspace_root)
     if not trial_files:
         print(f"\n[{obj}] No squash log — skipping.")
         return None

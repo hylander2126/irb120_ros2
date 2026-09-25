@@ -1,30 +1,27 @@
 """
 Perception launch file.
 
-Launches the DBSCAN segmentation backend:
+Launches DBSCAN segmentation followed by the SAM cull:
 
   ros2 launch irb120_perception perception.launch.py
 
-robot_mask_filter and object_detector are compute-heavy but only actually
-needed briefly (see their own docstrings' "On/off gate" section) —
-`press_point_check.check_press_point()` already toggles them on/off around
-each check regardless of this launch arg. This one just controls what state
-they're in before the first check ever runs (or if you want to watch live
-detections in RViz without running a control script):
-
-  ros2 launch irb120_perception perception.launch.py active_at_start:=false
-
-Pipeline topology:
-
   RealSense (cam1) ──┐
-  RealSense (cam2) ──┼──▶ object_detector_dbscan (raw clouds fused in-node)
-  RealSense (cam3) ──┘
+  RealSense (cam2) ──┼──▶ object_detector_dbscan ──▶ object_detector_dbscan_sam_cull (cam1 RGB)
+  RealSense (cam3) ──┘      /object_detector/*        /object_detector_dbscan_sam_cull/*
+
+DBSCAN finds the points most likely to be the object; the culler projects
+them into cam1, prompts MobileSAM with their bounding box, and keeps only the
+points inside the mask. The culler only works when DBSCAN publishes, and
+irb120_control's perception snapshots switch DBSCAN on just for the snapshot
+(active_at_start only sets its state before the first one).
 
 The robot is deliberately out of the workspace for offline perception, so
 the mask filter is not launched here.  Its executable and logic remain
 available for workflows that need it. Set cam2_cloud_topic:='' /
 cam3_cloud_topic:='' to disable an individual camera.
 """
+
+import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -53,9 +50,8 @@ def generate_launch_description() -> LaunchDescription:
         'active_at_start',
         default_value='true',
         description=(
-            "Whether object_detector starts out processing "
-            "immediately (default, matches historical always-on behaviour) or "
-            "idle until the first check_press_point() call activates them."
+            "Whether object_detector starts out processing immediately (default) "
+            "or idle until the first perception snapshot switches it on."
         ),
     )
     active_param = {'active': ParameterValue(LaunchConfiguration('active_at_start'), value_type=bool)}
@@ -102,15 +98,40 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[dbscan_params, active_param],
     )
 
-    # ---- Contact point selection ---------------------------------------------
-    # NOT launched here: `contact_point_selector` is invoked directly by
-    # `irb120_control/util/press_point_check.py` (select_contact_points()) as
-    # part of a press check, not run as a standalone persistent node. See
-    # CONTACT_SELECTION.md.
+    # ---- SAM cull of DBSCAN's cloud -------------------------------------------
+    # MobileSAM needs torch, so this one node runs on ~/irb_venv's Python with
+    # BLAS threads capped (see README: an uncapped venv numpy once knocked out EGM).
+    sam_checkpoint_arg = DeclareLaunchArgument(
+        'sam_checkpoint',
+        default_value=os.path.expanduser('~/irb120_ws_models/mobile_sam/mobile_sam.pt'),
+    )
+    sam_cull_node = Node(
+        package='irb120_perception',
+        executable='object_detector_dbscan_sam_cull',
+        name='object_detector_dbscan_sam_cull',
+        output='screen',
+        prefix=[os.path.expanduser('~/irb_venv/bin/python3')],
+        additional_env={'OMP_NUM_THREADS': '8', 'OPENBLAS_NUM_THREADS': '8', 'MKL_NUM_THREADS': '8'},
+        parameters=[{
+            'base_frame': 'base_link',
+            'input_cloud': '/object_detector/object_points',
+            'color_topic': '/realsense/color/image_raw',
+            'camera_info_topic': '/realsense/color/camera_info',
+            'sam_checkpoint': LaunchConfiguration('sam_checkpoint'),
+            'sam_device': 'cpu',
+            'box_padding_px': 12,
+            'min_cull_interval_sec': 2.0,
+        }],
+    )
+
+    # Contact selection isn't a node: irb120_control's perception snapshot calls
+    # select_contact_points() on the culled cloud. See CONTACT_SELECTION.md.
 
     return LaunchDescription([
         cam2_cloud_arg,
         cam3_cloud_arg,
         active_at_start_arg,
+        sam_checkpoint_arg,
         dbscan_node,
+        sam_cull_node,
     ])

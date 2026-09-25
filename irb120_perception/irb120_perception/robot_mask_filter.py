@@ -71,8 +71,7 @@ On/off gate:
   out of the way of the object. Defaults to active (matches historical
   always-on behaviour); toggle at runtime with:
     ros2 service call /robot_mask_filter/set_active std_srvs/srv/SetBool "{data: false}"
-  `press_point_check.check_press_point()` already does this automatically
-  around each check, so most callers never need to touch this directly.
+  (Not part of the default bringup: snapshots are taken with the arm at home.)
 """
 
 import os

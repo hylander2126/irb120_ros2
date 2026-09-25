@@ -1,6 +1,8 @@
-"""Optional hybrid backend: use one prompted SAM mask to clean DBSCAN output.
+"""DBSCAN -> SAM cull: use one prompted SAM mask to clean DBSCAN output.
 
-This deliberately does not replace either existing detector.  It subscribes to
+This produces the object cloud the pipeline uses (launched by
+perception.launch.py; irb120_control's perception snapshot reads its
+~/object_points). It subscribes to
 DBSCAN's published object cloud, projects that coarse 3-D result into cam1,
 asks MobileSAM for one box-prompted mask, and publishes only source points
 whose image pixels lie inside that mask.  Thus SAM is a boundary cull, not an

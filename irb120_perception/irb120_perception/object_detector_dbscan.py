@@ -34,7 +34,7 @@ With direct camera input, budget roughly `accum_frames / observation-rate`
 before the first result. While the window is
 filling, this node publishes nothing at all (not even an empty detection) on
 `~/object_points`/`~/detections`, so a consumer that reads "the first message
-after activation" (e.g. `press_point_check.check_press_point`) never mistakes
+after activation" (e.g. irb120_control's perception snapshot) never mistakes
 a warm-up frame for "no objects detected" — but that same silence is
 indistinguishable from a hang if the window never fills in a reasonable time.
 

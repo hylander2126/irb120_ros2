@@ -3,8 +3,8 @@
 
 Squash phase: identical to squash_pull — descend until force reference is met.
 Arc-follow phase: EE follows a circular arc whose:
-  - center = (x_contact + offset, y_contact, 0.0)
-  - radius = z_contact                     — the post-squash EE height
+  - center = the detected tipping pivot (press contact's pivot, world frame)
+  - radius = the post-squash EE distance from that pivot
 
 At each tick the desired arc position is computed from the measured EE angle.
 The finger orientation is held fixed while a PI force controller adjusts the
@@ -12,6 +12,16 @@ radial component computed in the actual XZ arc frame.
 
 UNARC reverses the arc back to the squash angle.  If contact is lost during
 ARC or UNARC, the complete attempt is re-run with a higher press force.
+
+Runs as the 'press_pull_tip' stage of an episode (util/episode.py). The
+targets come from the episode's perception snapshot (taken first unless the
+last stage already is one): the approach is SQUASH_STANDOFF above the detected
+press contact's finger-ball center, and the arc center is that contact's
+tipping pivot. After returning home, a second snapshot is taken.
+
+Usage:
+    ros2 run irb120_control arc_static flashlight                   # new episode
+    ros2 run irb120_control arc_static flashlight --episode last    # e.g. after push
 """
 
 import argparse
@@ -19,6 +29,7 @@ import math
 import sys
 from datetime import datetime
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import WrenchStamped
 from moveit_msgs.action import MoveGroup
@@ -32,8 +43,9 @@ from irb120_control.controllers.force_controller import PIDForceController
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.episode import Episode
 from irb120_control.util.ft_tare import tare_netft
-from irb120_control.util.press_point_check import check_press_point
+from irb120_control.util.perception_snapshot import begin_motion_stage, lookup, take_snapshot
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
     arc_velocity_xz,
@@ -76,7 +88,8 @@ DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
-ARC_CENTER = (0.61, 0.0, 0.0) # world-frame pivot edge / arc center (x, y, z) # IF BOX AND HEART FAIL, IT'S CAUSE OF THIS, SORTOF. WE USED THE OLD ARC CALCULATION FOR THOSE
+SQUASH_STANDOFF = 0.02       # m, pre-squash ball center sits this far above the detected press contact
+PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
@@ -154,21 +167,14 @@ def _quat_mul(a, b):
 
 
 class ArcStatic(Node):
-    def __init__(self, object_name: str | None = None) -> None:
+    def __init__(self, object_name: str) -> None:
         super().__init__("arc_static")
-        self.declare_parameter("object", "")
-        obj = object_name or self.get_parameter("object").get_parameter_value().string_value
-        if obj not in VALID_OBJECTS:
-            raise ValueError(
-                f"Required parameter 'object' must be one of {sorted(VALID_OBJECTS)}, "
-                f"got: '{obj}'. Pass it as: arc_static box"
-            )
+        obj = object_name
         self._object = obj
-        self._log_subdir = f"{obj}/arc_squash"
         params = load_object_params(obj)
-        ps = params["pre_squash"]
-        self._pre_squash_pos = (ps["x"], ps["y"], ps["z"])
-        self._pre_squash_ori = (ps["qx"], ps["qy"], ps["qz"], ps["qw"])
+        # Both set from the detected press contact by set_targets_from_contacts().
+        self._pre_squash_pos = None  # world frame
+        self._arc_center = None      # world frame (x, y, z)
 
         self._tf_buffer       = Buffer()
         self._tf_listener     = TransformListener(self._tf_buffer, self)
@@ -264,10 +270,29 @@ class ArcStatic(Node):
             self,
             self._move_group_client,
             target_position=self._pre_squash_pos,
-            target_orientation=self._pre_squash_ori,
+            target_orientation=PRE_SQUASH_ORIENTATION,
             velocity_scale=0.1,
             acceleration_scale=0.1,
         )
+
+    def set_targets_from_contacts(self, contacts: dict) -> bool:
+        """Pre-squash position and arc center from the detected press contact
+        (selector output is in base_link; this node works in world)."""
+        press = contacts["press"]
+        pivot = (press.get("geometry") or {}).get("pivot")
+        if not press["available"] or pivot is None:
+            self.get_logger().error(f"No press contact/pivot: {press.get('reason')} -- not moving.")
+            return False
+        tf = lookup(self, BASE_FRAME, "base_link")
+        if tf is None:
+            self.get_logger().error(f"No TF {BASE_FRAME} <- base_link -- not moving.")
+            return False
+        R, t = tf
+        ball = R @ np.asarray(press["ball_center"]) + t
+        self._pre_squash_pos = (float(ball[0]), float(ball[1]), float(ball[2]) + SQUASH_STANDOFF)
+        self._arc_center = tuple(float(v) for v in R @ np.asarray(pivot) + t)
+        self.get_logger().info(f"Press contact -> pre-squash {self._pre_squash_pos}, arc center {self._arc_center}")
+        return True
 
     def move_to_home(self) -> bool:
         """Return to the robot's all-zero joint configuration, gently — same
@@ -428,13 +453,13 @@ class ArcStatic(Node):
     def _init_arc(self, x_contact: float, y_contact: float, z_contact: float) -> None:
         """Compute arc parameters from the post-squash EE position.
 
-        Arc lives in the XZ plane around fixed world-frame ARC_CENTER.
+        Arc lives in the XZ plane around the detected pivot (self._arc_center, world frame).
         Radius is the current EE distance from that fixed pivot edge.
 
         The start angle is the angle of the EE from the center, measured
         from the +Z axis toward +X:  theta = atan2(dx, dz)
         """
-        center_x, center_y, center_z = ARC_CENTER
+        center_x, center_y, center_z = self._arc_center
         self._arc_center_x = center_x
         self._arc_center_z = center_z
         self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x, self._arc_center_z)
@@ -814,37 +839,37 @@ def run_adaptive_press(node: "ArcStatic", force_ref: float, log_prefix: str = "A
 def main(args=None) -> int:
     raw_args = list(sys.argv[1:] if args is None else args)
     ros_args_index = raw_args.index("--ros-args") if "--ros-args" in raw_args else len(raw_args)
-    app_args = raw_args[:ros_args_index]
-    ros_args = raw_args[ros_args_index:]
-
-    parser = argparse.ArgumentParser(description="Run the adaptive arc-static press FSM")
-    parser.add_argument("object", nargs="?", choices=sorted(VALID_OBJECTS))
+    parser = argparse.ArgumentParser(description="Press-pull tip at the detected press contact")
+    parser.add_argument("object", choices=sorted(VALID_OBJECTS))
     parser.add_argument(
         "--quality", choices=["h264", "lossless"], default="h264",
-        help="Video quality for both cameras this run (default: h264 — everyday runs). "
-             "Use 'lossless' for a deliberate one-off high-quality take, e.g. one hero "
-             "trial per object for a paper/video.",
+        help="Video quality this run (default: h264 — everyday runs). Use 'lossless' for a "
+             "deliberate one-off high-quality take, e.g. one hero trial per object for a paper/video.",
     )
-    parser.add_argument(
-        "--ignore-press-sanity", action="store_true",
-        help="Continue even if the press-point sanity check fails (perception disagrees "
-             "with the calibrated pre_squash pose, or nothing was detected at all). This "
-             "check exists to catch a badly-positioned/undetected object before any "
-             "motion — only skip it when you already know why it's failing.",
-    )
-    parsed = parser.parse_args(app_args)
+    parser.add_argument("--episode", default="new", metavar="new|last|PATH",
+                        help="Episode to record into (default: a new one). See util/episode.py.")
+    parsed = parser.parse_args(raw_args[:ros_args_index])
 
-    rclpy.init(args=ros_args)
-    node = ArcStatic(object_name=parsed.object)
-    # Defaults in case we abort (or an exception fires) before the attempt loop is reached —
-    # the F/T subscriber is already live at this point, so there may be a log to save either way.
+    rclpy.init(args=raw_args[ros_args_index:])
+    node = ArcStatic(parsed.object)
+    episode = Episode.resolve(parsed.episode, parsed.object, node)
+    stage = None
     attempt = 0
     force_ref = node._force_ctrl.reference
+    motion_started = False
+    home_ok = None
     try:
+        stage, contacts = begin_motion_stage(node, episode, "press_pull_tip")
+        if stage is None:
+            node.get_logger().error("No usable perception snapshot -- not moving.")
+            return 1
+        if not node.set_targets_from_contacts(contacts):
+            return 1
+
         if not tare_netft(node):
             return 1
 
-        if not start_recording(node, node._log_subdir, quality=parsed.quality):
+        if not start_recording(node, str(stage.path), quality=parsed.quality):
             node.get_logger().error("One or more cameras failed to start recording — aborting")
             return 1
 
@@ -858,17 +883,7 @@ def main(args=None) -> int:
             )
             return 1
 
-        if not check_press_point(node, node._pre_squash_pos, label=f"arc_static/{node._object}"):
-            msg = (
-                "Press-point sanity check failed — perception disagrees with the calibrated "
-                "pre_squash pose (or no detection at all)."
-            )
-            if parsed.ignore_press_sanity:
-                node.get_logger().warn(f"{msg} Continuing anyway (--ignore-press-sanity).")
-            else:
-                node.get_logger().error(f"{msg} Aborting before any motion.")
-                return 1
-
+        motion_started = True
         if not node.move_to_pre_squash():
             node.get_logger().error("Approach failed. Aborting.")
             return 1
@@ -877,7 +892,7 @@ def main(args=None) -> int:
             f"[PARAMS] object={node._object}  "
             f"force_ref={node._force_ctrl.reference:.2f}N  "
             f"hard_limit={FORCE_HARD_LIMIT_N:.1f}N  "
-            f"pre_squash_pos={node._pre_squash_pos}  "
+            f"pre_squash_pos={node._pre_squash_pos}  arc_center={node._arc_center}  "
             f"kp={KP_FORCE}  ki={KI_FORCE}  "
             f"force_deadband={FORCE_DEADBAND_N}N  "
             f"force_filter_alpha={FORCE_FILTER_ALPHA}  "
@@ -898,45 +913,50 @@ def main(args=None) -> int:
         pass
     finally:
         stop_recording(node)
-        try:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_ft_pose_log(
-                node._ft_transformed_log,
-                node._pose_log,
-                node._log_subdir,
-                "arc_static",
-                node._obj_pose_log,
-                command_log=node._command_log,
-                timestamp=ts,
-            )
-            save_run_metadata(
-                node._log_subdir,
-                "arc_static",
-                ts,
-                {
+        if stage is not None:
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_ft_pose_log(
+                    node._ft_transformed_log,
+                    node._pose_log,
+                    str(stage.path),
+                    "arc_static",
+                    node._obj_pose_log,
+                    command_log=node._command_log,
+                    timestamp=ts,
+                )
+                save_run_metadata(str(stage.path), "arc_static", ts, {
                     **module_constants(globals()),
                     "object": node._object,
+                    "pre_squash": node._pre_squash_pos,
+                    "arc_center": node._arc_center,
                     "final_force_ref_n": force_ref,
                     "attempts": attempt,
                     "completed": node._completed,
-                    "press_point_check": getattr(node, "_press_point_check_result", None),
-                },
-            )
-        except Exception as exc:
-            node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
+                })
+            except Exception as exc:
+                node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
         node._servo_cmd.publish_zero(node._state, node._force_z)
-        if rclpy.ok():
+        if motion_started and rclpy.ok():
             node.pause_servo()
             node.get_logger().info(
                 "Returning to home position (all joints zero) via MoveIt on the existing EGM session..."
             )
-            if not node.move_to_home():
+            home_ok = node.move_to_home()
+            if not home_ok:
                 node.get_logger().error(
                     "MoveIt return to home failed. EGM may have ended; "
                     "not retrying automatically to avoid an unsafe snap."
                 )
         node._servo_cmd.close()
         deactivate_egm(node)
+        if stage is not None:
+            stage.end("ok" if node._completed else "failed" if motion_started else "aborted",
+                      completed=node._completed, attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
+                      pre_squash=node._pre_squash_pos, arc_center=node._arc_center)
+            if home_ok and rclpy.ok():
+                take_snapshot(node, episode, label="after tip")
+        print(episode.summary())
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

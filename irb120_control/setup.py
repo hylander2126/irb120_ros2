@@ -47,6 +47,8 @@ setup(
             'arc_static_batch       = irb120_control.arc_static_batch:main',
             'push                   = irb120_control.push:main',
             'keyboard_jog           = irb120_control.keyboard_jog:main',
+            'episode                = irb120_control.util.episode:main',
+            'run_pipeline           = irb120_control.orchestrator:main',
         ],
     },
 )

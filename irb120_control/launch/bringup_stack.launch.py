@@ -209,7 +209,7 @@ def generate_launch_description():
 
     # Just for recording video and saving convex hull — one instance per camera,
     # driven together by irb120_control.util.runtime_log_dir.start_recording()/
-    # stop_recording() so cam1 and cam2 always start/stop/switch quality in lockstep.
+    # stop_recording() so all three cameras always start/stop/switch quality in lockstep.
     camera_hull_recorder_node = Node(
         package="irb120_control",
         executable="camera_hull_recorder",
@@ -245,6 +245,25 @@ def generate_launch_description():
             {"show_hull": True},
             # No FT HUD on cam2 — this view is likely to get flipped/cropped in
             # post, and the readout would end up mirrored/misplaced or cut off.
+            {"show_ft_hud": False},
+        ],
+    )
+    camera_hull_recorder3_node = Node(
+        package="irb120_control",
+        executable="camera_hull_recorder",
+        name="camera_hull_recorder3",
+        output="screen",
+        parameters=[
+            {"image_topic": "/realsense3/color/image_raw"},
+            {"camera_info_topic": "/realsense3/color/camera_info"},
+            {"marker_topic": "/object_detector/markers"},
+            {"contact_marker_topic": "/contact_point_selector/markers"},
+            {"annotated_image_topic": "/contact_point_selector/camera3_overlay"},
+            {"recording_service": "/camera_hull_recorder3/set_recording"},
+            {"filename_prefix": "camera_hull_overlay_cam3"},
+            {"auto_start_recording": False},
+            {"show_hull": True},
+            # Far-side view, faces the robot: same reasoning as cam2 for no FT HUD.
             {"show_ft_hud": False},
         ],
     )
@@ -332,8 +351,8 @@ def generate_launch_description():
         default_value='true',
         description=(
             'Whether object_detector starts out processing '
-            'immediately (default) or idle until the first check_press_point() '
-            'call activates them — see irb120_perception/perception.launch.py.'
+            'immediately (default) or idle until the first perception snapshot '
+            'switches it on — see irb120_perception/perception.launch.py.'
         ),
     )
 
@@ -354,6 +373,7 @@ def generate_launch_description():
         netft_preprocessor_node,
         camera_hull_recorder_node,
         camera_hull_recorder2_node,
+        camera_hull_recorder3_node,
         # viz_netft_delayed,
         servo_node,
         servo_set_twist_mode,

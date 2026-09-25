@@ -105,7 +105,7 @@ OUT_DIR = os.path.expanduser('~')
 # --- SE(3) helpers -----------------------------------------------------
 
 def _quat_to_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
-    """Same formula as irb120_control/util/press_point_check.py's _to_frame."""
+    """Unit quaternion (x, y, z, w) -> 3x3 rotation matrix."""
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
         [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],

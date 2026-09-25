@@ -425,9 +425,8 @@ class ObjectDetectorBase(Node):
     with a list of per-object (Ni,3) point arrays in `self.base_frame`.
 
     On/off gate: this is compute-heavy (point cloud math every frame) but is
-    only actually needed briefly — e.g. right before
-    `press_point_check.check_press_point()` runs, while the robot is out of
-    the way of the object. `active` (declared param, default True — matches
+    only actually needed briefly — e.g. for irb120_control's perception
+    snapshot, while the robot is out of the way of the object. `active` (declared param, default True — matches
     the historical always-on behaviour) gates whether subclasses' data
     callbacks do any work at all; toggle at runtime via:
 

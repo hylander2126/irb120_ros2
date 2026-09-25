@@ -1,15 +1,16 @@
 # Contact point selection
 
-`contact_point_selector.py` is an independent geometry selector for one segmented
-object. It leaves the legacy press selector, launches and motion controllers alone.
-No motion is commanded. The pure Python function needs NumPy and SciPy, not ROS.
+`contact_point_selector.py` is a geometry selector for one segmented object.
+The pure Python function needs NumPy and SciPy, not ROS. The pipeline calls it
+on the DBSCAN -> SAM cull cloud in every perception snapshot (see "How the
+pipeline uses it" below).
 
 ## Current camera coverage
 
-Both installed cameras are on the robot side of the object. The far-workspace
-camera has **not** been added, so the far support boundary used for forward
-tipping is not directly visible. Fusing the two current views does not recover
-that hidden boundary.
+cam1 and cam2 are on the robot side of the object; cam3 (added 2026-09) looks
+at it from the far side, so the far support boundary used for forward tipping
+is now in view when cam3 sees the object's base. How accurate the far pivot is
+with cam3 has not been validated yet.
 
 The script currently closes a convex hull around the **observed** low points.
 Its far-facing hull edge can therefore be an artificial boundary of the partial
@@ -153,30 +154,15 @@ holes or concave top boundaries. A 5 mm inset
 is not a contact mechanics or finite-patch guarantee. Refresh observations after
 the initial planar push before using a tipping contact or pivot.
 
-## Legacy migration status
+## How the pipeline uses it
 
-The active calibration check now uses `select_contact_points(...)["press"]`:
+`irb120_control/util/perception_snapshot.py` runs the selector on the culled
+cloud (base_link, default `table_z`) and saves the full output as
+`contacts.json` in the episode's perceive stage. The motion scripts then take
+their targets from it, with no hardcoded poses:
 
-```text
-arc_static.py / arc_static_batch.py
-  → util/press_point_check.py
-    → contact_point_selector.select_contact_points()
-```
+- `push`: approach `PUSH_STANDOFF` behind the `planar_push` ball center, push +X.
+- `arc_static`: approach `SQUASH_STANDOFF` above the `press` ball center; the
+  arc is centered on the `press` pivot (transformed to `world`).
 
-The check preserves perception activation, prominent-object selection, the 5 cm
-vertical standoff, 5 cm 3D comparison tolerance, and CSV/run metadata. It transforms the whole cloud into `world`
-before selection with table z=0. The comparison uses surface contact plus vertical
-standoff, not ball center plus standoff. The calibrated controller motion target
-is unchanged. An unavailable press selection fails the check with its reason and
-candidate counts; there is no fallback to the old heuristic.
-
-The legacy `press_point_selector.py` and executable have been removed — it was
-no longer imported by the active press check, and its nearest-X preference
-differed from the new inset/median choice. Existing calibrated poses may
-therefore pass or fail differently than they did under the old estimator, and
-missing support/top observations can now fail the check rather than produce a
-height-only estimate. This migration changes the estimator, not the check into
-a motion-target generator.
-
-The new forward-tip axis remains an unverified partial-cloud hypothesis with the
-current camera layout. No far-axis estimate is used to command motion by this check.
+The forward-tip contact/pivot is recorded but not used yet.

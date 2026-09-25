@@ -4,15 +4,22 @@
 All motion is planned with MoveIt's ComputeCartesianPath, which enforces a
 straight-line EE path in Cartesian space — no Z drift.
 
-Sequence:
-  1. MoveIt approach to PRE_PUSH pose.
-  2. Operator confirmation.
-  3. Cartesian push: straight +X for PUSH_DISTANCE at PUSH_MAX_CARTESIAN_SPEED.
-  4. MoveIt return to PRE_PUSH pose.
+Runs as the 'push' stage of an episode (util/episode.py):
+  1. Perception snapshot (skipped if the episode's last stage already is one).
+  2. MoveIt approach to the pre-push pose: the detected planar_push contact's
+     finger-ball center, PUSH_STANDOFF back in -X.
+  3. Operator confirmation, F/T tare.
+  4. Cartesian push: straight +X for PUSH_DISTANCE at PUSH_MAX_CARTESIAN_SPEED.
+  5. Cartesian return, then home, then a second snapshot of the pushed object.
 
-F/T data collected during step 3 is saved to a .npz file.
+F/T + pose from step 4, metadata and videos go into the stage folder.
+
+Usage:
+    ros2 run irb120_control push flashlight                      # new episode
+    ros2 run irb120_control push flashlight --episode last
 """
 
+import argparse
 import sys
 from datetime import datetime
 
@@ -26,10 +33,11 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
-from irb120_control.controllers.moveit_single_shot import plan_and_execute_pose_goal
+from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
+from irb120_control.util.episode import Episode
+from irb120_control.util.perception_snapshot import begin_motion_stage, take_snapshot
 from irb120_control.util.runtime_log_dir import (
-    load_object_params,
     module_constants,
     save_ft_pose_log,
     save_run_metadata,
@@ -44,6 +52,8 @@ EE_LINK    = "finger_ball_center"
 GROUP_NAME = "manipulator"
 
 PUSH_DISTANCE            = 0.080   # m
+PUSH_STANDOFF            = 0.030   # m, pre-push ball center sits this far behind (-X) the detected contact
+PUSH_ORIENTATION         = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 PUSH_VELOCITY_SCALE      = 0.01    # fraction of joint limits (~5 mm/s at this pose)
 PUSH_MAX_CARTESIAN_SPEED = 0.010   # m/s hard ceiling — secondary safety cap
 CARTESIAN_MAX_STEP       = 0.001   # m — IK resolution along the path
@@ -51,6 +61,8 @@ CARTESIAN_JUMP_THRESH    = 0.0     # disabled
 
 APPROACH_VELOCITY_SCALE  = 0.1     # speed for MoveIt approach and return moves
 RETURN_VELOCITY_SCALE    = 0.05    # slower return after push
+
+HOME_JOINT_POSITIONS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # retreat here before the post-push snapshot
 
 REQUIRE_OPERATOR_CONFIRM = True
 DEBUG = True
@@ -68,21 +80,10 @@ PUSH_VIDEO_QUALITY = "h264"   # camera_hull_recorder's "h264" mode now encodes v
 
 
 class Push(Node):
-    def __init__(self) -> None:
+    def __init__(self, object_name: str) -> None:
         super().__init__("push")
-        self.declare_parameter("object", "")
-        obj = self.get_parameter("object").get_parameter_value().string_value
-        if obj not in VALID_OBJECTS:
-            raise ValueError(
-                f"Required parameter 'object' must be one of {sorted(VALID_OBJECTS)}, "
-                f"got: '{obj}'. Pass it with: --ros-args -p object:=box"
-            )
-        self._object = obj
-        self._log_subdir = f"{obj}/push"
-        params = load_object_params(obj)
-        pp = params["pre_push"]
-        self._pre_push_pos = (pp["x"], pp["y"], pp["z"])
-        self._pre_push_ori = (pp["qx"], pp["qy"], pp["qz"], pp["qw"])
+        self._object = object_name
+        self._pre_push_pos = None  # set from the detected planar_push contact in main()
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
         self._wrench_sub        = self.create_subscription(
@@ -202,7 +203,7 @@ class Push(Node):
             self,
             self._move_group_client,
             target_position=self._pre_push_pos,
-            target_orientation=self._pre_push_ori,
+            target_orientation=PUSH_ORIENTATION,
             velocity_scale=velocity_scale,
         )
 
@@ -272,16 +273,37 @@ def _tare_ft_sensor(node: Push, wait_sec: float = TARE_WAIT_SEC) -> None:
 
 
 def main(args=None) -> int:
-    rclpy.init(args=args)
-    node = Push()
+    raw_args = list(sys.argv[1:] if args is None else args)
+    ros_args_index = raw_args.index("--ros-args") if "--ros-args" in raw_args else len(raw_args)
+    parser = argparse.ArgumentParser(description="Straight-ahead Cartesian push at the detected planar_push contact")
+    parser.add_argument("object", choices=sorted(VALID_OBJECTS))
+    parser.add_argument("--episode", default="new", metavar="new|last|PATH",
+                        help="Episode to record into (default: a new one). See util/episode.py.")
+    parsed = parser.parse_args(raw_args[:ros_args_index])
+
+    rclpy.init(args=raw_args[ros_args_index:])
+    node = Push(parsed.object)
+    episode = Episode.resolve(parsed.episode, parsed.object, node)
+    stage = None
+    push_ok = return_ok = home_ok = None
     try:
+        stage, contacts = begin_motion_stage(node, episode, "push")
+        if stage is None:
+            node.get_logger().error("No usable perception snapshot -- not moving.")
+            return 1
+        contact = contacts["planar_push"]
+        if not contact["available"]:
+            node.get_logger().error(f"No planar_push contact: {contact['reason']} -- not moving.")
+            return 1
+        ball = contact["ball_center"]
+        node._pre_push_pos = (ball[0] - PUSH_STANDOFF, ball[1], ball[2])
+        node.get_logger().info(f"planar_push contact ball center {ball}; pre-push {node._pre_push_pos}")
+
         if not ensure_egm_active(node):
             return 1
 
-        # show_hull=False: push videos don't need the object-hull overlay —
-        # see camera_hull_recorder's show_hull param (on by default via
-        # bringup_stack.launch.py for arc recordings).
-        if not start_recording(node, node._log_subdir, quality=PUSH_VIDEO_QUALITY, show_hull=False):
+        # show_hull=False: push videos don't need the object-hull overlay.
+        if not start_recording(node, str(stage.path), quality=PUSH_VIDEO_QUALITY, show_hull=False):
             node.get_logger().error("Recording failed to start on one or more cameras — aborting")
             return 1
 
@@ -301,8 +323,6 @@ def main(args=None) -> int:
 
         # Phase 2: Cartesian push (F/T recorded during execution)
         node._push_started = True
-        push_ok = None
-        return_ok = None
         node._recording_ft = True
         node.get_logger().info(
             f"Pushing {PUSH_DISTANCE*1000:.0f}mm in +X  "
@@ -327,26 +347,34 @@ def main(args=None) -> int:
         pass
     finally:
         stop_recording(node)
+        if node._push_started and rclpy.ok():
+            # Home, so the post-push snapshot sees the object without the arm in the way.
+            home_ok = plan_and_execute_joint_goal(
+                node, node._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
+                velocity_scaling_factor=APPROACH_VELOCITY_SCALE, acceleration_scaling_factor=APPROACH_VELOCITY_SCALE)
+            if not home_ok:
+                node.get_logger().error("Return home failed -- skipping the post-push snapshot.")
         deactivate_egm(node)
-        if node._push_started:
-            try:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_ft_pose_log(
-                    node._ft_log, node._pose_log, subdir=node._log_subdir, prefix="push_ft_pose", timestamp=ts
-                )
-                save_run_metadata(
-                    node._log_subdir,
-                    "push_ft_pose",
-                    ts,
-                    {
+        if stage is not None:
+            if node._push_started:
+                try:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    save_ft_pose_log(node._ft_log, node._pose_log, subdir=str(stage.path),
+                                     prefix="push_ft_pose", timestamp=ts)
+                    save_run_metadata(str(stage.path), "push_ft_pose", ts, {
                         **module_constants(globals()),
                         "object": node._object,
+                        "pre_push": node._pre_push_pos,
                         "push_ok": push_ok,
                         "return_ok": return_ok,
-                    },
-                )
-            except Exception as exc:
-                node.get_logger().error(f"Failed to save push F/T+pose log: {exc}")
+                    })
+                except Exception as exc:
+                    node.get_logger().error(f"Failed to save push F/T+pose log: {exc}")
+            status = "aborted" if not node._push_started else "ok" if push_ok and return_ok else "failed"
+            stage.end(status, push_ok=push_ok, return_ok=return_ok, home_ok=home_ok, pre_push=node._pre_push_pos)
+            if home_ok and rclpy.ok():
+                take_snapshot(node, episode, label="after push")
+        print(episode.summary())
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

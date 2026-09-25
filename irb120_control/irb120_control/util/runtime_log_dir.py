@@ -18,9 +18,9 @@ _OBJECT_PARAMS_PATH = Path(__file__).resolve().parents[1] / "object_params.json"
 VALID_OBJECTS = {"box", "heart", "flashlight", "monitor", "soda"}
 
 # One camera_hull_recorder instance per camera — see bringup_stack.launch.py.
-# Both get driven together by start_recording()/stop_recording() below so a
-# run's cam1 and cam2 clips always start/stop/switch quality in lockstep.
-DEFAULT_RECORDER_NODES = ("camera_hull_recorder", "camera_hull_recorder2")
+# All get driven together by start_recording()/stop_recording() below so a
+# run's cam1/cam2/cam3 clips always start/stop/switch quality in lockstep.
+DEFAULT_RECORDER_NODES = ("camera_hull_recorder", "camera_hull_recorder2", "camera_hull_recorder3")
 
 
 def load_object_params(object_name: str) -> dict:

@@ -14,9 +14,9 @@ orientation, convex hull, Detection3D/marker publishing, EMA smoothing) via
 - `object_detector_dbscan` — pure geometry, no GPU required, fast.
 - `object_detector_sam` — full automatic MobileSAM, useful for visual
   instance-segmentation experiments but expensive on CPU.
-- `object_detector_dbscan_sam_cull` — an offline DBSCAN refinement: one
-  prompted MobileSAM mask from cam1 removes DBSCAN points outside the visual
-  object silhouette.
+- `object_detector_dbscan_sam_cull` — what the pipeline uses, chained after
+  DBSCAN: one prompted MobileSAM mask from cam1 removes DBSCAN points outside
+  the visual object silhouette. Both are launched by `perception.launch.py`.
 
 ---
 
@@ -67,23 +67,23 @@ backend: automatic point-grid mask generation is slow on CPU.
 
 ### DBSCAN → prompted SAM cull
 
-This is the preferred offline path when DBSCAN gets the object broadly right
-but retains a depth-edge/flying-pixel blob. DBSCAN first produces its normal
+The pipeline's object cloud. DBSCAN gets the object broadly right but can
+retain a depth-edge/flying-pixel blob. DBSCAN first produces its normal
 object cloud. The culler projects that cloud into cam1, uses its 2-D bounds as
 one MobileSAM box prompt, and retains only DBSCAN points inside the resulting
 mask. It avoids full-image "segment everything" inference; a live run
 measured about 300 ms for DBSCAN plus about 2 s for the cull on CPU.
 
-It is comparison-safe: it never modifies `/object_detector/*` or contact
-selection automatically. Review `/object_detector_dbscan_sam_cull/*` in RViz
-before choosing it for a consumer. It cannot remove a bad depth point that
-falls inside the object's visible 2-D silhouette from cam1.
+It publishes on `/object_detector_dbscan_sam_cull/*` and leaves
+`/object_detector/*` untouched, so both can be compared in RViz (perception
+snapshots save both clouds). It cannot remove a bad depth point that falls
+inside the object's visible 2-D silhouette from cam1.
 
 SAM variants require pip packages not declared in `package.xml` (not rosdep-known) and a
 downloaded checkpoint — see that module's docstring for exact commands
 before trying to run it.
 
-**Always launch this via `perception_sam.launch.py`, never a bare `ros2 run`.**
+**Always launch the SAM nodes via their launch file (`perception.launch.py` for the cull, `perception_sam.launch.py` for automatic SAM), never a bare `ros2 run`.**
 irb120_perception is built with the workspace's normal system Python — on
 purpose, because the primary DBSCAN detector runs near a live, 250 Hz EGM
 control loop and must not depend on a pip-heavy venv's Python. The launch file
@@ -175,16 +175,12 @@ ros2 launch irb120_control bringup_irb120_moveit.launch.py
 you want the backend running standalone outside the launch file (e.g.
 against a bag).
 
-### Prompted SAM cull (recommended comparison)
+### Prompted SAM cull
 
-```bash
-ros2 launch irb120_perception perception.launch.py
-ros2 launch irb120_perception perception_dbscan_sam_cull.launch.py \
-  sam_checkpoint:=/path/to/mobile_sam.pt
-```
-
-The second launch consumes DBSCAN's `/object_detector/object_points` and cam1
-RGB/camera-info. With both running, compare:
+`perception.launch.py` starts it alongside DBSCAN (checkpoint default:
+`~/irb120_ws_models/mobile_sam/mobile_sam.pt`, override with
+`sam_checkpoint:=...`). It consumes DBSCAN's `/object_detector/object_points`
+and cam1 RGB/camera-info:
 
 | | DBSCAN | DBSCAN → SAM cull |
 |---|---|---|
@@ -238,9 +234,8 @@ stationary while the window fills.
 
 While the window is filling after activation, `object_detector` publishes
 nothing at all (not `~/detections`, not `~/object_points`) — this matters
-because `press_point_check.check_press_point()` waits for and uses the
-*first* message it receives after activating; publishing an empty result
-during warm-up would look identical to "no object detected" to that caller.
+because a consumer that waits for the first message after activating would
+otherwise mistake an empty warm-up result for "no object detected".
 The same silence is indistinguishable from a hang if the window never fills
 in a reasonable time, which is exactly what happened with the old default.
 
@@ -342,9 +337,8 @@ latency difference between the two once QoS is actually compatible.
 Contact point selection (picking where on the detected object to press,
 push, or tip from) now lives entirely in `contact_point_selector.py` — see
 [CONTACT_SELECTION.md](CONTACT_SELECTION.md) for the selection strategy,
-outputs, and parameters. It's invoked directly by
-`irb120_control/util/press_point_check.py` (`select_contact_points()`), not
-launched as a standalone persistent node.
+outputs, and parameters. It's called on the SAM-culled cloud by
+`irb120_control/util/perception_snapshot.py`, not launched as a node.
 
 `object_detector` publishes `~/object_points`
 (`sensor_msgs/PointCloud2`, fields `x,y,z,label:int32`) — every detected
