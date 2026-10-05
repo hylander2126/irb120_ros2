@@ -164,8 +164,21 @@ def _overlay(color, K, D, R, t, cloud, culled, contacts):
     for mode, bgr in CONTACT_COLORS.items():
         c = contacts.get(mode) or {}
         geometry = c.get("geometry") or {}
+        boundary = geometry.get("support_boundary")
+        if boundary is not None:
+            for a, b in zip(boundary, np.roll(boundary, -1, axis=0)):
+                ends = px([a, b])
+                if len(ends) == 2:
+                    cv2.line(img, ends[0], ends[1], bgr, 1, cv2.LINE_AA)
         if geometry.get("pivot") is not None:
             pivot, axis = np.asarray(geometry["pivot"]), np.asarray(geometry["axis"])
+            center = px(pivot)
+            if center:
+                cv2.circle(img, center[0], 4, bgr, -1, cv2.LINE_AA)
+            direction = np.asarray(geometry["direction"])
+            arrow = px([pivot, pivot + 0.04 * direction])
+            if len(arrow) == 2:
+                cv2.arrowedLine(img, arrow[0], arrow[1], bgr, 2, cv2.LINE_AA)
             ends = px(np.array([pivot - 0.04 * axis, pivot + 0.04 * axis]))
             if len(ends) == 2:
                 cv2.line(img, ends[0], ends[1], bgr, 2, cv2.LINE_AA)
@@ -260,6 +273,12 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             if depth.dtype != np.uint16:  # 32FC1 metres -> mm
                 depth = np.nan_to_num(depth * 1000.0).clip(0, 65535).astype(np.uint16)
             cv2.imwrite(str(out / f"{cam}_depth.png"), depth)
+            # Raw uint16 millimetres are intentionally preserved for reconstruction.
+            preview = cv2.applyColorMap(
+                (np.clip(depth.astype(float) / 2000., 0., 1.) * 255).astype(np.uint8),
+                cv2.COLORMAP_TURBO)
+            preview[depth == 0] = 0
+            cv2.imwrite(str(out / f"{cam}_depth_preview.png"), preview)
         info = {"frame_id": m["color"].header.frame_id, "K": K.tolist(), "D": D.tolist(),
                 "width": m["info"].width, "height": m["info"].height}
         tf = lookup(node, m["color"].header.frame_id, BASE_FRAME)
@@ -269,6 +288,34 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             info["base_to_optical"] = {"R": R.tolist(), "t": t.tolist()}
             cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(color, K, D, R, t, obj, culled, contacts))
         write_json_atomic(out / f"{cam}_camera_info.json", info)
+
+    # Temporary experiment: off by default; shadow records only, apply vetoes press.
+    experiment = os.environ.get("IRB120_EXPERIMENTAL_VIEW_CHECK", "off")
+    if experiment not in ("off", "shadow", "apply"):
+        raise ValueError("IRB120_EXPERIMENTAL_VIEW_CHECK must be off, shadow, or apply")
+    if experiment != "off" and record["ok"]:
+        from irb120_perception.experimental_view_check import evaluate
+        proposed, evidence = evaluate(out, contacts)
+        write_json_atomic(out / "contacts_baseline.json", contacts)
+        write_json_atomic(out / "contacts_experimental_view_check.json", proposed)
+        write_json_atomic(out / "experimental_view_check.json", evidence)
+        record["experimental_view_check"] = {"mode": experiment, "decision": evidence["decision"]}
+        if experiment == "apply":
+            contacts = proposed
+            write_json_atomic(out / "contacts.json", contacts)
+            record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
+            for cam in CAMERAS:
+                info_path = out / f"{cam}_camera_info.json"
+                if not info_path.exists():
+                    continue
+                info = json.loads(info_path.read_text())
+                tf = info.get("base_to_optical")
+                if tf is None:
+                    continue
+                color = cv2.imread(str(out / f"{cam}_color.png"))
+                cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(
+                    color, np.asarray(info["K"]), np.asarray(info["D"]),
+                    np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts))
 
     write_json_atomic(out / "snapshot.json", record)
     stage.end("ok" if record["ok"] else "failed",

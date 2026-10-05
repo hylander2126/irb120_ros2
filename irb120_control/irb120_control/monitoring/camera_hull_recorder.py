@@ -254,7 +254,7 @@ class CameraHullRecorder(Node):
             marker for marker in msg.markers
             if marker.action == Marker.ADD and marker.ns in contact_modes
             and ((marker.id == 3 and marker.type == Marker.ARROW)
-                 or (marker.id == 5 and marker.type == Marker.LINE_LIST))
+                 or (marker.id in (5, 6) and marker.type == Marker.LINE_LIST))
         ]
         if not self._contact_markers_received:
             self.get_logger().info(
@@ -529,6 +529,9 @@ class CameraHullRecorder(Node):
         for marker in self._contact_geometry_markers:
             tf = self._lookup_transform(marker.header.frame_id, image_frame, stamp)
             if tf is None or len(marker.points) < 2:
+                continue
+            if marker.id == 6:
+                self._draw_marker_wireframe(img, marker, tf, width, height)
                 continue
             start = self._marker_point_to_pixel(marker, marker.points[0], tf, width, height)
             end = self._marker_point_to_pixel(marker, marker.points[1], tf, width, height)

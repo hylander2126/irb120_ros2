@@ -233,3 +233,30 @@ def test_push_prefers_alignment_in_low_height_band():
                                  score_tolerance=.006)['planar_push']
     np.testing.assert_allclose(push['point'], points[aligned])
     assert push['normal_angle_deg'] == pytest.approx(0)
+
+
+def test_curved_pivot_tangent_is_centered_and_normal_to_pull():
+    theta = np.linspace(0, 2*np.pi, 128, endpoint=False)
+    points = np.column_stack((.55+.05*np.cos(theta), .03*np.sin(theta), np.full(128,.005)))
+    g = estimate_pivot(points, [1.,0.,0.], 0.)
+    np.testing.assert_allclose(g['tangent'].mean(axis=0), g['pivot'])
+    assert abs(np.dot(g['tangent'][1]-g['tangent'][0],g['direction'])) < 1e-12
+    assert g['edge'] is None
+    assert len(g['support_boundary']) == 128
+
+
+def test_experimental_filter_precedes_scoring_and_cannot_fallback():
+    points, normals = box()
+    seen = []
+    def keep_inboard(candidates, direction):
+        seen.append(len(candidates))
+        return candidates[:, 0] > .55
+    result = select_contact_points(points, normals=normals, table_z=0.,
+                                   experimental_press_filter=keep_inboard)
+    assert result['press']['available']
+    assert result['press']['point'][0] > .55
+    assert seen[0] > 1
+    rejected = select_contact_points(points, normals=normals, table_z=0.,
+        experimental_press_filter=lambda p,d: np.zeros(len(p),dtype=bool))
+    assert not rejected['press']['available']
+    assert 'camera_agreement' in rejected['press']['reason']

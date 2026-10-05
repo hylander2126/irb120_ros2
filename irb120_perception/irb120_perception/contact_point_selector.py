@@ -51,7 +51,9 @@ def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
 
     Use only observed points within support_band of the known table. Long
     hull edges within 45 degrees of the preference are extended-edge pivots;
-    otherwise use the extreme vertex and the tangent normal to the preference.
+    otherwise use the extreme vertex and bisect its adjacent facet normals
+    to estimate a local tangent. The sampled boundary is a convex support
+    envelope, not a claim of a physically straight edge.
     A missing/degenerate support footprint is an error, not a whole-cloud hull
     fallback (which could mistake an overhang for the base).
     """
@@ -83,11 +85,20 @@ def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
         kind = 'extended_edge'
         edge = np.column_stack((np.vstack((vertices[i], ends[i])), [table_z] * 2))
     else:
-        pivot = np.r_[vertices[np.argmax(vertices @ direction[:2])], table_z]
+        i = np.argmax(vertices @ direction[:2])
+        pivot = np.r_[vertices[i], table_z]
+        # Bisect the adjacent outward facet normals: a local tangent to the
+        # sampled support boundary, rather than an invented finite support edge.
+        local_normal = outward[i - 1] + outward[i]
+        local_normal /= np.linalg.norm(local_normal)
+        direction = np.r_[local_normal, 0.0]
         kind = 'isolated_point'
         edge = None
-    return dict(pivot=pivot, axis=np.cross([0., 0., 1.], direction),
-                direction=direction, kind=kind, edge=edge)
+    axis = np.cross([0., 0., 1.], direction)
+    tangent = np.array([pivot - 0.04 * axis, pivot + 0.04 * axis])
+    boundary = np.column_stack((vertices, np.full(len(vertices), table_z)))
+    return dict(pivot=pivot, axis=axis, direction=direction, kind=kind, edge=edge,
+                tangent=tangent, support_boundary=boundary)
 
 
 def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance):
@@ -100,8 +111,8 @@ def _press_band(points, ids, scores, geometry, press_pivot_weight, score_toleran
          height above the pivot (`scores`) -- maximize.
       2. Anti-tipping resistance, proportional to how far "inboard" of the
          pivot edge the contact sits along the estimated pull direction --
-         the object's own mass between the pivot and the contact resists
-         rotating over that edge, so this should be minimized (i.e.
+         downward pressing produces an opposing moment about that edge,
+         so its moment arm should be minimized (i.e.
          proximity to the edge maximized).
 
     Weighing both together, rather than treating height as a hard cutoff
@@ -130,7 +141,8 @@ def select_contact_points(clouds, *, normals=None,
                           pull_normal_epsilon=0.1,
                           normal_radius=0.025,
                           press_pivot_weight=1.0,
-                          push_max_normal_angle_deg=20.0):
+                          push_max_normal_angle_deg=20.0,
+                          experimental_press_filter=None):
     """Return three independent selections and their estimated pivot geometry.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
@@ -235,6 +247,8 @@ def select_contact_points(clouds, *, normals=None,
         # Press: if nothing passes, retry once with a looser pull tolerance so a
         # rounded top (normals tilted toward the pull direction) still yields a contact.
         epsilons = [0.0] if mode == 'forward_tip' else [pull_normal_epsilon, max(pull_normal_epsilon, RELAXED_PULL_EPSILON)]
+        if mode == 'press' and experimental_press_filter is not None:
+            epsilons = [pull_normal_epsilon]
         for epsilon in epsilons:
             counts = {'clearance': int(clear.sum())}
             feasible = clear & (normals @ direction <= epsilon)
@@ -253,6 +267,9 @@ def select_contact_points(clouds, *, normals=None,
             if len(ids) and mode == 'press' and press_inset > 0:
                 ids = inset_top(ids)
             counts['inset'] = len(ids)
+            if mode == 'press' and experimental_press_filter is not None:
+                ids = ids[experimental_press_filter(points[ids], direction)]
+                counts['camera_agreement'] = len(ids)
             if len(ids):
                 ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance)
                           if mode == 'press' else scores[ids] >= scores[ids].max() - score_tolerance]
@@ -262,7 +279,7 @@ def select_contact_points(clouds, *, normals=None,
         # Last resort for tiny rounded tops where no neighborhood is flat enough for a
         # usable normal: press on the highest points and assume a horizontal surface.
         topmost = False
-        if not len(ids) and mode == 'press':
+        if not len(ids) and mode == 'press' and experimental_press_filter is None:
             band = points[:, 2] >= points[:, 2].max() - TOPMOST_BAND
             # Only with evidence of a cap (some known upward-leaning normal up there); NaN
             # normals among them are then tolerated, clearly vertical ones (a side wall) are not.
@@ -282,8 +299,8 @@ def select_contact_points(clouds, *, normals=None,
             # `best_score_band` above already double-scores height and pivot
             # proximity together for press. What remains here is centering
             # along the pivot edge itself (an axis orthogonal to both terms).
-            if mode == 'press' and geometry['edge'] is not None:
-                edge_midpoint = geometry['edge'].mean(axis=0)
+            if mode == 'press':
+                edge_midpoint = geometry['pivot']
                 along_edge = (points[ids] - edge_midpoint) @ geometry['axis']
                 # The desired-axis moments do not distinguish locations
                 # along a straight pivot edge. Center there, in the edge's
@@ -306,8 +323,8 @@ def select_contact_points(clouds, *, normals=None,
                 result[mode]['press_score'] = float(
                     geometry['axis'] @ np.cross(
                         points[i] - geometry['pivot'], [0., 0., -1.]))
-                if geometry['edge'] is not None:
-                    edge_midpoint = geometry['edge'].mean(axis=0)
+                if geometry.get('tangent') is not None:
+                    edge_midpoint = geometry['pivot']
                     result[mode]['edge_midpoint'] = edge_midpoint
                     result[mode]['along_edge_offset'] = float(
                         (points[i] - edge_midpoint) @ geometry['axis'])
@@ -406,6 +423,12 @@ def build_contact_markers(result, frame, stamp):
             axis_label.text = mode.replace('_', ' ') + ' axis'
             if not selected['available']:
                 axis_label.text += ' (no contact)'
+            boundary = geometry.get('support_boundary')
+            if boundary is not None:
+                outline = marker(6, Marker.LINE_LIST)
+                outline.points = [point(p) for pair in zip(boundary, np.roll(boundary, -1, axis=0)) for p in pair]
+                outline.scale.x = 0.002
+
             if geometry['edge'] is not None:
                 # The support edge itself is distinct from the signed rotation
                 # axis arrow.  Publish it so camera overlays can show exactly

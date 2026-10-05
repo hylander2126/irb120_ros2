@@ -89,6 +89,7 @@ DESCEND_SPEED = 0.005       # m/s
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
+SQUASH_EXTRA_DESCENT_M = 0.005  # allow 5 mm below predicted ball-center contact height
 SQUASH_STANDOFF = 0.03       # m, pre-squash ball center sits this far above the detected press contact (~14 mm clear of the object's collision box)
 PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 ARC_FX_SIGN_DEADBAND_N = 0.08
@@ -637,15 +638,26 @@ class ArcStatic(Node):
                 self._contact_felt = True
                 self._force_y_ref = self._force_y  # capture lateral force at first contact
                 self.get_logger().info(f"Contact felt! Y force ref set: {self._force_y_ref:.3f} N")
-            if not self._servo_cmd.publish_twist(0.0, 0.0, -DESCEND_SPEED, state=self._state, force_z=self._force_z):
-                self._done = True
+            contact_z = self._pre_squash_pos[2] - SQUASH_STANDOFF
+            if (pz <= contact_z - SQUASH_EXTRA_DESCENT_M
+                    and not (self._have_force and self._force_z >= self._force_ctrl.reference)):
+                self.get_logger().error(
+                    f"No expected press force within {SQUASH_EXTRA_DESCENT_M*1000:.0f} mm "
+                    "below predicted contact height -- retracting without retry")
+                self._retry_requested = False
+                self._servo_cmd.publish_zero(self._state, self._force_z)
+                self._transition("RETRACT")
                 return
             if self._have_force and self._force_z >= self._force_ctrl.reference:
                 self._contact_count += 1
+                self._servo_cmd.publish_zero(self._state, self._force_z)
                 if self._contact_count >= CONTACT_STABLE_SAMPLES:
                     self._transition("LULL")
             else:
                 self._contact_count = 0
+                if not self._servo_cmd.publish_twist(
+                        0.0, 0.0, -DESCEND_SPEED, state=self._state, force_z=self._force_z):
+                    self._done = True
             return
 
         # -------- LULL --------
