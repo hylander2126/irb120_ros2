@@ -23,6 +23,7 @@ cam3_cloud_topic:='' to disable an individual camera.
 
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -124,6 +125,18 @@ def generate_launch_description() -> LaunchDescription:
         }],
     )
 
+    twin_node = Node(
+        package='irb120_perception', executable='object_digital_twin',
+        name='object_digital_twin', output='screen',
+        parameters=[{'input_cloud': '/object_detector_dbscan_sam_cull/object_points',
+                     'model_file': os.path.join(get_package_share_directory('irb120_perception'),
+                                                'config', 'object_digital_twin.json')}],
+    )
+    confidence_map_node = Node(
+        package='irb120_perception', executable='object_confidence_map',
+        name='object_confidence_map', output='screen',
+    )
+
     # Contact selection isn't a node: irb120_control's perception snapshot calls
     # select_contact_points() on the culled cloud. See CONTACT_SELECTION.md.
 
@@ -134,4 +147,6 @@ def generate_launch_description() -> LaunchDescription:
         sam_checkpoint_arg,
         dbscan_node,
         sam_cull_node,
+        twin_node,
+        confidence_map_node,
     ])

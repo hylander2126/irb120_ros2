@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 149
+    Tree Height: 140
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -167,6 +167,11 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          tool_stack_collision:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           world:
             Alpha: 1
             Show Axes: false
@@ -321,6 +326,11 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          tool_stack_collision:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           world:
             Alpha: 1
             Show Axes: false
@@ -352,7 +362,7 @@ Visualization Manager:
         Value: true
       Zoom Factor: 1
     - Class: rviz_default_plugins/Camera
-      Enabled: false
+      Enabled: true
       Far Plane Distance: 1.399999976158142
       Image Rendering: background
       Name: Camera
@@ -363,7 +373,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /realsense/color/image_raw
-      Value: false
+      Value: true
       Visibility:
         Camera: true
         Grid: true
@@ -474,16 +484,16 @@ Window Geometry:
     collapsed: false
   Displays:
     collapsed: false
-  Height: 1043
+  Height: 1011
   Hide Left Dock: false
   Hide Right Dock: false
   MotionPlanning:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001ee000003b5fc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f000000d5000000cc00fffffffb0000000c00430061006d006500720061010000011a000000fa0000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000021a000001da0000019600fffffffb0000000a005600690065007700730000000371000000db000000a900fffffffb0000000c00430061006d0065007200610000000339000000bb0000001700ffffff0000058c000003b500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001ee00000395fc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004400fffffffb000000100044006900730070006c006100790073010000003f000000cc000000cc00fffffffb0000000c00430061006d0065007200610100000111000000fd0000001700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000214000001c00000019600fffffffb0000000a005600690065007700730000000371000000db000000a900fffffffb0000000c00430061006d0065007200610000000339000000bb0000001700ffffff0000054a0000039500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
-  Width: 1920
-  X: 0
-  Y: 0
+  Width: 1854
+  X: 1986
+  Y: 32

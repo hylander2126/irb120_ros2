@@ -49,6 +49,7 @@ setup(
             'keyboard_jog           = irb120_control.keyboard_jog:main',
             'episode                = irb120_control.util.episode:main',
             'run_pipeline           = irb120_control.orchestrator:main',
+            'offline_tsdf           = irb120_control.offline_tsdf_launcher:main',
         ],
     },
 )

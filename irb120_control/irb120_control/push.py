@@ -23,6 +23,7 @@ import argparse
 import sys
 from datetime import datetime
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, WrenchStamped
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
@@ -37,6 +38,7 @@ from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
 from irb120_control.util.object_obstacle import object_obstacle
+from irb120_control.util.push_geometry import push_approach
 from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, take_snapshot
 from irb120_control.util.runtime_log_dir import (
     module_constants,
@@ -207,6 +209,7 @@ class Push(Node):
                 return plan_and_execute_pose_goal(
                     self,
                     self._move_group_client,
+                    base_frame=BASE_FRAME,
                     target_position=self._pre_push_pos,
                     target_orientation=PUSH_ORIENTATION,
                     velocity_scale=velocity_scale,
@@ -240,6 +243,7 @@ class Push(Node):
             self,
             self._cartesian_client,
             self._execute_client,
+            base_frame=BASE_FRAME,
             waypoints=[target],
             velocity_scale=velocity_scale,
             max_cartesian_speed=PUSH_MAX_CARTESIAN_SPEED,
@@ -303,9 +307,20 @@ def main(args=None) -> int:
         if not contact["available"]:
             node.get_logger().error(f"No planar_push contact: {contact['reason']} -- not moving.")
             return 1
+        normal = np.asarray(contact.get("normal", []), dtype=float)
+        direction = np.asarray(contact.get("direction", []), dtype=float)
+        if (normal.shape != (3,) or not np.isfinite(normal).all()
+                or np.linalg.norm(normal) < 1e-9
+                or -normal[0] / np.linalg.norm(normal) < np.cos(np.radians(20.0))
+                or direction.shape != (3,) or not np.allclose(direction, [1., 0., 0.])):
+            node.get_logger().error(
+                "Push requires +X direction within 20 deg of the inward normal. "
+                "Take a fresh snapshot or reposition the object -- not moving.")
+            return 1
         ball = contact["ball_center"]
-        node._pre_push_pos = (ball[0] - PUSH_STANDOFF, ball[1], ball[2])
         node._object_xyz = latest_object_cloud(episode)
+        node._pre_push_pos, push_travel = push_approach(
+            ball, node._object_xyz, PUSH_STANDOFF, PUSH_DISTANCE)
         node.get_logger().info(f"planar_push contact ball center {ball}; pre-push {node._pre_push_pos}")
 
         if not ensure_egm_active(node):
@@ -334,11 +349,11 @@ def main(args=None) -> int:
         node._push_started = True
         node._recording_ft = True
         node.get_logger().info(
-            f"Pushing {PUSH_DISTANCE*1000:.0f}mm in +X  "
+            f"Pushing {push_travel*1000:.0f}mm in +X  "
             f"velocity_scale={PUSH_VELOCITY_SCALE}  "
             f"cartesian_ceiling={PUSH_MAX_CARTESIAN_SPEED*1000:.1f}mm/s"
         )
-        push_ok = node._cartesian_move(+PUSH_DISTANCE, PUSH_VELOCITY_SCALE)
+        push_ok = node._cartesian_move(+push_travel, PUSH_VELOCITY_SCALE)
         node._recording_ft = False
 
         if not push_ok:
@@ -347,7 +362,7 @@ def main(args=None) -> int:
         # Phase 3: Cartesian return — retrace in -X to stay in the same IK
         # solution branch (joint-space return can rotate joint 6 by 360°).
         node.get_logger().info("Returning via Cartesian path...")
-        return_ok = node._cartesian_move(-PUSH_DISTANCE, RETURN_VELOCITY_SCALE)
+        return_ok = node._cartesian_move(-push_travel, RETURN_VELOCITY_SCALE)
         if not return_ok:
             node.get_logger().error("Cartesian return failed — attempting joint-space fallback.")
             node.move_to_pre_push(velocity_scale=RETURN_VELOCITY_SCALE)

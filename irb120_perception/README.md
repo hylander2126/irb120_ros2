@@ -441,3 +441,23 @@ monitor's base + screen joined only at an occluded rear seam):**
 | `vision_msgs`, `visualization_msgs` | ROS 2 message types |
 | `tf2_ros` | Point cloud transform to `base_link` |
 | `torch` (CPU build), `mobile_sam` | SAM backend only — not in `package.xml` (pip, not rosdep-known); see [`object_detector_sam.py`](irb120_perception/object_detector_sam.py)'s docstring for install + checkpoint commands. DBSCAN and the rest of this package do not need either. |
+# Live editable object twin
+
+`perception.launch.py` also starts `object_digital_twin`. It turns the same
+SAM-culled object cloud used by the push/press-pull pipeline into an RViz
+`MarkerArray` on `/object_digital_twin/markers`. When launched through
+`bringup_stack.launch.py`, a second RViz window for this view opens
+only when enabled with `launch_digital_twin_rviz:=true` (off by default).
+
+Edit `config/object_digital_twin.json` while it is running: the node checks it
+twice per second and keeps the last valid version on a JSON error. By default
+the translucent model follows the measured bounding-box dimensions. Set
+`use_detected_dimensions` to `false` to use `dimensions_m` as a known/CAD
+model, and use `offset_m` to register it relative to the measured box. The
+white outline remains the live measured bounds, making registration drift
+visible during every perception snapshot.
+
+For an actual CAD twin, set `mesh_resource` to an RViz URI such as
+`package://my_object_description/meshes/workpiece.stl` (or a `file://` URI).
+The mesh is centered and scaled with the same `dimensions_m`/`offset_m`
+settings; leave it empty to use the built-in box or cylinder.

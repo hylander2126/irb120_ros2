@@ -212,3 +212,24 @@ def test_press_relaxes_pull_tolerance_for_rounded_top():
     strict = select_contact_points(points, normals=normals, table_z=0., pull_normal_epsilon=0.1)['press']
     assert strict['available'] and strict['relaxed_pull_epsilon'] == 0.5
     assert select_contact_points(points, normals=normals, table_z=0., pull_normal_epsilon=0.5)['press']['available']
+
+
+def test_push_rejects_oblique_normals():
+    points, normals = box()
+    normals[normals[:, 0] < -0.9] = [-0.8078, 0.5893, 0.0127]
+    push = select_contact_points(points, normals=normals, table_z=0.)['planar_push']
+    assert not push['available']
+    assert '20 deg' in push['reason']
+
+
+def test_push_prefers_alignment_in_low_height_band():
+    points, normals = box()
+    side = normals[:, 0] < -0.9
+    normals[side] = [-np.cos(np.radians(15)), np.sin(np.radians(15)), 0]
+    aligned = np.flatnonzero(side & (np.abs(points[:, 1]) < 1e-9)
+                             & (np.abs(points[:, 2] - .025) < 1e-9))[0]
+    normals[aligned] = [-1, 0, 0]
+    push = select_contact_points(points, normals=normals, table_z=0.,
+                                 score_tolerance=.006)['planar_push']
+    np.testing.assert_allclose(push['point'], points[aligned])
+    assert push['normal_angle_deg'] == pytest.approx(0)

@@ -69,3 +69,54 @@ ros2 run irb120_control episode show
 
 `estimate_params` reads episode logs as well as the older
 `<object>/push` and `<object>/arc_squash` folders.
+# Offline CPU TSDF reconstruction
+
+With the normal camera/perception stack running and the object stationary:
+
+```bash
+ros2 run irb120_control offline_tsdf --duration 3
+```
+
+It is pseudo-online: the command captures live RGB-D frames for a short window,
+masks them from the active SAM-culled cloud, fuses a CPU TSDF, then exits. No
+bag, episode, or saved snapshot is read. The wrapper uses the Open3D virtualenv
+only for this separate process, not the live control nodes.
+
+Outputs are saved to `runtime_logs/tsdf/<timestamp>/`: `object_mesh_colored.ply`
+(vertex colour), `object_mesh.stl` (geometry-only for basic STL viewers),
+`object_surface_colored.ply`, and `report.json`. Use `--output-dir`,
+`--voxel-m`, or `--max-frames-per-camera` to override defaults.
+
+Mesh export keeps the largest connected surface (by area), rejects statistical
+outliers, and applies 10 Taubin smoothing iterations before constructing a
+watertight convex hull. This assumes a single object and fills **all** concavities,
+including real ones; occluded geometry and its interpolated colors are estimates.
+Use `--completion none` for the cleaned observed surface, and
+`--smooth-iterations 0` to disable smoothing. `object_mesh_raw.ply` preserves the
+unprocessed TSDF mesh; `object_surface_colored.ply` remains the raw observed
+point cloud. `report.json` records filter counts and final watertightness.
+
+
+## Flashlight MVP rerun
+
+Push remains along +X. Candidates must have inward normals within 20 degrees
+of +X; among candidates in the lowest 3 mm height band, prefer alignment.
+A missing candidate means reposition and take a new snapshot. Saved contacts
+are checked again before motion. This reduces oblique pushing but does not
+guarantee zero yaw. Return-arc augmentation is disabled; the ordinary radial
+PID and contact-loss handling remain active.
+
+1. Source `install/setup.bash`, place the flashlight near the centerline with
+   a side facing the robot, and keep the usual camera/Servo stack running.
+2. Run `ros2 run irb120_control episode snapshot flashlight`; inspect the
+   contact overlays and `contacts.json` in the new episode.
+3. Run `ros2 run irb120_control arc_static flashlight --episode last`.
+   Check return-arc hunting and that the object settles back.
+4. Inspect the automatically saved post-tip contacts before running
+   `ros2 run irb120_control push flashlight --episode last`.
+5. Record the outcome with `ros2 run irb120_control episode outcome success
+   --reason "your observations"` (choose the appropriate outcome).
+
+Use these staged commands for tip-then-push; `run_pipeline` still pushes first.
+If the object is manually repositioned, start a fresh snapshot/episode before
+using contacts again. Do not reuse a snapshot from before repositioning.

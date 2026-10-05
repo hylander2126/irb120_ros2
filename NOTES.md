@@ -6,6 +6,30 @@ cost time to discover and would cost time again.
 
 ---
 
+## 2026-10-05 — Proposed confidence-scored digital twin (pending prior-work review)
+
+The current RViz twin is only a rendered view of the latest SAM-culled cloud and
+its bounding box. The intended next step is a lightweight, CPU-friendly,
+continual representation for a stationary object: transform segmented clouds
+into `base_link`, merge them into a 3–5 mm voxel/surfel map, and retain per
+voxel centroid, observation confidence, recency, and optionally colour.
+
+Repeated support should strengthen stable surfaces; one-frame points should
+decay away. RViz should distinguish current observation, confidence-coloured
+accumulated surface, and optional editable CAD/mesh overlay. Object motion must
+freeze/save then reset the map (or expose reset explicitly), rather than merge
+pre- and post-manipulation geometry. A coarse mesh is a later optional output,
+not a substitute for presenting confidence and unobserved regions honestly.
+
+**Disclaimer:** this is a proposed design only. Before implementation, review
+prior CPU-feasible work and existing ROS/PCL/Open3D capabilities so we do not
+needlessly recreate established TSDF, surfel, probabilistic occupancy, or
+multi-view registration tooling. BundleSDF-like learning pipelines are not the
+default candidate because this machine has no GPU and the intended offline
+turnaround is well under several minutes.
+
+---
+
 ## 2026-09-25 — Push test: failed return home, object swirl (open, to discuss)
 
 ### Failed return home after the push

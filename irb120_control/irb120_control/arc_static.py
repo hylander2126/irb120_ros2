@@ -126,7 +126,7 @@ MAX_NORMAL_SPEED = 0.006
 FORCE_DEADBAND_N = 0.25
 FORCE_FILTER_ALPHA = 0.12
 FORCE_OUTPUT_SLEW_RATE = 0.02  # m/s^2
-UNARC_FORCE_AUGMENT_SPEED = 0.004  # m/s inward bias at large force deficit, still clamped by MAX_NORMAL_SPEED
+UNARC_FORCE_AUGMENT_SPEED = 0.0  # disabled: bypassed PID slew limiting and caused return-arc hunting
 UNARC_FORCE_AUGMENT_SOFTNESS_N = 0.75  # larger = smoother/slower augmentation onset
 
 KP_Y_FORCE = 0#.0025      # m/s per N of Y force error

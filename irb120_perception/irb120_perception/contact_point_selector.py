@@ -129,7 +129,8 @@ def select_contact_points(clouds, *, normals=None,
                           score_tolerance=0.003,
                           pull_normal_epsilon=0.1,
                           normal_radius=0.025,
-                          press_pivot_weight=1.0):
+                          press_pivot_weight=1.0,
+                          push_max_normal_angle_deg=20.0):
     """Return three independent selections and their estimated pivot geometry.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
@@ -139,19 +140,23 @@ def select_contact_points(clouds, *, normals=None,
     min_ball_center_z can impose a previously collision-checked tool-height
     floor; this function itself checks only the fingertip against the table.
 
+    push_max_normal_angle_deg: maximum inward-normal deviation from the
+    executable +X push direction. Prefer alignment within the lowest height band.
+
     press_pivot_weight: weight (metres of pull-moment-arm per metre of
     horizontal pivot-distance) applied to the press mode's double-scoring —
     see the 'Press' comment below. Unused by forward_tip/planar_push.
     """
     scalars = [table_z, finger_radius, table_buffer, y_band, support_band,
                min_edge_length, press_inset, score_tolerance,
-               pull_normal_epsilon, normal_radius, press_pivot_weight]
+               pull_normal_epsilon, normal_radius, press_pivot_weight, push_max_normal_angle_deg]
     if not np.isfinite(scalars).all():
         raise ValueError('All parameters must be finite')
     if (finger_radius <= 0 or normal_radius <= 0 or support_band <= 0
             or min_edge_length <= 0 or min(table_buffer, y_band, press_inset,
                                           score_tolerance) < 0
-            or not 0 <= pull_normal_epsilon <= 1 or press_pivot_weight < 0):
+            or not 0 <= pull_normal_epsilon <= 1 or press_pivot_weight < 0
+            or not 0 <= push_max_normal_angle_deg < 90):
         raise ValueError('Invalid radius, band, tolerance or normal threshold')
     if min_ball_center_z is not None and not np.isfinite(min_ball_center_z):
         raise ValueError('min_ball_center_z must be finite')
@@ -198,15 +203,19 @@ def select_contact_points(clouds, *, normals=None,
     result = dict(point_count=len(points), normal_count=int(np.isfinite(normals).all(axis=1).sum()))
     # Planar sliding stays along +X and close to y=0. Restrict to an actually
     # inward-facing side; a tangential top normal is not a useful push contact.
-    ids = np.flatnonzero(clear & (normals[:, 0] <= -0.2)
+    ids = np.flatnonzero(clear & (normals[:, 0] <= -np.cos(np.radians(push_max_normal_angle_deg)))
                          & (np.abs(normals[:, 2]) <= 0.5)
                          & (np.abs(points[:, 1]) <= y_band))
     if len(ids):
-        i = ids[np.lexsort((points[ids, 0], np.abs(points[ids, 1]), points[ids, 2]))[0]]
+        ids = ids[points[ids, 2] <= points[ids, 2].min() + score_tolerance]
+        i = ids[np.lexsort((points[ids, 0], np.abs(points[ids, 1]), normals[ids, 0]))[0]]
         result['planar_push'] = contact(i, -(points[i, 2] - table_z))
         result['planar_push']['direction'] = np.array([1., 0., 0.])
+        result['planar_push']['normal_angle_deg'] = float(
+            np.degrees(np.arccos(np.clip(-normals[i, 0], -1., 1.))))
     else:
-        result['planar_push'] = missing('No inward side contact near y=0 with fingertip clearance')
+        result['planar_push'] = missing(f'No contact within {push_max_normal_angle_deg:g} deg of +X inward normal '
+                                         'near y=0 with fingertip clearance; reposition object and resnapshot')
 
     def inset_top(ids):
         try:

@@ -355,12 +355,25 @@ def generate_launch_description():
             'switches it on — see irb120_perception/perception.launch.py.'
         ),
     )
+    digital_twin_rviz_arg = DeclareLaunchArgument(
+        'launch_digital_twin_rviz', default_value='false',
+        description='Open a separate RViz window for the live editable object twin.',
+    )
+    digital_twin_rviz = TimerAction(
+        period=7.0,
+        actions=[Node(
+            package='rviz2', executable='rviz2', name='object_digital_twin_rviz', output='log',
+            arguments=['-d', os.path.join(perception_pkg, 'rviz', 'object_digital_twin.rviz')],
+        )],
+        condition=IfCondition(LaunchConfiguration('launch_digital_twin_rviz')),
+    )
 
     return LaunchDescription([
         perception_active_at_start_arg,
         calibration_arg,
         egm_cond_time_arg,
         start_servo_arg,
+        digital_twin_rviz_arg,
 
         egm_handler_node,
 
@@ -369,6 +382,7 @@ def generate_launch_description():
         camera_bringup_group,
         rsp_description_update,
         perception_launch,
+        digital_twin_rviz,
         net_ft_node,
         netft_preprocessor_node,
         camera_hull_recorder_node,

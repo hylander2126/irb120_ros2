@@ -8,8 +8,8 @@ collisions and would stop at the box. Use it as
         ok = plan_and_execute_pose_goal(...)
 
 The box is the cloud's axis-aligned bounds in base_link, grown by PADDING and
-extended down to the table. PUSH_STANDOFF / SQUASH_STANDOFF keep the finger
-ball ~14 mm outside it at the approach poses (checked on the flashlight).
+extended down to the table. The push approach clears the full box by 10 mm beyond the ball radius.
+The press approach uses SQUASH_STANDOFF above its selected contact.
 
 After a push the object is somewhere between where it was and PUSH_DISTANCE
 further in +X, so the move home uses the box stretched by that much in +X
@@ -28,7 +28,9 @@ from shape_msgs.msg import SolidPrimitive
 OBJECT_ID = "detected_object"
 FRAME = "base_link"
 TABLE_Z = -0.021   # table top in base_link
-PADDING = 0.010    # m, on every side except the bottom
+from irb120_control.util.push_geometry import OBJECT_PADDING
+
+PADDING = OBJECT_PADDING  # m, on every side except the bottom
 
 
 def _apply(node, obj: CollisionObject) -> bool:

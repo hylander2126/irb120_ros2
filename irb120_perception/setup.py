@@ -12,6 +12,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.py')),
         ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
+        ('share/' + package_name + '/config', glob('config/*.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +28,8 @@ setup(
             'object_detector_dbscan_sam_cull = irb120_perception.object_detector_dbscan_sam_cull:main',
             'robot_mask_filter = irb120_perception.robot_mask_filter:main',
             'contact_point_selector = irb120_perception.contact_point_selector:main',
+            'object_digital_twin = irb120_perception.object_digital_twin:main',
+            'object_confidence_map = irb120_perception.object_confidence_map:main',
         ],
     },
 )
