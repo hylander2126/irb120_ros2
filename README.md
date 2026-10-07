@@ -32,24 +32,22 @@ If the repository is already downloaded, place it at
 `~/Documents/irb120_ws/src/irb120_ros2`, or adjust the workspace path in the
 remaining commands.
 
-### 2. Clone the source dependencies
+### 2. Import the pinned source dependencies
 
-Clone these repositories beside `irb120_ros2`, not inside it:
+The committed vcstool manifest records the exact dependency revisions tested by
+this project. Import them beside `irb120_ros2`, not inside it:
 
 ```bash
-cd ~/Documents/irb120_ws/src
-
-git clone -b rolling https://github.com/PickNikRobotics/abb_ros2.git
-git clone -b rolling https://github.com/gbartyzel/abb_ros2_msgs.git
-git clone https://github.com/ros-industrial/abb_egm_rws_managers.git
-git clone https://github.com/ros-industrial/abb_libegm.git
-git clone https://github.com/ros-industrial/abb_librws.git
-git clone -b ros2 https://github.com/UTNuclearRoboticsPublic/netft_utils.git
-git clone -b ros2 https://github.com/ros-planning/moveit_calibration.git
+sudo apt install python3-vcstool
+cd ~/Documents/irb120_ws
+vcs import src < src/irb120_ros2/irb120_jazzy.repos
 ```
 
-`abb_ros2` and `abb_ros2_msgs` use their `rolling` branches in this Jazzy
-workspace.
+The manifest intentionally uses the project fork of `abb_egm_rws_managers`.
+Commit `18d6a94` preserves valid joint velocity feedforward below the vendor's
+former per-joint 0.5 degree/s (or mm/s) deadband. The regression test records a
+coordinated command for which applying that deadband independently to each
+joint reverses the Cartesian feedforward direction.
 
 ### 3. Install dependencies
 

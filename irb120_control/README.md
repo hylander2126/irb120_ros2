@@ -10,6 +10,12 @@ The local copy is required for this project-specific behavior:
 
 - Custom RWS credential pass-through from launch and xacro parameters.
 - Local plugin identity used by this package (`irb120_abb_hardware_interface/ABBSystemHardware`).
+- Command output remains disabled until a complete, finite EGM feedback sample
+  seeds every commanded joint from its measured position.
+- EGM loss or session restart latches command output off; a recovered session is
+  rearmed only after the controller command again matches measured position.
+- Recoverable EGM loss keeps joint-state and TF reporting alive while dropping
+  writes to the robot.
 - Avoiding direct edits to vendor packages in `src/abb_ros2/...`.
 
 If `irb120_abb_hardware_interface` is missing, not built, or not sourced, real robot bringup from this package will fail.
@@ -18,6 +24,9 @@ If `irb120_abb_hardware_interface` is missing, not built, or not sourced, real r
 
 - This package intentionally keeps vendor packages unmodified.
 - Bringup launch files in this package are tailored to this robot cell configuration.
+- The plugin still uses RWS on the physical controller to discover its mechanical
+  units by default; it does not require RobotStudio. The alternate
+  `configure_via_rws=false` path is not the supported IRC5 configuration.
 
 ## Arc press behavior
 

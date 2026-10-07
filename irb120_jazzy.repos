@@ -1,0 +1,29 @@
+repositories:
+  abb_ros2:
+    type: git
+    url: https://github.com/PickNikRobotics/abb_ros2.git
+    version: 05cbabe774ef026b1cd36fe6b253b55f55e16340
+  abb_ros2_msgs:
+    type: git
+    url: https://github.com/gbartyzel/abb_ros2_msgs.git
+    version: 071bb1fc2148a7cd850a1ff550c5987e67da6bdd
+  abb_egm_rws_managers:
+    type: git
+    url: https://github.com/hylander2126/abb_egm_rws_managers.git
+    version: 18d6a94256e70e9facbd3ea058a73654ff71fc44
+  abb_libegm:
+    type: git
+    url: https://github.com/ros-industrial/abb_libegm.git
+    version: 2c9350abfb67131cae796805fed8cd6eeb2ab7f9
+  abb_librws:
+    type: git
+    url: https://github.com/ros-industrial/abb_librws.git
+    version: 9ba08371482f3975f364011db9b1368fa0fc6b32
+  netft_utils:
+    type: git
+    url: https://github.com/UTNuclearRoboticsPublic/netft_utils.git
+    version: ddccade65049195324c384919be7391b24929b48
+  moveit_calibration:
+    type: git
+    url: https://github.com/ros-planning/moveit_calibration.git
+    version: 3f9d48ebe843caf1de060bfafe78160585c7c26f
