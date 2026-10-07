@@ -9,12 +9,15 @@ whose image pixels lie inside that mask.  Thus SAM is a boundary cull, not an
 expensive segment-everything detector.
 """
 
+import copy
+import json
 import time
 
 import numpy as np
 import rclpy
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+from std_msgs.msg import String
 
 from irb120_perception.perception_common import ObjectDetectorBase, apply_tf, pointcloud2_to_xyz
 
@@ -57,6 +60,10 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         self._info = None
         self._last_run = None
         self._predictor = None
+        self._diagnostic_mask = None
+        self._mask_pub = self.create_publisher(Image, "~/sam_mask", 10)
+        self._color_pub = self.create_publisher(Image, "~/sam_color", 10)
+        self._metadata_pub = self.create_publisher(String, "~/sam_metadata", 10)
 
         checkpoint = p('sam_checkpoint').value
         if _SAM_IMPORT_ERROR is not None:
@@ -107,7 +114,28 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         except Exception as exc:
             self.get_logger().warn(f'TF lookup failed: {exc}')
             return
-        kept = self._cull(source, self._latest_color, self._info, cam_tf)
+        color_msg = self._latest_color
+        self._diagnostic_mask = None
+        kept = self._cull(source, color_msg, self._info, cam_tf)
+        # Pair diagnostic images by the input CLOUD stamp, just like object_points.
+        # sam_color is the exact RGB input; its header stamp is an association ID.
+        if self._diagnostic_mask is not None:
+            mask_msg = Image()
+            mask_msg.header = copy.deepcopy(color_msg.header)
+            mask_msg.header.stamp = copy.deepcopy(msg.header.stamp)
+            mask_msg.height, mask_msg.width = self._diagnostic_mask.shape
+            mask_msg.encoding = 'mono8'
+            mask_msg.step = mask_msg.width
+            mask_msg.data = (self._diagnostic_mask.astype(np.uint8) * 255).tobytes()
+            rgb_msg = copy.deepcopy(color_msg)
+            rgb_msg.header.stamp = copy.deepcopy(msg.header.stamp)
+            self._mask_pub.publish(mask_msg)
+            self._color_pub.publish(rgb_msg)
+            self._metadata_pub.publish(String(data=json.dumps({
+                'cloud_stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
+                'color_stamp': color_msg.header.stamp.sec + color_msg.header.stamp.nanosec*1e-9,
+                'mask_source': 'live MobileSAM culler exact RGB input',
+            })))
         header = msg.header
         header.frame_id = self.base_frame
         if len(kept) < 3:
@@ -145,6 +173,7 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         self._predictor.set_image(color)
         masks, _, _ = self._predictor.predict(box=box, multimask_output=False)
         mask = masks[0]
+        self._diagnostic_mask = mask
         retain = inside.copy()
         indices = np.flatnonzero(inside)
         retain[indices] = mask[v[indices], u[indices]]

@@ -169,6 +169,36 @@ python3 -m irb120_perception.experimental_view_check PATH_TO_PERCEIVE_STAGE
 The files retain their historical `experimental_*` names, but the top-support
 path is now the runtime default. No controller modifications are involved.
 
+## RGB boundary pivot trial
+
+New snapshots run the Cam1 RGB boundary estimator in shadow mode by default.
+The normal `contacts.json` remains the cloud-pivot path. When the RGB candidate
+passes its timing, depth, table-plane, connectivity, fit, and disagreement
+gates, the stage also contains:
+
+- `pivot_boundary_review.json` — both pivots and all gate evidence;
+- `cam1_pivot_boundary_review.png` — magnified comparison overlay;
+- `contacts_rgb_pivot.json` — the same selected press and ball center, with only
+  the arc pivot replaced by the RGB candidate.
+
+Collect and inspect a motion-free snapshot first:
+
+```bash
+ros2 run irb120_control episode snapshot flashlight
+```
+
+If the review JSON says `candidate_status: reviewable` and the overlay is
+physically sensible, run the tip in that same episode explicitly:
+
+```bash
+ros2 run irb120_control arc_static flashlight --episode last --pivot rgb
+```
+
+The command fails closed before motion if `contacts_rgb_pivot.json` is absent.
+Use `--pivot cloud` (the default) for the original pivot. If the object moves
+after the snapshot, take a new snapshot instead of reusing either contact file.
+Set `IRB120_RGB_PIVOT=off` before a new snapshot to disable these artifacts.
+
 ### V2 update (supersedes the v1 gate above)
 
 The default path filters all geometrically feasible press candidates

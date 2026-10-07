@@ -31,6 +31,7 @@ setup(
             'object_digital_twin = irb120_perception.object_digital_twin:main',
             'object_confidence_map = irb120_perception.object_confidence_map:main',
             'depth_plane_audit = irb120_perception.depth_plane_audit:main',
+            'pivot_boundary_review = irb120_perception.pivot_boundary_review:main',
         ],
     },
 )

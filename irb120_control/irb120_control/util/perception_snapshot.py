@@ -5,6 +5,8 @@ take_snapshot() saves into <episode>/NN_perceive/:
   object_cloud.npz         the object cloud the contacts come from (DBSCAN -> SAM cull), base_link
   object_cloud_dbscan.npz  the raw DBSCAN cloud it was culled from, for comparison
   contacts.json            full select_contact_points() output for that cloud (base_link)
+  cam1_sam_mask.png        optional SAM mask matched to the selected culled cloud
+  cam1_sam_color.png       exact RGB input for that mask
   camN_color.png           one color frame per camera, taken with the cloud
   Aligned depth is used in memory and retained in the bag, not separate images.
   camN_camera_info.json    intrinsics + the camera's pose in base_link
@@ -22,6 +24,8 @@ starts empty (a snapshot after a push must not fuse frames from before it),
 and off again afterwards. The arm must be out of the cameras' view.
 """
 
+from collections import deque
+
 import json
 import os
 import signal
@@ -36,6 +40,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_srvs.srv import SetBool
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from irb120_control.util.episode import write_json_atomic
@@ -45,6 +50,9 @@ CAMERAS = {"cam1": "realsense", "cam2": "realsense2", "cam3": "realsense3"}
 BASE_FRAME = "base_link"
 DBSCAN_TOPIC = "/object_detector/object_points"
 CULL_TOPIC = "/object_detector_dbscan_sam_cull/object_points"
+SAM_MASK_TOPIC = "/object_detector_dbscan_sam_cull/sam_mask"
+SAM_COLOR_TOPIC = "/object_detector_dbscan_sam_cull/sam_color"
+SAM_METADATA_TOPIC = "/object_detector_dbscan_sam_cull/sam_metadata"
 DETECTOR_ACTIVE_SERVICE = "/object_detector/set_active"
 
 SETTLE_CLOUDS = 5          # non-empty DBSCAN clouds to wait for after the accumulator reset
@@ -67,6 +75,18 @@ CONTACT_COLORS = {"planar_push": (0, 200, 0), "forward_tip": (13, 140, 255), "pr
 
 def _stamp(msg) -> float:
     return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+
+def _closest_depth_frame(candidates, target_stamp):
+    """The candidate Image message closest in time to target_stamp, or None.
+
+    Searching only the rolling cam1_depths deque can miss a better match: by
+    the time the SAM cull + diagnostics wait finishes, an early depth frame
+    near the settle-time snapshot (closer to target_stamp) may still beat
+    everything currently in the deque.
+    """
+    valid = [m for m in candidates if m is not None]
+    return min(valid, key=lambda m: abs(_stamp(m) - target_stamp)) if valid else None
 
 
 def _xyz(msg: PointCloud2) -> np.ndarray:
@@ -193,8 +213,22 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     record = {"ok": False, "label": label, "min_ball_center_z": MIN_BALL_CENTER_Z}
     frames = {cam: {} for cam in CAMERAS}
     dbscan, cull = [], []
+    sam_masks, sam_colors = deque(maxlen=16), deque(maxlen=16)
+    sam_metadata = deque(maxlen=16)
+    cam1_depths = deque(maxlen=90)
     subs = [node.create_subscription(PointCloud2, DBSCAN_TOPIC, dbscan.append, 10),
             node.create_subscription(PointCloud2, CULL_TOPIC, cull.append, 10)]
+    # rclpy validates callback signatures. deque.append is a builtin whose
+    # signature inspect.signature() cannot read, so use ordinary callables.
+    subs.extend([node.create_subscription(Image, SAM_MASK_TOPIC,
+                                          lambda msg: sam_masks.append(msg), 10),
+                 node.create_subscription(Image, SAM_COLOR_TOPIC,
+                                          lambda msg: sam_colors.append(msg), 10),
+                 node.create_subscription(String, SAM_METADATA_TOPIC,
+                                          lambda msg: sam_metadata.append(msg), 10),
+                 node.create_subscription(Image, "/realsense/aligned_depth_to_color/image_raw",
+                                          lambda msg: cam1_depths.append(msg),
+                                          qos_profile_sensor_data)])
     for cam, ns in CAMERAS.items():
         for key, msg_type, topic in (("color", Image, f"/{ns}/color/image_raw"),
                                      ("depth", Image, f"/{ns}/aligned_depth_to_color/image_raw"),
@@ -222,6 +256,23 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         while cloud_msg is not None and cull_msg is None and time.monotonic() - t1 < CULL_TIMEOUT_SEC:
             rclpy.spin_once(node, timeout_sec=0.05)
             cull_msg = next((m for m in cull if _stamp(m) >= _stamp(cloud_msg) - 1e-6), None)
+        # Diagnostics are optional: older cullers must still support snapshots.
+        if cull_msg is not None:
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                diagnostic_pair = all(any(m.header.stamp == cull_msg.header.stamp for m in queue)
+                                      for queue in (sam_masks, sam_colors))
+                metadata_match = False
+                for message in sam_metadata:
+                    try:
+                        metadata_match |= (json.loads(message.data).get('cloud_stamp') ==
+                                           [cull_msg.header.stamp.sec,
+                                            cull_msg.header.stamp.nanosec])
+                    except (ValueError, TypeError):
+                        pass
+                if diagnostic_pair and metadata_match:
+                    break
+                rclpy.spin_once(node, timeout_sec=0.05)
         record["wait_s"] = round(time.monotonic() - t0, 1)
 
         if BAG_SECONDS > 0:
@@ -257,6 +308,37 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     kept = {tuple(p) for p in np.round(obj, 5)}
     culled = np.array([p for p in raw if tuple(np.round(p, 5)) not in kept]).reshape(-1, 3)
     bridge = CvBridge()
+    record['sam_mask'] = {'available': False, 'reason': 'no matching mask/color pair'}
+    if cull_msg is not None:
+        pair = [next((m for m in queue if m.header.stamp == cull_msg.header.stamp), None)
+                for queue in (sam_masks, sam_colors)]
+        if all(m is not None for m in pair):
+            mask, rgb = pair
+            ok_mask = cv2.imwrite(str(out / 'cam1_sam_mask.png'),
+                                 bridge.imgmsg_to_cv2(mask, desired_encoding='mono8'))
+            ok_rgb = cv2.imwrite(str(out / 'cam1_sam_color.png'),
+                                bridge.imgmsg_to_cv2(rgb, desired_encoding='bgr8'))
+            record['sam_mask'] = {'available': bool(ok_mask and ok_rgb),
+                                  'cloud_stamp': _stamp(cull_msg),
+                                  'stamp_semantics': 'cloud association, not RGB acquisition'}
+            for message in sam_metadata:
+                try:
+                    metadata = json.loads(message.data)
+                except (ValueError, TypeError):
+                    continue
+                if metadata.get('cloud_stamp') == [cull_msg.header.stamp.sec, cull_msg.header.stamp.nanosec]:
+                    closest = _closest_depth_frame(
+                        [*cam1_depths, images.get('cam1', {}).get('depth')], metadata['color_stamp'])
+                    if closest is not None:
+                        sam_depth = bridge.imgmsg_to_cv2(closest, desired_encoding="passthrough")
+                        if sam_depth.dtype != np.uint16:
+                            sam_depth = np.nan_to_num(sam_depth * 1000.0).clip(0, 65535).astype(np.uint16)
+                        np.savez_compressed(out / 'cam1_sam_depth.npz', depth_mm=sam_depth,
+                                            stamp=_stamp(closest), encoding="16UC1")
+                        metadata['depth_stamp'] = _stamp(closest)
+                        metadata['rgb_depth_delta_s'] = abs(metadata['depth_stamp']-metadata['color_stamp'])
+                    write_json_atomic(out / 'cam1_sam_metadata.json', metadata)
+                    break
     review_frames = {}
     for cam, m in images.items():
         if "color" not in m or "info" not in m:
@@ -291,6 +373,22 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         if tf is not None:
             review_frames[cam] = (color, depth, info)
 
+    def refresh_overlays(contacts):
+        """Redraw every camera's overlay.png against a newly-applied `contacts`."""
+        for cam in CAMERAS:
+            info_path = out / f"{cam}_camera_info.json"
+            if not info_path.exists():
+                continue
+            info = json.loads(info_path.read_text())
+            tf = info.get("base_to_optical")
+            if tf is None:
+                continue
+            color = cv2.imread(str(out / f"{cam}_color.png"))
+            cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(
+                color, np.asarray(info["K"]), np.asarray(info["D"]),
+                np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts,
+                review_frames.get(cam, (None, None, None))[1]))
+
     # The camera-validated top-support selector is the default press path.
     # Environment overrides remain as an explicit rollback/debug mechanism:
     # `off` restores baseline selection and `shadow` records without applying.
@@ -311,19 +409,45 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             contacts = proposed
             write_json_atomic(out / "contacts.json", contacts)
             record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
-            for cam in CAMERAS:
-                info_path = out / f"{cam}_camera_info.json"
-                if not info_path.exists():
-                    continue
-                info = json.loads(info_path.read_text())
-                tf = info.get("base_to_optical")
-                if tf is None:
-                    continue
-                color = cv2.imread(str(out / f"{cam}_color.png"))
-                cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(
-                    color, np.asarray(info["K"]), np.asarray(info["D"]),
-                    np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts,
-                    review_frames.get(cam, (None, None, None))[1]))
+            refresh_overlays(contacts)
+
+    # RGB pivot runs alongside the production cloud pivot by default. `shadow`
+    # records a candidate without using it; `apply` re-seeds select_contact_points'
+    # press pivot with a reviewable SAM/RGB boundary fit once it clears the gates
+    # in pivot_boundary_review.evaluate(), moving the selected press point itself
+    # (not just the arc's rotation center) -- set IRB120_RGB_PIVOT=apply to use it.
+    pivot_mode = os.environ.get("IRB120_RGB_PIVOT", "shadow")
+    if pivot_mode not in ("off", "shadow", "apply"):
+        raise ValueError("IRB120_RGB_PIVOT must be off, shadow, or apply")
+    if pivot_mode != "off" and record["ok"]:
+        from irb120_perception.pivot_boundary_review import (
+            contacts_with_candidate_pivot, evaluate as evaluate_pivot_boundary)
+        pivot_report = evaluate_pivot_boundary(out)
+        pivot_record = {"mode": pivot_mode,
+                        "candidate_status": pivot_report.get("candidate_status"),
+                        "reason": pivot_report.get("fallback_reason"),
+                        "applied": False}
+        try:
+            rgb_contacts = contacts_with_candidate_pivot(contacts, pivot_report)
+            write_json_atomic(out / "contacts_rgb_pivot.json", rgb_contacts)
+        except ValueError as exc:
+            pivot_record["reason"] = str(exc)
+        if pivot_mode == "apply" and pivot_report.get("candidate_status") == "reviewable":
+            pivot = (pivot_report.get("geometry") or {}).get("candidate_pivot_base_m")
+            try:
+                reseeded = _jsonable(select_contact_points(
+                    obj, min_ball_center_z=MIN_BALL_CENTER_Z, press_pivot_override=pivot))
+                if not (reseeded.get("press") or {}).get("available"):
+                    raise ValueError("press contact unavailable after RGB pivot reseed")
+                write_json_atomic(out / "contacts_pre_rgb_pivot.json", contacts)
+                contacts = reseeded
+                write_json_atomic(out / "contacts.json", contacts)
+                record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
+                refresh_overlays(contacts)
+                pivot_record["applied"] = True
+            except ValueError as exc:
+                pivot_record["reason"] = str(exc)
+        record["rgb_pivot"] = pivot_record
 
     # Cheap visual byproduct only: draw the final selected press, not a new search.
     from irb120_perception.contact_graphics import contact_graphic
@@ -350,12 +474,15 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     return record
 
 
-def latest_contacts(episode):
-    """Contacts from the episode's last stage if it is a successful perceive, else None."""
+def latest_contacts(episode, filename="contacts.json"):
+    """Contacts variant from the last successful perceive stage, else None."""
     stages = episode.load()["stages"]
     if not stages or stages[-1]["kind"] != "perceive" or stages[-1]["status"] != "ok":
         return None
-    with open(episode.path / stages[-1]["dir"] / "contacts.json") as f:
+    path = episode.path / stages[-1]["dir"] / filename
+    if not path.exists():
+        return None
+    with open(path) as f:
         return json.load(f)
 
 
@@ -365,13 +492,13 @@ def latest_object_cloud(episode) -> np.ndarray:
     return np.load(episode.path / stage["dir"] / "object_cloud.npz")["xyz"]
 
 
-def begin_motion_stage(node, episode, kind: str):
+def begin_motion_stage(node, episode, kind: str, contacts_filename="contacts.json"):
     """Snapshot first (unless the last stage already is one), then start the motion stage.
     Returns (stage, contacts), or (None, None) if perception failed -- don't move then.
     Call while the arm is out of the cameras' view."""
     if episode.last_stage_kind() != "perceive":
         take_snapshot(node, episode)
-    contacts = latest_contacts(episode)
+    contacts = latest_contacts(episode, contacts_filename)
     if contacts is None:
         return None, None
     return episode.begin_stage(kind), contacts

@@ -209,6 +209,38 @@ def test_press_pivot_weight_zero_reduces_to_pull_moment_only():
     assert press['point'][0] == pytest.approx(0.55)
 
 
+def test_press_pivot_override_shifts_selected_point_and_spares_other_modes():
+    """A validated RGB/SAM pivot must re-seed WHERE press centers along the
+    edge (not just a downstream rotation center), while forward_tip/planar_push
+    keep the cloud estimate untouched."""
+    points, normals = box()
+    baseline = select_contact_points(points, normals=normals, table_z=0.)
+    assert baseline['press']['geometry']['pivot_source'] == 'cloud_estimate'
+
+    overridden = select_contact_points(
+        points, normals=normals, table_z=0., press_pivot_override=[0.5, 0.03, 0.])
+    press = overridden['press']
+    assert press['available']
+    assert press['geometry']['pivot_source'] == 'rgb_sam_override'
+    np.testing.assert_allclose(press['geometry']['pivot'], [0.5, 0.03, 0.])
+    # Centered along the overridden edge, not the baseline's y=0.
+    np.testing.assert_allclose(press['point'], [0.505, 0.03, 0.2], atol=1e-10)
+    assert press['point'][1] != baseline['press']['point'][1]
+
+    tip = overridden['forward_tip']
+    assert tip['geometry']['pivot_source'] == 'cloud_estimate'
+    np.testing.assert_allclose(tip['geometry']['pivot'], baseline['forward_tip']['geometry']['pivot'])
+    np.testing.assert_allclose(tip['point'], baseline['forward_tip']['point'])
+
+
+def test_press_pivot_override_rejects_bad_input():
+    points, normals = box()
+    with pytest.raises(ValueError, match='press_pivot_override'):
+        select_contact_points(points, normals=normals, table_z=0., press_pivot_override=[0.5, 0.])
+    with pytest.raises(ValueError, match='press_pivot_override'):
+        select_contact_points(points, normals=normals, table_z=0., press_pivot_override=[0.5, np.nan, 0.])
+
+
 def test_press_failure_names_rejecting_filter():
     points, normals = box()
     side = normals[:, 2] == 0

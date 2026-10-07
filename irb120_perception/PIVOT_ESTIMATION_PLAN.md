@@ -124,4 +124,85 @@ For each known object:
 
 ## Current Status
 
-This document describes proposed work. The existing production path still uses the robust 3-D support-envelope estimate for the online pivot seed, while the parameter estimator defaults to trajectory-based pivot recovery after an arc trial.
+Experimental capture and offline review are implemented (2026-10-07). Production
+pivot/contact selection remains unchanged. Both ROS packages have been rebuilt;
+a running culler needs a restart before it emits the new diagnostics.
+
+### Capture and review
+
+- The culler publishes `~/sam_mask` and `~/sam_color`, associated with the input
+  cloud timestamp, plus `~/sam_metadata` preserving the actual RGB acquisition
+  timestamp. These do not change the culled cloud.
+- Snapshots save a matching `cam1_sam_mask.png`, `cam1_sam_color.png`, and optional
+  `cam1_sam_metadata.json`. Older cullers still support normal snapshots.
+- The offline reviewer associates the mask component with projected cloud points,
+  extracts bottommost pixels, and intersects their half-pixel transitions with
+  the measured table plane. It screens against the cloud envelope, probes depth
+  above/below the boundary, and requires a connected run of supporting samples.
+- Robust line / local convex-quadratic fitting produces a candidate pivot and
+  tangent. Timing, cloud disagreement, and table-fit sensitivity are recorded.
+- `pivot_boundary_review.json` separates the candidate from the retained cloud
+  pivot. Physical confidence remains zero: `reviewable` means the experimental
+  gates passed and the candidate is exposed for an explicit operator-reviewed
+  trial; it is not a calibrated confidence.
+- `cam1_pivot_boundary_review.png` shows screened/rejected contour samples,
+  the candidate tangent/pivot in cyan, the original cloud pivot in magenta,
+  and a magnified boundary panel. No `contacts.json` changes are made.
+- New snapshots run this shadow path by default and write
+  `contacts_rgb_pivot.json` only for a reviewable result. `arc_static --pivot
+  rgb` opts one press-and-pull trial into that file; `--pivot cloud` remains the
+  default and uses `contacts.json`. The RGB variant changes only the arc pivot,
+  preserving the selected press, ball center, normal, direction, and fixed-XZ
+  controller axis.
+
+From the workspace root:
+
+```bash
+PYTHONPATH=src/irb120_ros2/irb120_perception python3 -m irb120_perception.pivot_boundary_review /path/to/00_perceive
+```
+
+Older episodes need explicitly labeled offline SAM replay from RGB; the cloud
+alone cannot reconstruct the silhouette. Replay scripts and evidence are in
+`runtime_logs/pivot_boundary_validation_20261007/` at the workspace root.
+
+### Validation outcome — do not promote online
+
+See [the visual report](../../../runtime_logs/pivot_boundary_validation_20261007/REPORT.md).
+
+- 18 real bag-frame mask replays, 6 episodes / 4 geometries; 17 RGB-D pairs within
+  40 ms. Within-episode candidate X ranges are 0.01–0.50 mm. Repeatability is
+  not accuracy: cylinder candidates differ from the cloud by about 32 mm.
+- Four ideal mesh silhouettes at known nominal poses: RGB/cloud absolute pivot-X
+  errors in mm are cylinder 2.94/19.73, flashlight 0.25/2.17, T 0.05/0.50,
+  and heart 4.46/0.30. The heart also has a large lateral error. This uses exact
+  lowest-support vertices, not the legacy cloud selector as ground truth.
+- An older flashlight trajectory passes the existing no-slip gate, but its
+  recovered X differs from RGB by 9.74 mm. Its historical commanded Z differs
+  from the RGB table Z; trajectory recovery is a conditional comparison, not
+  an independently measured contact location.
+- 69 perception/pivot tests pass, including culler timestamp/payload preservation.
+  Five injected-failure checks pass: missing depth/mask, table bleed, stale
+  depth, and disconnected artifacts. Two ROS packages build successfully.
+- No live camera capture, robot motion, or online promotion was performed.
+
+The first screening-only implementation accepted stray side-contour samples and
+occasionally called the flat T rounded. Depth probes and a stricter curvature
+criterion addressed those observed failures. These thresholds were adjusted on
+this dataset and still need held-out validation.
+
+### Remaining work
+
+Independent support annotations or registered mesh poses are needed for real
+snapshots, especially the cylinder and heart. Visible bottom silhouettes can
+belong to rounded/occluding undersides above the actual contact. Short-term
+repeatability cannot resolve that bias. Cam1 also amplifies a 1-pixel contour
+shift into approximately 3–3.5 mm in X, and a 1 mm table-height shift into
+approximately 3.7–4 mm in X.
+
+Still pending: arbitrary-roll boundary extraction, online temporal consistency,
+calibrated confidence, additional poses/lighting/clutter, raw-versus-filtered
+depth comparisons, and validated downstream contact selection. The lower-per-
+column extractor and vertical depth probes assume the current Cam1 view.
+Distorted depth is rejected because the reused table fitter assumes rectified
+aligned depth. Angled diagnostic edges must not be handed to the fixed-XZ
+controller without resolving that geometric mismatch.

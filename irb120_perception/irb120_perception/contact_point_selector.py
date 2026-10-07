@@ -213,7 +213,8 @@ def select_contact_points(clouds, *, normals=None,
                           press_pivot_weight=1.0,
                           press_score_fraction=0.0,
                           push_max_normal_angle_deg=20.0,
-                          experimental_press_filter=None):
+                          experimental_press_filter=None,
+                          press_pivot_override=None):
     """Return three independent selections and their estimated pivot geometry.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
@@ -233,6 +234,13 @@ def select_contact_points(clouds, *, normals=None,
     press_score_fraction: retain candidates within this fraction of the best
     positive press score before centering along the pivot edge. Zero preserves
     the absolute ``score_tolerance`` behavior.
+
+    press_pivot_override: optional (3,) point (e.g. an independently
+    validated RGB/SAM boundary fit) that replaces the cloud-estimated press
+    pivot before scoring and edge-centering run. Only the press mode's pivot
+    is affected -- its axis/direction/kind stay the cloud estimate's, and
+    forward_tip/planar_push are untouched. This moves the SELECTED press
+    point itself, not just a downstream rotation center.
     """
     scalars = [table_z, finger_radius, table_buffer, y_band, support_band,
                min_edge_length, press_inset, score_tolerance,
@@ -240,6 +248,10 @@ def select_contact_points(clouds, *, normals=None,
                press_score_fraction, push_max_normal_angle_deg]
     if not np.isfinite(scalars).all():
         raise ValueError('All parameters must be finite')
+    if press_pivot_override is not None:
+        press_pivot_override = np.asarray(press_pivot_override, dtype=float)
+        if press_pivot_override.shape != (3,) or not np.isfinite(press_pivot_override).all():
+            raise ValueError('press_pivot_override must be a finite (3,) point')
     if (finger_radius <= 0 or normal_radius <= 0 or support_band <= 0
             or min_edge_length <= 0 or min(table_buffer, y_band, press_inset,
                                           score_tolerance) < 0
@@ -320,6 +332,12 @@ def select_contact_points(clouds, *, normals=None,
         except ValueError as exc:
             result[mode] = missing(str(exc))
             continue
+        geometry['pivot_source'] = 'cloud_estimate'
+        if mode == 'press' and press_pivot_override is not None:
+            geometry['pivot'] = press_pivot_override
+            geometry['tangent'] = np.array([press_pivot_override - .04*geometry['axis'],
+                                            press_pivot_override + .04*geometry['axis']])
+            geometry['pivot_source'] = 'rgb_sam_override'
         direction = geometry['direction']
         # Press: if nothing passes, retry once with a looser pull tolerance so a
         # rounded top (normals tilted toward the pull direction) still yields a contact.

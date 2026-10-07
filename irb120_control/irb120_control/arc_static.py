@@ -909,6 +909,11 @@ def main(args=None) -> int:
     )
     parser.add_argument("--episode", default="new", metavar="new|last|PATH",
                         help="Episode to record into (default: a new one). See util/episode.py.")
+    parser.add_argument(
+        "--pivot", choices=["cloud", "rgb"], default="cloud",
+        help="Pivot variant from the perception stage (default: cloud). 'rgb' requires a "
+             "reviewable contacts_rgb_pivot.json and changes only the arc center.",
+    )
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
@@ -920,10 +925,15 @@ def main(args=None) -> int:
     motion_started = False
     home_ok = None
     try:
-        stage, contacts = begin_motion_stage(node, episode, "press_pull_tip")
+        contacts_filename = "contacts_rgb_pivot.json" if parsed.pivot == "rgb" else "contacts.json"
+        stage, contacts = begin_motion_stage(
+            node, episode, "press_pull_tip", contacts_filename=contacts_filename)
         if stage is None:
-            node.get_logger().error("No usable perception snapshot -- not moving.")
+            node.get_logger().error(
+                f"No usable {parsed.pivot} perception contacts -- not moving. "
+                "For RGB, review the preceding pivot_boundary_review.json first.")
             return 1
+        node.get_logger().info(f"Using {parsed.pivot} pivot from {contacts_filename}")
         if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
