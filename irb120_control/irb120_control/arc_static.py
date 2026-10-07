@@ -25,13 +25,17 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import sys
+from pathlib import Path
 from datetime import datetime
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import WrenchStamped
+from sensor_msgs.msg import JointState
+from control_msgs.msg import JointTrajectoryControllerState
 from moveit_msgs.action import MoveGroup
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -241,25 +245,50 @@ class ArcStatic(Node):
         self._command_log: list = []  # rows: [time_s, state_id, angle, f_radial, radial_corr, vx, vy, vz, wy, tangential_speed]
         self._last_wrench_log_time = 0.0
         self._last_arc_log_time = 0.0
+        self._tracking_log = []
+        self._force_diagnostics = []
+        self._motion_phase = 'approach'
+        self._joint_tracking_sub = self.create_subscription(
+            JointState, '/joint_states', self._record_joints, 10)
+        self._controller_tracking_sub = self.create_subscription(
+            JointTrajectoryControllerState, '/joint_trajectory_controller/controller_state',
+            self._record_controller, 10)
+
+    def _record_joints(self, msg):
+        self._tracking_log.append(dict(time=self._now_s(), source='joint_states',
+            stamp=msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            phase=self._motion_phase, state=self._state, names=list(msg.name),
+            positions=list(msg.position), velocities=list(msg.velocity)))
+
+    def _record_controller(self, msg):
+        row = dict(time=self._now_s(), source='controller_state',
+            stamp=msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            phase=self._motion_phase, state=self._state, names=list(msg.joint_names))
+        for name in ('reference', 'feedback', 'error', 'output'):
+            value = getattr(msg, name)
+            row[name] = dict(positions=list(value.positions), velocities=list(value.velocities))
+        self._tracking_log.append(row)
 
     # ------------------------------------------------------------------ #
     #  Servo pause / resume
     # ------------------------------------------------------------------ #
 
-    def _set_servo_paused(self, paused: bool) -> None:
+    def _set_servo_paused(self, paused: bool) -> bool:
         if not self._pause_servo_client.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn("pause_servo service not available")
-            return
+            return False
         future = self._pause_servo_client.call_async(SetBool.Request(data=paused))
         rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
         if future.done() and future.result() is not None:
             state = "paused" if paused else "resumed"
             self.get_logger().info(f"Servo {state}: {future.result().message}")
+            return bool(future.result().success)
         else:
             self.get_logger().warn("pause_servo call did not complete")
+            return False
 
-    def pause_servo(self) -> None:
-        self._set_servo_paused(True)
+    def pause_servo(self) -> bool:
+        return self._set_servo_paused(True)
 
     def resume_servo(self) -> None:
         self._set_servo_paused(False)
@@ -565,6 +594,8 @@ class ArcStatic(Node):
             return angle, f_radial, 0.0, False
 
         radial_corr = -self._force_ctrl.update(f_radial)
+        self._force_diagnostics.append(dict(time=self._now_s(), state=self._state,
+            radial_force=f_radial, **self._force_ctrl.diagnostics))
         # Arc-only experiment option: disable radial force regulation by restoring:
         # radial_corr = 0.0
         if self._state == "UNARC":
@@ -811,6 +842,7 @@ class ArcStatic(Node):
 
     def run_attempt(self) -> None:
         """Run the FSM until its retract finishes."""
+        self._motion_phase = 'interaction'
         timer = self.create_timer(1.0 / CONTROL_HZ, self._tick)
         try:
             while rclpy.ok() and not self._done:
@@ -941,6 +973,21 @@ def main(args=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        node._servo_cmd.publish_zero(node._state, node._force_z)
+        if motion_started and rclpy.ok():
+            node._motion_phase = 'home'
+            if node.pause_servo():
+                node.get_logger().info(
+                    "Returning home; action success will be checked against measured joints."
+                )
+                home_ok = node.move_to_home()
+            else:
+                home_ok = False
+                node.get_logger().error("Servo pause unconfirmed; home motion not requested.")
+            if not home_ok:
+                node.get_logger().error(
+                    "Home not verified; skipping perception. No automatic EGM restart or motion retry."
+                )
         stop_recording(node)
         if stage is not None:
             try:
@@ -953,7 +1000,11 @@ def main(args=None) -> int:
                     node._obj_pose_log,
                     command_log=node._command_log,
                     timestamp=ts,
+                    commanded_pivot=node._arc_center,
                 )
+                (Path(stage.path) / f"arc_diagnostics_{ts}.json").write_text(
+                    json.dumps(dict(tracking=node._tracking_log, force_controller=node._force_diagnostics),
+                               separators=(',', ':')) + '\n')
                 save_run_metadata(str(stage.path), "arc_static", ts, {
                     **module_constants(globals()),
                     "object": node._object,
@@ -962,26 +1013,19 @@ def main(args=None) -> int:
                     "final_force_ref_n": force_ref,
                     "attempts": attempt,
                     "completed": node._completed,
+                    "first_attempt_completed": node._completed and attempt == 1,
+                    "home_ok": home_ok,
+                    "home_verification": getattr(node, "_last_joint_goal_verification", None),
                 })
             except Exception as exc:
                 node.get_logger().error(f"Failed to save F/T+pose log: {exc}")
-        node._servo_cmd.publish_zero(node._state, node._force_z)
-        if motion_started and rclpy.ok():
-            node.pause_servo()
-            node.get_logger().info(
-                "Returning to home position (all joints zero) via MoveIt on the existing EGM session..."
-            )
-            home_ok = node.move_to_home()
-            if not home_ok:
-                node.get_logger().error(
-                    "MoveIt return to home failed. EGM may have ended; "
-                    "not retrying automatically to avoid an unsafe snap."
-                )
         node._servo_cmd.close()
         deactivate_egm(node)
         if stage is not None:
-            stage.end("ok" if node._completed else "failed" if motion_started else "aborted",
-                      completed=node._completed, attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
+            stage.end("ok" if node._completed and home_ok else "failed" if motion_started else "aborted",
+                      completed=node._completed, first_attempt_completed=node._completed and attempt == 1,
+                      attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
+                      home_verification=getattr(node, "_last_joint_goal_verification", None),
                       pre_squash=node._pre_squash_pos, arc_center=node._arc_center)
             if home_ok and rclpy.ok():
                 take_snapshot(node, episode, label="after tip")

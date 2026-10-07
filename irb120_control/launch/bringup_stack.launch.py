@@ -155,7 +155,8 @@ def generate_launch_description():
     bringup_cam2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([handeye_cfg_pkg, "launch", "bringup_cam2.launch.py"])
-        )
+        ),
+        launch_arguments={"raw_depth": LaunchConfiguration("cam2_raw_depth")}.items(),
     )
     bringup_cam3 = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -175,7 +176,10 @@ def generate_launch_description():
         actions=[bringup_cam1, bringup_cam2, bringup_cam3],
         scoped=True,
         forwarding=False,
-        launch_configurations={"calibration": LaunchConfiguration("calibration")},
+        launch_configurations={
+            "calibration": LaunchConfiguration("calibration"),
+            "cam2_raw_depth": LaunchConfiguration("cam2_raw_depth"),
+        },
     )
 
     rsp_description_update = OpaqueFunction(
@@ -326,6 +330,14 @@ def generate_launch_description():
             "run the cameras at 1280x720 color with depth off, and skip perception."
         ),
     )
+    cam2_raw_depth_arg = DeclareLaunchArgument(
+        "cam2_raw_depth",
+        default_value="true",
+        description=(
+            "Run Cam2 without depth post-processing and publish IR. Enabled by default; "
+            "set false to restore the filtered profile."
+        ),
+    )
 
     egm_cond_time_arg = DeclareLaunchArgument(
         'egm_cond_time',
@@ -371,6 +383,7 @@ def generate_launch_description():
     return LaunchDescription([
         perception_active_at_start_arg,
         calibration_arg,
+        cam2_raw_depth_arg,
         egm_cond_time_arg,
         start_servo_arg,
         digital_twin_rviz_arg,

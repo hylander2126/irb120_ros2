@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Sequence
 
 import rclpy
@@ -21,6 +22,28 @@ from moveit_msgs.msg import (
     WorkspaceParameters,
 )
 from shape_msgs.msg import SolidPrimitive
+from .joint_verification import JointGoalVerifier
+
+
+def verify_joint_goal(node, joint_names, joint_positions, tolerance, timeout_sec=5.0):
+    verifier = JointGoalVerifier(joint_names, joint_positions,
+        node.get_clock().now().nanoseconds * 1e-9, tolerance=tolerance)
+
+    def callback(msg):
+        verifier.observe(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            node.get_clock().now().nanoseconds * 1e-9, msg.name, msg.position)
+
+    sub = node.create_subscription(JointState, '/joint_states', callback, 1)
+    deadline = time.monotonic() + timeout_sec
+    try:
+        while rclpy.ok() and time.monotonic() < deadline and not verifier.report['verified']:
+            rclpy.spin_once(node, timeout_sec=.05)
+    finally:
+        node.destroy_subscription(sub)
+    node._last_joint_goal_verification = dict(verifier.report)
+    if not verifier.report['verified']:
+        node.get_logger().error(f'Measured joint goal verification failed: {verifier.report}')
+    return verifier.report['verified']
 
 
 DEFAULT_GROUP_NAME = "manipulator"
@@ -242,6 +265,7 @@ def plan_and_execute_joint_goal(
     joint_positions: 6-element sequence of target joint angles in radians,
                      ordered to match joint_names.
     """
+    node._last_joint_goal_verification = dict(verified=False, reason='joint action not completed')
     if len(joint_positions) != len(joint_names):
         node.get_logger().error(
             f"joint_positions length {len(joint_positions)} != joint_names length {len(joint_names)}"
@@ -256,7 +280,8 @@ def plan_and_execute_joint_goal(
         node.get_logger().error("MoveGroup action server not available")
         return False
 
-    _wait_for_joint_states(node, timeout_sec=10.0)
+    if not _wait_for_joint_states(node, timeout_sec=10.0):
+        return False
 
     goal_constraints = Constraints()
     for name, position in zip(joint_names, joint_positions):
@@ -301,5 +326,7 @@ def plan_and_execute_joint_goal(
         node.get_logger().error(f"MoveGroup joint goal failed: error_code={result.error_code.val}")
         return False
 
-    node.get_logger().info("Reached joint target.")
+    if not verify_joint_goal(node, joint_names, joint_positions, joint_tolerance):
+        return False
+    node.get_logger().info("Reached joint target; measured joints verified.")
     return True

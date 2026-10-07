@@ -45,17 +45,54 @@ def estimate_normals(points, radius=0.025, neighbors=24):
     return normals
 
 
+def _edge_evidence(base, start, end, preferred):
+    """Require populated observed segments and stable local line orientation."""
+    vector = end-start
+    length = np.linalg.norm(vector)
+    along = vector/length
+    normal = np.array([along[1], -along[0]])
+    offsets = base-start
+    u = offsets @ along
+    ids = (u >= 0) & (u <= length) & (np.abs(offsets @ normal) <= .0015)
+    samples = base[ids]
+    # Deduplicate camera/height overlap at 1 mm resolution before counting support.
+    if len(samples):
+        _, unique = np.unique(np.rint(samples/.001), axis=0, return_index=True)
+        samples = samples[unique]
+    evidence = dict(samples=len(samples), length_mm=float(length*1000), accepted=False)
+    if len(samples) < 8:
+        return evidence
+    bins = np.clip(((samples-start) @ along/length*6).astype(int), 0, 5)
+    evidence['occupied_bins'] = int(len(np.unique(bins)))
+    if evidence['occupied_bins'] < 6:
+        return evidence
+
+    def fit(q):
+        centered = q-q.mean(0)
+        _, vectors = np.linalg.eigh(centered.T @ centered)
+        n = vectors[:, 0]
+        return n if n @ preferred > 0 else -n
+
+    fitted = fit(samples)
+    residual = (samples-samples.mean(0)) @ fitted
+    angle = float(np.degrees(np.arccos(np.clip(fitted @ preferred, -1, 1))))
+    spread = max(float(np.degrees(np.arccos(np.clip(fit(samples[bins != k]) @ fitted, -1, 1))))
+                 for k in range(6))
+    evidence.update(angle_deg=angle, rms_mm=float(np.sqrt(np.mean(residual**2))*1000),
+                    leave_bin_out_max_angle_deg=spread, normal=fitted.tolist())
+    evidence['accepted'] = bool(angle <= 15 and evidence['rms_mm'] <= 1 and spread <= 3)
+    return evidence
+
+
 def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
                    min_edge_length=0.03):
-    """Estimate the support edge facing a nominal horizontal direction.
+    """Preserve task direction; only strongly observed aligned edges set its pivot.
 
-    Use only observed points within support_band of the known table. Long
-    hull edges within 45 degrees of the preference are extended-edge pivots;
-    otherwise use the extreme vertex and bisect its adjacent facet normals
-    to estimate a local tangent. The sampled boundary is a convex support
-    envelope, not a claim of a physically straight edge.
-    A missing/degenerate support footprint is an error, not a whole-cloud hull
-    fallback (which could mistake an overhang for the base).
+    Near-aligned (<=15 degree) flat alternatives are diagnostics. The current
+    fixed-plane controller cannot execute their rotated axes. Only <=1 degree
+    observed edges set an extended-edge pivot, with the commanded axis unchanged.
+    Otherwise use the preferred-direction support plane and center its near-extreme
+    samples laterally. This is an observed-envelope estimate, not recovered shape.
     """
     direction = np.asarray(preferred_direction, dtype=float)
     if (direction.shape != (3,) or not np.isfinite(direction).all()
@@ -64,44 +101,76 @@ def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
     direction = direction / np.linalg.norm(direction)
     base = points[(points[:, 2] >= table_z - 0.003)
                   & (points[:, 2] <= table_z + support_band), :2]
+    base = np.unique(base, axis=0)
     try:
         hull = ConvexHull(base)
     except (ValueError, QhullError) as exc:
         raise ValueError('Not enough observed support points near the table') from exc
     vertices = base[hull.vertices]
     ends = np.roll(vertices, -1, axis=0)
-    edges = ends - vertices
+    edges = ends-vertices
     lengths = np.linalg.norm(edges, axis=1)
-    outward = np.column_stack((edges[:, 1], -edges[:, 0])) / lengths[:, None]
-    alignment = outward @ direction[:2]
-    # Tiny corner facets occur even on boxes when the cameras miss the exact
-    # corners. Prefer a substantial facing edge rather than such a facet.
-    facing = np.flatnonzero((lengths >= min_edge_length)
-                            & (alignment >= np.cos(np.pi / 4)))
-    if len(facing):
-        i = facing[np.argmax(alignment[facing])]
-        pivot = np.r_[0.5 * (vertices[i] + ends[i]), table_z]
-        direction = np.r_[outward[i], 0.0]
-        kind = 'extended_edge'
-        edge = np.column_stack((np.vstack((vertices[i], ends[i])), [table_z] * 2))
-    else:
-        i = np.argmax(vertices @ direction[:2])
-        pivot = np.r_[vertices[i], table_z]
-        # Bisect the adjacent outward facet normals: a local tangent to the
-        # sampled support boundary, rather than an invented finite support edge.
-        local_normal = outward[i - 1] + outward[i]
-        local_normal /= np.linalg.norm(local_normal)
-        direction = np.r_[local_normal, 0.0]
-        kind = 'isolated_point'
-        edge = None
+    outward = np.column_stack((edges[:, 1], -edges[:, 0]))/lengths[:, None]
     axis = np.cross([0., 0., 1.], direction)
-    tangent = np.array([pivot - 0.04 * axis, pivot + 0.04 * axis])
+    projection = base @ direction[:2]
+    raw_extreme = projection.max()
+    # A raw-depth flying point can otherwise move an isolated/rounded pivot by
+    # centimetres.  Use a one-sided trimmed support value for geometry without a
+    # verified flat edge.  A verified edge still uses its observed outer plane.
+    robust_extreme = float(np.quantile(projection, .95))
+    near = base[projection >= robust_extreme-.003]
+    lateral = near @ axis[:2]
+    # An isolated support point is commonly represented by only one or two
+    # extreme samples.  Their lateral coordinate is unstable on curved bases
+    # and partial views.  Center the tangent using robust bounds of the full
+    # observed support footprint; a genuinely supported flat edge below still
+    # overrides this estimate with its own midpoint.
+    all_lateral = base @ axis[:2]
+    low_lateral, high_lateral = np.quantile(all_lateral, [.05, .95])
+    robust_lateral_center = .5*(low_lateral+high_lateral)
+    pivot_xy = robust_extreme*direction[:2] + robust_lateral_center*axis[:2]
+    pivot = np.r_[pivot_xy, table_z]
+    kind, edge = 'isolated_point', None
+    evidence = []
+    for i in np.flatnonzero((lengths >= min_edge_length) &
+                            (outward @ direction[:2] >= np.cos(np.radians(15)))):
+        item = _edge_evidence(base, vertices[i], ends[i], direction[:2])
+        item['edge_index'] = int(i)
+        evidence.append(item)
+    accepted = [e for e in evidence if e['accepted']]
+    # Alignment first, observed support second; a long unsupported hull chord
+    # never earns a flat-edge preference. Oblique edges remain diagnostic only.
+    accepted.sort(key=lambda e: (e['angle_deg'], -e['samples']))
+    executable = [e for e in accepted if e['angle_deg'] <= 1]
+    if executable:
+        i = executable[0]['edge_index']
+        midpoint = .5*(vertices[i]+ends[i])
+        pivot = np.r_[raw_extreme*direction[:2] + (midpoint @ axis[:2])*axis[:2], table_z]
+        kind = 'extended_edge'
+        edge = np.column_stack((np.vstack((vertices[i], ends[i])), [table_z]*2))
+    tangent = np.array([pivot-.04*axis, pivot+.04*axis])
     boundary = np.column_stack((vertices, np.full(len(vertices), table_z)))
     return dict(pivot=pivot, axis=axis, direction=direction, kind=kind, edge=edge,
-                tangent=tangent, support_boundary=boundary)
+                tangent=tangent, support_boundary=boundary,
+                policy='preferred_direction_v1',
+                flat_edge_candidates=evidence,
+                preferred_flat_alternative=accepted[0] if accepted else None,
+                direction_reason=('supported aligned edge' if executable else
+                                  'task direction retained; rotated alternatives are diagnostic only'),
+                position_evidence=dict(near_extreme_samples=len(near),
+                    lateral_span_mm=float(np.ptp(lateral)*1000), band_mm=3,
+                    raw_extreme_m=float(raw_extreme),
+                    robust_extreme_m=float(robust_extreme),
+                    extreme_trim_mm=float((raw_extreme-robust_extreme)*1000),
+                    extreme_quantile=.95,
+                    robust_lateral_bounds_mm=[float(low_lateral*1000),
+                                              float(high_lateral*1000)],
+                    robust_lateral_center_mm=float(robust_lateral_center*1000),
+                    interpretation='observed support envelope; not calibrated pivot confidence'))
 
 
-def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance):
+def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance,
+                press_score_fraction):
     """Boolean mask into `ids`: the double-scored press candidate band.
 
     Double-scoring moment-arm heuristic, press mode only (forward_tip keeps
@@ -125,7 +194,8 @@ def _press_band(points, ids, scores, geometry, press_pivot_weight, score_toleran
     pivot_proximity = np.cross(
         points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
     combined = scores[ids] + press_pivot_weight * pivot_proximity
-    return combined >= combined.max() - score_tolerance
+    tolerance = max(score_tolerance, press_score_fraction * abs(combined.max()))
+    return combined >= combined.max() - tolerance
 
 
 def select_contact_points(clouds, *, normals=None,
@@ -141,6 +211,7 @@ def select_contact_points(clouds, *, normals=None,
                           pull_normal_epsilon=0.1,
                           normal_radius=0.025,
                           press_pivot_weight=1.0,
+                          press_score_fraction=0.0,
                           push_max_normal_angle_deg=20.0,
                           experimental_press_filter=None):
     """Return three independent selections and their estimated pivot geometry.
@@ -158,16 +229,22 @@ def select_contact_points(clouds, *, normals=None,
     press_pivot_weight: weight (metres of pull-moment-arm per metre of
     horizontal pivot-distance) applied to the press mode's double-scoring —
     see the 'Press' comment below. Unused by forward_tip/planar_push.
+
+    press_score_fraction: retain candidates within this fraction of the best
+    positive press score before centering along the pivot edge. Zero preserves
+    the absolute ``score_tolerance`` behavior.
     """
     scalars = [table_z, finger_radius, table_buffer, y_band, support_band,
                min_edge_length, press_inset, score_tolerance,
-               pull_normal_epsilon, normal_radius, press_pivot_weight, push_max_normal_angle_deg]
+               pull_normal_epsilon, normal_radius, press_pivot_weight,
+               press_score_fraction, push_max_normal_angle_deg]
     if not np.isfinite(scalars).all():
         raise ValueError('All parameters must be finite')
     if (finger_radius <= 0 or normal_radius <= 0 or support_band <= 0
             or min_edge_length <= 0 or min(table_buffer, y_band, press_inset,
                                           score_tolerance) < 0
             or not 0 <= pull_normal_epsilon <= 1 or press_pivot_weight < 0
+            or not 0 <= press_score_fraction < 1
             or not 0 <= push_max_normal_angle_deg < 90):
         raise ValueError('Invalid radius, band, tolerance or normal threshold')
     if min_ball_center_z is not None and not np.isfinite(min_ball_center_z):
@@ -271,7 +348,8 @@ def select_contact_points(clouds, *, normals=None,
                 ids = ids[experimental_press_filter(points[ids], direction)]
                 counts['camera_agreement'] = len(ids)
             if len(ids):
-                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance)
+                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight,
+                                      score_tolerance, press_score_fraction)
                           if mode == 'press' else scores[ids] >= scores[ids].max() - score_tolerance]
             counts['best_score_band'] = len(ids)
             if len(ids):
@@ -290,7 +368,8 @@ def select_contact_points(clouds, *, normals=None,
                 ids = inset_top(ids)
             counts['topmost_fallback'] = len(ids)
             if len(ids):
-                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance)]
+                ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight,
+                                      score_tolerance, press_score_fraction)]
                 topmost = True
         if not len(ids):
             failed = next(stage for stage, count in counts.items() if count == 0)

@@ -63,16 +63,17 @@ def test_normals_estimated_from_cloud_and_fused_overlap():
     assert a['press']['normal'][2] > 0.9
 
 
-def test_rotated_box_axis_is_inferred():
+def test_oblique_box_does_not_rotate_task_direction():
     points, _ = box()
     theta = np.deg2rad(25)
     rotation = np.array([[np.cos(theta), -np.sin(theta), 0.],
                          [np.sin(theta), np.cos(theta), 0.], [0., 0., 1.]])
     points = (points - [0.55, 0., 0.]) @ rotation.T + [0.55, 0., 0.]
     geometry = estimate_pivot(points, [1., 0., 0.], 0.)
-    assert geometry['kind'] == 'extended_edge'
-    np.testing.assert_allclose(geometry['direction'], rotation[:, 0], atol=1e-10)
-    np.testing.assert_allclose(geometry['axis'], rotation[:, 1], atol=1e-10)
+    assert geometry['kind'] == 'isolated_point'
+    np.testing.assert_allclose(geometry['direction'], [1,0,0], atol=1e-10)
+    np.testing.assert_allclose(geometry['axis'], [0,1,0], atol=1e-10)
+    assert geometry['preferred_flat_alternative'] is None
 
 
 def test_curved_support_uses_isolated_pivot():
@@ -81,7 +82,20 @@ def test_curved_support_uses_isolated_pivot():
                               0.05 * np.sin(theta), np.full(128, 0.005)))
     geometry = estimate_pivot(points, [1., 0., 0.], 0.)
     assert geometry['kind'] == 'isolated_point'
-    np.testing.assert_allclose(geometry['pivot'], [0.6, 0., 0.], atol=1e-10)
+    # The robust extreme gives up less than 1 mm on a clean circular footprint
+    # rather than allowing one raw-depth fringe sample to own the pivot.
+    np.testing.assert_allclose(geometry['pivot'], [0.6, 0., 0.], atol=1e-3)
+
+
+def test_isolated_pivot_rejects_single_directional_flying_point():
+    theta = np.linspace(0, 2 * np.pi, 128, endpoint=False)
+    points = np.column_stack((0.55 + 0.05 * np.cos(theta),
+                              0.05 * np.sin(theta), np.full(128, 0.005)))
+    points = np.vstack((points, [0.63, 0., 0.005]))
+    geometry = estimate_pivot(points, [1., 0., 0.], 0.)
+    assert geometry['kind'] == 'isolated_point'
+    assert geometry['pivot'][0] < 0.602
+    assert geometry['position_evidence']['extreme_trim_mm'] > 25.
 
 
 def test_missing_support_does_not_use_overhang_as_base():

@@ -130,33 +130,35 @@ Use these staged commands for tip-then-push; `run_pipeline` still pushes first.
 If the object is manually repositioned, start a fresh snapshot/episode before
 using contacts again. Do not reuse a snapshot from before repositioning.
 
-## Temporary camera agreement experiment (off by default)
+## Camera-validated top-support selection (default)
 
-`IRB120_EXPERIMENTAL_VIEW_CHECK=shadow` evaluates the selected press against
-individual saved camera depth frames without changing contacts used for motion.
-`apply` instead marks press unavailable on rejection or uncertainty. Push and
-forward-tip contacts and all scores remain unchanged; it does not search for a
-replacement contact. Use `off` or unset the variable to restore baseline behavior.
+Snapshots use the top-support candidate search and individual camera depth
+validation by default. Push and forward-tip contacts remain unchanged. No
+environment variables are required for normal operation.
+
+For rollback/debugging, `IRB120_EXPERIMENTAL_VIEW_CHECK=off` restores baseline
+selection, while `shadow` records the camera-validated result without applying it.
+`IRB120_EXPERIMENTAL_PRESS_RULE=view_check_v2` selects the older camera-only rule.
 
 ```bash
-export IRB120_EXPERIMENTAL_VIEW_CHECK=shadow
+export IRB120_EXPERIMENTAL_VIEW_CHECK=shadow  # optional diagnostic override
 ros2 run irb120_control episode snapshot flashlight
 ```
 
 Review `experimental_view_check.json`, `contacts_baseline.json`, and
 `contacts_experimental_view_check.json` in the new perception stage. Baseline
 `contacts.json` is unchanged in shadow mode. In apply mode it contains the gated
-selection, and saved overlays are regenerated accordingly. The variable must be
-exported in the terminal running later motion commands to affect their new
-snapshots. It does not retroactively change an existing snapshot.
+selection, and saved overlays are regenerated accordingly. Overrides affect only
+new snapshots and do not retroactively change an existing episode.
 
 Gate: valid depth within 5 mm of predicted surface; 12 mm local PCA neighborhood,
 at least 20 samples, surface variation <= .05, and view cosine >= .3. Only usable
 views participate. Any normal dot proposed pull > 0 rejects; pairwise normal
 disagreement above 25 degrees or no usable view abstains (unavailable in apply).
-One usable view can pass, explicitly labeled single-view support. Thresholds are
-experimental. Per-camera timestamp agreement is not checked; use a stationary
-object. Camera checks use the saved proposed direction, not a new robot trajectory.
+One usable view can pass, explicitly labeled single-view support. Each camera's
+depth is corrected by its locally fitted table plane before the 5 mm comparison.
+Per-camera timestamp agreement is not checked; use a stationary object. Camera
+checks use the saved proposed direction, not a new robot trajectory.
 
 Offline replay (writes only experimental artifacts, not contacts.json):
 
@@ -164,14 +166,12 @@ Offline replay (writes only experimental artifacts, not contacts.json):
 python3 -m irb120_perception.experimental_view_check PATH_TO_PERCEIVE_STAGE
 ```
 
-Historical replay passes the failed contact with its old -X direction and rejects
-the successful contact. This gate is NOT validated as a success predictor. Start
-with shadow mode. To discard: remove experimental_view_check.py, its test, and
-the clearly marked snapshot hook. No controller modifications are involved.
+The files retain their historical `experimental_*` names, but the top-support
+path is now the runtime default. No controller modifications are involved.
 
 ### V2 update (supersedes the v1 gate above)
 
-The same opt-in switch now filters all geometrically feasible press candidates
+The default path filters all geometrically feasible press candidates
 before scoring. Relaxed/topmost fallbacks are disabled only in experimental mode.
 Connected 8/12 mm depth neighborhoods must give consistent normal signs and
 angles. Candidate evidence and color overlays are saved for every camera.

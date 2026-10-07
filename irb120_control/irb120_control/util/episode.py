@@ -21,6 +21,7 @@ CLI for the bits done by hand:
 import argparse
 import json
 import os
+import re
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +61,19 @@ class Episode:
         self.path = Path(path)
 
     @classmethod
-    def create(cls, object_name: str, node=None, note: str = "") -> "Episode":
+    def create(cls, object_name: str, node=None, note: str = "",
+               allow_unconfigured_object: bool = False) -> "Episode":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", object_name):
+            raise ValueError("Object name must contain only letters, numbers, '_' or '-', "
+                             "and must start with a letter or number")
+        try:
+            object_params = load_object_params(object_name)
+            object_params_configured = True
+        except ValueError:
+            if not allow_unconfigured_object:
+                raise
+            object_params = {}
+            object_params_configured = False
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path, n = _episodes_dir(object_name) / stamp, 1
         while path.exists():  # a second episode within the same second
@@ -78,7 +91,8 @@ class Episode:
             "created": _now(),
             "host": socket.gethostname(),
             **git_commit_info(),
-            "object_params": load_object_params(object_name),
+            "object_params": object_params,
+            "object_params_configured": object_params_configured,
             "camera_extrinsics_in_base_link": calibration,
             "notes": [{"time": _now(), "text": note}] if note else [],
             "events": [],
@@ -170,7 +184,8 @@ def main() -> None:
         from irb120_control.util.perception_snapshot import take_snapshot
         rclpy.init()
         node = rclpy.create_node("episode_snapshot")
-        episode = Episode.create(args.text, node, "snapshot only")
+        episode = Episode.create(args.text, node, "snapshot only",
+                                 allow_unconfigured_object=True)
         take_snapshot(node, episode, label="manual")
         node.destroy_node()
         rclpy.shutdown()

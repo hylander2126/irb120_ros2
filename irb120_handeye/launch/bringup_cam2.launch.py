@@ -36,12 +36,22 @@ def generate_launch_description() -> LaunchDescription:
         default_value="false",
         description="Use the hand-eye calibration profile (1280x720 color, depth off).",
     )
+    raw_depth_arg = DeclareLaunchArgument(
+        "raw_depth",
+        default_value="true",
+        description=(
+            "Disable decimation/spatial/temporal filters and publish IR. Enabled by default; "
+            "set false to restore the filtered profile."
+        ),
+    )
     realsense_yaml = PathJoinSubstitution([
         get_package_share_directory("irb120_handeye"), "config",
         IfElseSubstitution(
             LaunchConfiguration("calibration"),
             "realsense_calibration.yaml",
-            "realsense_common.yaml",
+            IfElseSubstitution(LaunchConfiguration("raw_depth"),
+                               "realsense_raw_depth.yaml",
+                               "realsense_common.yaml"),
         ),
     ])
 
@@ -73,6 +83,7 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         calibration_arg,
+        raw_depth_arg,
         realsense2_launch,
         cam2_tf,
     ])

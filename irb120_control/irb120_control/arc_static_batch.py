@@ -109,7 +109,8 @@ def main(args=None) -> int:
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_ft_pose_log(node._ft_transformed_log, node._pose_log, str(stage.path), LOG_PREFIX,
-                             node._obj_pose_log, command_log=node._command_log, timestamp=ts)
+                             node._obj_pose_log, command_log=node._command_log, timestamp=ts,
+                             commanded_pivot=node._arc_center)
             save_run_metadata(str(stage.path), LOG_PREFIX, ts, {
                 **module_constants(globals()),
                 "object": node._object, "trial": trial, "trials_total": parsed.trials,

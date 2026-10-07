@@ -14,6 +14,19 @@ def test_visible_plane_and_occluded_view():
     assert not check_view(point,np.array([1.,0.,0.]),depth-50,info)['usable']
 
 
+def test_table_plane_cancels_shared_depth_offset():
+    info = dict(K=[[500,0,50],[0,500,50],[0,0,1]],D=[0]*5,
+                base_to_optical=dict(R=np.eye(3).tolist(),t=[0,0,0]))
+    depth = np.full((101,101),506,dtype=np.uint16)
+    point = np.array([0.,0.,.5])
+    assert not check_view(point,np.array([1.,0.,0.]),depth,info)['usable']
+    corrected = check_view(point,np.array([1.,0.,0.]),depth,info,
+                           table_plane=np.array([0.,0.,.006]),table_z=0.)
+    assert corrected['usable']
+    assert abs(corrected['depth_residual_mm']) < 1e-9
+    assert corrected['table_offset_mm'] == 6
+
+
 def test_agreement_abstention_and_direction_veto():
     a=dict(usable=True,normal=[0,0,1],normal_dot_pull=0.)
     assert decide({'a':a,'hidden':dict(usable=False)})[0]=='pass'
@@ -29,7 +42,7 @@ def test_missing_views_veto_copy_only(tmp_path):
     from test_contact_point_selector import box
     points, _ = box()
     np.savez(tmp_path/'object_cloud.npz', xyz=points)
-    result,report=evaluate(tmp_path,baseline)
+    result,report=evaluate(tmp_path,baseline,rule='view_check_v2')
     assert report['decision']=='unavailable'
     assert not result['press']['available']
     assert baseline['press']['available']

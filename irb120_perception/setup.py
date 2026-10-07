@@ -30,6 +30,7 @@ setup(
             'contact_point_selector = irb120_perception.contact_point_selector:main',
             'object_digital_twin = irb120_perception.object_digital_twin:main',
             'object_confidence_map = irb120_perception.object_confidence_map:main',
+            'depth_plane_audit = irb120_perception.depth_plane_audit:main',
         ],
     },
 )

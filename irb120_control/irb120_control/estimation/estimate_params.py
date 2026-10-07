@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
@@ -239,6 +241,24 @@ def pivot_from_trajectory(p_ee_B, state_id, z_fixed: float = 0.0) -> tuple:
     return np.array([sol.x[0], 0.0, z_fixed]), float(d.mean()), float(np.std(d))
 
 
+def commanded_pivot_from_log(path: str) -> np.ndarray:
+    """Return the pivot actually used for this trial, including legacy sidecars."""
+    with np.load(path) as data:
+        if "commanded_pivot" in data:
+            pivot = np.asarray(data["commanded_pivot"], dtype=float).reshape(-1)
+            if pivot.size == 3 and np.isfinite(pivot).all():
+                return pivot
+    sidecar = Path(path).with_suffix(".json")
+    if sidecar.exists():
+        try:
+            pivot = np.asarray(json.loads(sidecar.read_text()).get("arc_center", []), dtype=float)
+            if pivot.shape == (3,) and np.isfinite(pivot).all():
+                return pivot
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return PIVOT_DEFAULT.copy()
+
+
 def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | None,
                     verbose: bool = True, trial_label: str | None = None,
                     free_com_x: bool = False, pivot_mode: str = "fixed",
@@ -252,8 +272,8 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
     free_com_x  — fit com_x instead of taking it from GROUND_TRUTH. The paper's
                   primary method assumes com_x known; this is the ablation that
                   shows the result does not depend on that assumption.
-    pivot_mode  — "fixed" uses PIVOT_DEFAULT; "trajectory" recovers the pivot per
-                  trial from the EE arc (see pivot_from_trajectory).
+    pivot_mode  — "fixed" uses the pivot logged by the controller; "trajectory"
+                  recovers pivot x per trial from the EE arc (see pivot_from_trajectory).
     pivot_override — explicit pivot for this trial, used by pivot_mode="relative"
                   (the caller needs all trials to compute the per-object mean first).
     """
@@ -273,13 +293,15 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
     if ft_bias_n:
         f_meas_S = f_meas_S + np.array([ft_bias_n, 0.0, 0.0])
 
-    p_pivot_B = PIVOT_DEFAULT.copy() if pivot_override is None else np.asarray(pivot_override, float).copy()
+    commanded_pivot = commanded_pivot_from_log(squash_file)
+    p_pivot_B = commanded_pivot.copy() if pivot_override is None else np.asarray(pivot_override, float).copy()
+    pivot_source = "relative_override" if pivot_override is not None else "commanded"
     pivot_fit_resid = np.nan
 
-    # No-slip check against the DEFAULT pivot, computed before any pivot substitution so
+    # No-slip check against the pivot the controller actually used, before substitution so
     # it is an independent gate on whether trajectory recovery is even applicable.
     _arc_only = np.isin(state_id, [STATE_ARC, STATE_UNARC])
-    _r_def = np.linalg.norm((p_ee_B - PIVOT_DEFAULT)[_arc_only], axis=1)
+    _r_def = np.linalg.norm((p_ee_B - commanded_pivot)[_arc_only], axis=1)
     noslip_dev_mm = float(np.ptp(_r_def) * 1000) if _arc_only.any() else np.nan
 
     if pivot_mode == "trajectory" and pivot_override is None:
@@ -290,11 +312,14 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
         # near-constant, no-slip is violated and the recovered centre is meaningless.
         if np.isfinite(noslip_dev_mm) and noslip_dev_mm > NOSLIP_TOL_MM:
             _say(f"[{obj}] no-slip deviation {noslip_dev_mm:.2f} mm > {NOSLIP_TOL_MM:.1f} mm "
-                 f"— trajectory pivot NOT trustworthy, falling back to PIVOT_DEFAULT.")
+                 f"— trajectory pivot NOT trustworthy, falling back to commanded pivot.")
+            pivot_source = "commanded_fallback"
         else:
-            piv, _rad, pivot_fit_resid = pivot_from_trajectory(p_ee_B, state_id)
+            piv, _rad, pivot_fit_resid = pivot_from_trajectory(
+                p_ee_B, state_id, z_fixed=float(commanded_pivot[2]))
             if piv is not None:
                 p_pivot_B = piv
+                pivot_source = "trajectory"
                 _say(f"[{obj}] pivot from EE arc: x={piv[0]:.4f} m "
                      f"(circle residual {pivot_fit_resid*1000:.3f} mm, no-slip dev {noslip_dev_mm:.2f} mm)")
 
@@ -496,6 +521,9 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
         "mu_est":       mu_est,
         "mu_gt":        mu_gt,
         "pivot_x":      float(p_pivot_B[0]),
+        "pivot_xyz":    p_pivot_B.tolist(),
+        "pivot_source": pivot_source,
+        "commanded_pivot_xyz": commanded_pivot.tolist(),
         "pivot_fit_resid_mm": pivot_fit_resid * 1000 if np.isfinite(pivot_fit_resid) else np.nan,
         "noslip_dev_mm": noslip_dev_mm,
         "phase_estimates": {
@@ -1536,7 +1564,7 @@ def _relative_pivots(obj: str, trial_files: list, verbose: bool = True) -> dict:
 
 
 def run_object(obj: str, workspace_root: str, verbose_trials: bool = False,
-               free_com_x: bool = False, pivot_mode: str = "relative") -> dict | None:
+               free_com_x: bool = False, pivot_mode: str = "trajectory") -> dict | None:
     """Run every recorded trial for `obj` and return the aggregated record."""
     trial_files = find_trial_logs(obj, workspace_root)
     push_file   = find_push_log(obj, workspace_root)
@@ -1722,15 +1750,16 @@ def main():
     parser.add_argument("--uncertainty-budget", action="store_true",
                         help="Attribute the residual error to individually measured input "
                              "uncertainties (pivot creep, pivot height, F/T zero drift).")
-    parser.add_argument("--pivot", choices=["fixed", "relative", "trajectory"], default="relative",
-                        help="DEFAULT 'relative' keeps the mean pivot at PIVOT_DEFAULT but removes "
+    parser.add_argument("--pivot", choices=["fixed", "relative", "trajectory"], default="trajectory",
+                        help="DEFAULT 'trajectory' recovers each trial's pivot x from the EE arc, "
+                             "pins z to the commanded table pivot, and falls back to the logged "
+                             "commanded pivot when the no-slip check fails. 'relative' keeps the "
+                             "mean pivot at PIVOT_DEFAULT but removes "
                              "each trial's measured deviation from it, cancelling object creep — "
                              "accuracy is essentially unchanged, spread drops (the heart creeps "
                              "~0.9 mm/trial and is the reason this is the default; objects that fail "
-                             "the no-slip check are left uncorrected). 'fixed' uses PIVOT_DEFAULT for "
-                             "every object and is the uncorrected baseline. 'trajectory' uses the "
-                             "per-trial recovered pivot outright, which also shifts the mean. Both "
-                             "recover the pivot from the EE arc alone.")
+                             "the no-slip check are left uncorrected). 'fixed' uses the logged "
+                             "commanded pivot for each trial; 'relative' remains the legacy ablation.")
     args = parser.parse_args()
 
     workspace_root = args.workspace or _find_workspace_root()

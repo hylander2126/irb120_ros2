@@ -222,6 +222,7 @@ def save_ft_pose_log(
     ft_raw_log: list | None = None,
     command_log: list | None = None,
     timestamp: str | None = None,
+    commanded_pivot: tuple | list | np.ndarray | None = None,
 ) -> str | None:
     """Save collected F/T, EE pose, and optional object pose buffers to a timestamped .npz file.
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
@@ -239,6 +240,7 @@ def save_ft_pose_log(
     prefix: filename prefix (e.g. "push_ft_pose").
     timestamp: reuse this timestamp for the filename instead of generating a fresh one — pass the
                same value to save_run_metadata() so the .npz and its .json sidecar pair up by name.
+    commanded_pivot: world-frame pivot used by the arc controller, when applicable.
 
     Returns the timestamp string used for the filename, or None if nothing was saved.
     """
@@ -316,6 +318,8 @@ def save_ft_pose_log(
         cmd_vz=cmd_arr[:, 7]           if cmd_arr.size else np.array([]),
         cmd_wy=cmd_arr[:, 8]           if cmd_arr.size else np.array([]),
         cmd_tangential_speed=cmd_arr[:, 9] if cmd_arr.size else np.array([]),
+        commanded_pivot=(np.asarray(commanded_pivot, dtype=np.float64)
+                           if commanded_pivot is not None else np.array([])),
     )
     np.savez_compressed(npz_path, **save_kwargs)
     print(f"F/T + EE pose + object pose log written to {npz_path}")

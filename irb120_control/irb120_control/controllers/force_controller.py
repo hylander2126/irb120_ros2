@@ -50,6 +50,14 @@ class PIDForceController:
     def reference(self) -> float:
         return self._force_ref
 
+    @property
+    def diagnostics(self) -> dict:
+        """Read-only controller state; does not advance the filter or integrator."""
+        return dict(reference=self._force_ref, filtered_force=self._filtered_force,
+                    error=self._prev_error, integral=self._integral,
+                    integral_velocity=self._ki * self._integral,
+                    output_velocity=self._prev_output)
+
     def update(self, force: float) -> float:
         """Return a velocity command (m/s) given the current normal force.
 

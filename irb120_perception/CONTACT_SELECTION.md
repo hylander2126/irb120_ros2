@@ -93,11 +93,19 @@ Section IV-C is not implemented: the script reports candidates for all modes.
   actual sensed points; y is not forced to zero off the observed surface.
 - **Pivot and direction:** build a 2D convex hull using only points within 20 mm
   above the table (3 mm below is allowed for noise). The facing hull edge nearest
-  +X supplies the forward-tip pivot and outward direction; repeat toward -X for
-  press-and-pull. A facing edge at least 30 mm long and within 45 degrees of the
-  preferred direction is an extended edge. Otherwise use an extreme support
-  vertex and a tangent perpendicular to the preferred direction. The signed axis
-  is `up × direction`. These are geometric estimates, not measured pivots.
+  +X supplies the forward-tip preference; -X supplies the press-and-pull preference.
+  `preferred_direction_v1` preserves those directions and their Y-parallel axes.
+  Flat alternatives must be at least 30 mm long, within 15 degrees of the preference,
+  and supported by at least eight distinct observed XY samples (1 mm deduplication)
+  within 1.5 mm of the hull segment, occupying all six longitudinal bins. A fitted
+  line must have <=1 mm RMS residual and <=3 degree orientation change when each
+  bin is omitted. These are evidence thresholds, not calibrated confidence.
+  Alternatives over 1 degree remain diagnostic for the fixed-plane controller.
+  An accepted edge within 1 degree supplies lateral centering, while the commanded
+  axis stays exact. Otherwise the pivot lies on the observed extreme support plane,
+  centered laterally using the median of points within 3 mm of that plane.
+  `position_evidence` records support count and lateral span; it does not certify
+  pivot accuracy or recover missing boundary. The signed axis is `up × direction`.
 - **Forward tip:** maximize the PDF's `axis · ((point - pivot) × direction)` on
   inward-facing side surfaces. This retains the PDF's zero normal tolerance and
   additionally excludes tangential/top contacts that cannot provide a side push.

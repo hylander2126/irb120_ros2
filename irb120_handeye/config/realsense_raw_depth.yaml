@@ -1,0 +1,14 @@
+# Diagnostic profile: retain production streams while disabling post-processing.
+# Use only for controlled raw-vs-filtered snapshots, not as a tuned production profile.
+pointcloud.enable: true
+enable_depth: true
+align_depth.enable: true
+enable_sync: true
+
+# Publish one rectified infrared view so stereo texture/projector coverage can be inspected.
+enable_infra1: true
+enable_infra2: true
+
+decimation_filter.enable: false
+spatial_filter.enable: false
+temporal_filter.enable: false

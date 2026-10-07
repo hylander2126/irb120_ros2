@@ -6,7 +6,7 @@ take_snapshot() saves into <episode>/NN_perceive/:
   object_cloud_dbscan.npz  the raw DBSCAN cloud it was culled from, for comparison
   contacts.json            full select_contact_points() output for that cloud (base_link)
   camN_color.png           one color frame per camera, taken with the cloud
-  camN_depth.png           the matching aligned depth, 16-bit PNG in mm
+  Aligned depth is used in memory and retained in the bag, not separate images.
   camN_camera_info.json    intrinsics + the camera's pose in base_link
   camN_overlay.png         color frame with the cloud (cyan), the points SAM culled (red)
                            and the contacts projected in
@@ -145,7 +145,7 @@ def _record_bag(node, out, seconds: float) -> float:
         if (out / "bag").exists() else 0.0
 
 
-def _overlay(color, K, D, R, t, cloud, culled, contacts):
+def _overlay(color, K, D, R, t, cloud, culled, contacts, depth=None):
     """Draw base-frame points/contacts on one camera image. (R, t) map base -> optical."""
     img = color.copy()
 
@@ -161,31 +161,26 @@ def _overlay(color, K, D, R, t, cloud, culled, contacts):
         if len(points):
             for p in px(points[:: max(1, len(points) // 4000)]):
                 cv2.circle(img, p, 1, bgr, -1)
+    from irb120_perception.contact_graphics import DepthDrawing
+    drawing = DepthDrawing(img, depth, dict(K=K, D=D, base_to_optical=dict(R=R, t=t)), occlusion=False)
+    img = drawing.image
     for mode, bgr in CONTACT_COLORS.items():
         c = contacts.get(mode) or {}
         geometry = c.get("geometry") or {}
         boundary = geometry.get("support_boundary")
         if boundary is not None:
             for a, b in zip(boundary, np.roll(boundary, -1, axis=0)):
-                ends = px([a, b])
-                if len(ends) == 2:
-                    cv2.line(img, ends[0], ends[1], bgr, 1, cv2.LINE_AA)
+                drawing.line(np.asarray(a), np.asarray(b), bgr)
         if geometry.get("pivot") is not None:
             pivot, axis = np.asarray(geometry["pivot"]), np.asarray(geometry["axis"])
-            center = px(pivot)
-            if center:
-                cv2.circle(img, center[0], 4, bgr, -1, cv2.LINE_AA)
+            drawing.marker(pivot, bgr)
             direction = np.asarray(geometry["direction"])
-            arrow = px([pivot, pivot + 0.04 * direction])
-            if len(arrow) == 2:
-                cv2.arrowedLine(img, arrow[0], arrow[1], bgr, 2, cv2.LINE_AA)
-            ends = px(np.array([pivot - 0.04 * axis, pivot + 0.04 * axis]))
-            if len(ends) == 2:
-                cv2.line(img, ends[0], ends[1], bgr, 2, cv2.LINE_AA)
+            drawing.line(pivot, pivot + 0.04 * direction, bgr, arrow=True)
+            drawing.line(pivot - 0.04 * axis, pivot + 0.04 * axis, bgr)
         if c.get("available"):
             p = px(np.asarray(c["point"]))
             if p:
-                cv2.circle(img, p[0], 7, bgr, 2, cv2.LINE_AA)
+                drawing.marker(np.asarray(c['point']), bgr)
                 cv2.putText(img, mode, (p[0][0] + 10, p[0][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, bgr, 1,
                             cv2.LINE_AA)
     return img
@@ -203,6 +198,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     for cam, ns in CAMERAS.items():
         for key, msg_type, topic in (("color", Image, f"/{ns}/color/image_raw"),
                                      ("depth", Image, f"/{ns}/aligned_depth_to_color/image_raw"),
+                                     ("infra1", Image, f"/{ns}/infra1/image_rect_raw"),
                                      ("info", CameraInfo, f"/{ns}/color/camera_info")):
             subs.append(node.create_subscription(
                 msg_type, topic, lambda m, c=cam, k=key: frames[c].__setitem__(k, m), qos_profile_sensor_data))
@@ -261,24 +257,28 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     kept = {tuple(p) for p in np.round(obj, 5)}
     culled = np.array([p for p in raw if tuple(np.round(p, 5)) not in kept]).reshape(-1, 3)
     bridge = CvBridge()
+    review_frames = {}
     for cam, m in images.items():
         if "color" not in m or "info" not in m:
             record.setdefault("missing_cameras", []).append(cam)
             continue
         K, D = np.array(m["info"].k).reshape(3, 3), np.array(m["info"].d)
         color = bridge.imgmsg_to_cv2(m["color"], desired_encoding="bgr8")
+        depth = None
         cv2.imwrite(str(out / f"{cam}_color.png"), color)
+        if "infra1" in m:
+            infrared = bridge.imgmsg_to_cv2(m["infra1"], desired_encoding="passthrough")
+            cv2.imwrite(str(out / f"{cam}_infra1.png"), infrared)
         if "depth" in m:
             depth = bridge.imgmsg_to_cv2(m["depth"], desired_encoding="passthrough")
             if depth.dtype != np.uint16:  # 32FC1 metres -> mm
                 depth = np.nan_to_num(depth * 1000.0).clip(0, 65535).astype(np.uint16)
-            cv2.imwrite(str(out / f"{cam}_depth.png"), depth)
-            # Raw uint16 millimetres are intentionally preserved for reconstruction.
-            preview = cv2.applyColorMap(
-                (np.clip(depth.astype(float) / 2000., 0., 1.) * 255).astype(np.uint8),
-                cv2.COLORMAP_TURBO)
-            preview[depth == 0] = 0
-            cv2.imwrite(str(out / f"{cam}_depth_preview.png"), preview)
+            # Preserve the exact aligned metric frame used by contact validation.
+            # The auxiliary bag may miss late-discovered camera topics if a
+            # driver stalls or restarts during its short recording window.
+            np.savez_compressed(out / f"{cam}_aligned_depth.npz", depth_mm=depth,
+                                stamp=_stamp(m["depth"]), encoding="16UC1")
+            record.setdefault("depth_frames", []).append(cam)
         info = {"frame_id": m["color"].header.frame_id, "K": K.tolist(), "D": D.tolist(),
                 "width": m["info"].width, "height": m["info"].height}
         tf = lookup(node, m["color"].header.frame_id, BASE_FRAME)
@@ -286,16 +286,23 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             R, t = tf
             info["position_in_base"] = (-R.T @ t).tolist()
             info["base_to_optical"] = {"R": R.tolist(), "t": t.tolist()}
-            cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(color, K, D, R, t, obj, culled, contacts))
+            cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(color, K, D, R, t, obj, culled, contacts, depth))
         write_json_atomic(out / f"{cam}_camera_info.json", info)
+        if tf is not None:
+            review_frames[cam] = (color, depth, info)
 
-    # Temporary experiment: off by default; shadow records only, apply vetoes press.
-    experiment = os.environ.get("IRB120_EXPERIMENTAL_VIEW_CHECK", "off")
+    # The camera-validated top-support selector is the default press path.
+    # Environment overrides remain as an explicit rollback/debug mechanism:
+    # `off` restores baseline selection and `shadow` records without applying.
+    experiment = os.environ.get("IRB120_EXPERIMENTAL_VIEW_CHECK", "apply")
     if experiment not in ("off", "shadow", "apply"):
         raise ValueError("IRB120_EXPERIMENTAL_VIEW_CHECK must be off, shadow, or apply")
     if experiment != "off" and record["ok"]:
         from irb120_perception.experimental_view_check import evaluate
-        proposed, evidence = evaluate(out, contacts)
+        rule = os.environ.get("IRB120_EXPERIMENTAL_PRESS_RULE", "top_support_v1")
+        proposed, evidence = evaluate(out, contacts,
+            cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
+                     if depth is not None}, rule=rule)
         write_json_atomic(out / "contacts_baseline.json", contacts)
         write_json_atomic(out / "contacts_experimental_view_check.json", proposed)
         write_json_atomic(out / "experimental_view_check.json", evidence)
@@ -315,8 +322,26 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                 color = cv2.imread(str(out / f"{cam}_color.png"))
                 cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(
                     color, np.asarray(info["K"]), np.asarray(info["D"]),
-                    np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts))
+                    np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts,
+                    review_frames.get(cam, (None, None, None))[1]))
 
+    # Cheap visual byproduct only: draw the final selected press, not a new search.
+    from irb120_perception.contact_graphics import contact_graphic
+    graphics_start = time.monotonic()
+    graphics = {"files": [], "style": "flat projection"}
+    press = contacts.get("press") or {}
+    for cam, (color, depth, info) in review_frames.items():
+        name = f"{cam}_contact_review.png"
+        try:
+            img = contact_graphic(color, depth, info, press, press.get("geometry"))
+            if not cv2.imwrite(str(out / name), img):
+                raise OSError(f"could not write {name}")
+            graphics["files"].append(name)
+        except (ValueError, KeyError, OSError, cv2.error) as exc:
+            graphics.setdefault("errors", {})[cam] = str(exc)
+            node.get_logger().warn(f"[snapshot] contact graphics: {exc}")
+    graphics["elapsed_seconds"] = time.monotonic()-graphics_start
+    record["contact_graphics"] = graphics
     write_json_atomic(out / "snapshot.json", record)
     stage.end("ok" if record["ok"] else "failed",
               **{k: record[k] for k in ("points", "dbscan_points", "available", "bag_mb", "error") if k in record})
