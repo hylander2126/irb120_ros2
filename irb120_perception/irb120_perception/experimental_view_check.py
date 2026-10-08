@@ -130,8 +130,17 @@ def decide(views):
     return 'pass', 'single-view support' if len(usable) == 1 else 'multi-view agreement'
 
 
-def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_overlays=True):
-    """Return an experimental contacts copy and evidence, preserving baseline."""
+def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_overlays=True,
+            press_pivot_override=None):
+    """Return an experimental contacts copy and evidence, preserving baseline.
+
+    press_pivot_override: forwarded to select_contact_points unchanged -- moves
+    only the press pivot used for moment-arm scoring/edge-centering (and the
+    reported geometry.pivot), not the candidate point search itself. Lets a
+    caller re-seed the SAME candidate pipeline (observed + any inferred top
+    points, same camera-view-check filter) with a different pivot, instead of
+    falling back to a plainer candidate pool that may not support a press at all.
+    """
     snapshot = Path(snapshot); result = copy.deepcopy(contacts)
     from irb120_perception.contact_point_selector import select_contact_points
     if rule not in ('view_check_v2', 'top_support_v1'):
@@ -183,6 +192,11 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
         tree = cKDTree(clean)
         inferred_tree = cKDTree(inferred) if len(inferred) else None
         geometry = estimate_pivot(clean, [-1., 0., 0.], -.021)
+        if press_pivot_override is not None:
+            geometry['pivot'] = np.asarray(press_pivot_override, dtype=float)
+            geometry['tangent'] = np.array([geometry['pivot'] - .04*geometry['axis'],
+                                            geometry['pivot'] + .04*geometry['axis']])
+            geometry['pivot_source'] = 'rgb_sam_override'
         report['experiment'] = 'experimental_local_support_v4'
         report['geometry'] = json.loads(json.dumps(geometry, default=lambda value: value.tolist()))
         report['thresholds'].update(max_top_slope_deg=30, max_camera_fused_angle_deg=25,
@@ -225,7 +239,27 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
     selected = select_contact_points(selection_points, normals=selection_normals,
                                     min_ball_center_z=.06,
                                     press_score_fraction=.05,
-                                    experimental_press_filter=filter_candidates)
+                                    experimental_press_filter=filter_candidates,
+                                    press_pivot_override=press_pivot_override)
+    # An observed upward normal is only a hypothesis. If all observed contacts
+    # fail validation, retry with inferred cap hypotheses through the SAME gates.
+    if (rule == 'top_support_v1' and not selected['press']['available']
+            and not report['horizontal_top_inference']['available']):
+        inferred, inference = infer_horizontal_top(observed)
+        inference['trigger'] = 'no validated observed press contact'
+        report['horizontal_top_inference'] = inference
+        if len(inferred):
+            report['observed_attempt'] = dict(
+                reason=selected['press'].get('reason'), candidates=report['candidates'])
+            report['candidates'] = []
+            clean = np.vstack((observed, inferred))
+            normals = np.vstack((normals, np.tile([0., 0., 1.], (len(inferred), 1))))
+            tree = cKDTree(clean)
+            inferred_tree = cKDTree(inferred)
+            selected = select_contact_points(
+                clean, normals=normals, min_ball_center_z=.06,
+                press_score_fraction=.05, experimental_press_filter=filter_candidates,
+                press_pivot_override=press_pivot_override)
     result['press'] = selected['press']
     report['decision'] = 'pass' if result['press']['available'] else 'unavailable'
     report['counts'] = {key: sum(c['decision'] == key for c in report['candidates'])
@@ -240,28 +274,6 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
     if rule == 'top_support_v1' and render_overlays:
         from .press_review import write_review
         write_review(snapshot, report, clean, normals, cameras)
-    for cam, (_, info) in cameras.items():
-        if not render_overlays or not (snapshot/f'{cam}_color.png').exists():
-            continue
-        img = cv2.imread(str(snapshot/f'{cam}_color.png'))
-        if img is None or 'base_to_optical' not in info:
-            continue
-        tf = info['base_to_optical']; R = np.asarray(tf['R']); t = np.asarray(tf['t'])
-        K = np.asarray(info['K'])
-        for candidate in report['candidates']:
-            q = R @ np.asarray(candidate['point']) + t
-            if q[2] <= 0:
-                continue
-            uv, _ = cv2.projectPoints(q.reshape(1,3), np.zeros(3), np.zeros(3),
-                                     K, np.asarray(info.get('D', [])))
-            pixel = tuple(np.rint(uv.reshape(2)).astype(int))
-            color = {'pass': (0,255,0), 'reject': (0,0,255), 'uncertain': (0,200,255)}[candidate['decision']]
-            cv2.circle(img, pixel, 3, color, -1)
-            if report['selected_point'] == candidate['point']:
-                cv2.circle(img, pixel, 8, (255,0,255), 2)
-        cv2.putText(img, 'v2: green pass / red reject / yellow uncertain / magenta selected',
-                    (8,20), cv2.FONT_HERSHEY_SIMPLEX, .4, (255,255,255), 1)
-        cv2.imwrite(str(snapshot/f'{cam}_experimental_view_check.png'), img)
     return result, report
 
 

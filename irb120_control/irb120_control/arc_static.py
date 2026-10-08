@@ -44,6 +44,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
 
 from irb120_control.controllers.force_controller import PIDForceController
+from irb120_perception.press_targets import press_targets, PRESS_STANDOFF
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
@@ -94,7 +95,7 @@ ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
 SQUASH_EXTRA_DESCENT_M = 0.005  # allow 5 mm below predicted ball-center contact height
-SQUASH_STANDOFF = 0.03       # m, pre-squash ball center sits this far above the detected press contact (~14 mm clear of the object's collision box)
+SQUASH_STANDOFF = PRESS_STANDOFF       # m, pre-squash ball center sits this far above the detected press contact (~14 mm clear of the object's collision box)
 PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
@@ -173,11 +174,20 @@ def _quat_mul(a, b):
 
 
 class ArcStatic(Node):
-    def __init__(self, object_name: str) -> None:
+    def __init__(self, object_name: str, force_ref_override: float | None = None) -> None:
         super().__init__("arc_static")
         obj = object_name
         self._object = obj
-        params = load_object_params(obj)
+        try:
+            params = load_object_params(obj)
+        except ValueError:
+            if force_ref_override is None:
+                raise ValueError(
+                    f"Object '{obj}' is not in object_params.json "
+                    f"(known: {sorted(VALID_OBJECTS)}). Add it there, or "
+                    "pass --force-ref N for an ad hoc test object."
+                ) from None
+            params = {}
         # Both set from the detected press contact by set_targets_from_contacts().
         self._pre_squash_pos = None  # world frame
         self._arc_center = None      # world frame (x, y, z)
@@ -191,9 +201,12 @@ class ArcStatic(Node):
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._timer = None
 
-        if "force_ref_n" not in params:
+        if force_ref_override is not None:
+            force_ref = float(force_ref_override)
+        elif "force_ref_n" not in params:
             raise ValueError(f"Object '{obj}' is missing required 'force_ref_n' in object_params.json")
-        force_ref = float(params["force_ref_n"])
+        else:
+            force_ref = float(params["force_ref_n"])
         self.get_logger().info(f"Object: {obj}  force_ref={force_ref:.1f}N  hard_limit={FORCE_HARD_LIMIT_N:.1f}N")
         self._force_ctrl = PIDForceController(
             kp=KP_FORCE,
@@ -300,19 +313,33 @@ class ArcStatic(Node):
     def move_to_pre_squash(self) -> bool:
         """Plan around the detected object (a collision box only for this move). Also used for
         retries and between batch trials, from the RETRACT pose ~24 mm above the object."""
+        diagnostic = None
+        action = {}
+        success = False
+        if getattr(self, '_approach_diagnostic_path', None):
+            from irb120_control.util.approach_diagnostics import ApproachDiagnostics
+            diagnostic = ApproachDiagnostics(self, self._approach_diagnostic_path,
+                                             self._pre_squash_pos, BASE_FRAME, EE_LINK)
+            diagnostic.write('approach_request', target=self._pre_squash_pos,
+                             orientation_xyzw=PRE_SQUASH_ORIENTATION, frame=BASE_FRAME,
+                             link=EE_LINK, provenance=self._approach_provenance)
+            diagnostic.start()
         try:
             with object_obstacle(self, self._object_xyz):
-                return plan_and_execute_pose_goal(
-                    self,
-                    self._move_group_client,
+                success = plan_and_execute_pose_goal(
+                    self, self._move_group_client,
                     target_position=self._pre_squash_pos,
                     target_orientation=PRE_SQUASH_ORIENTATION,
-                    velocity_scale=0.1,
-                    acceleration_scale=0.1,
-                )
+                    base_frame=BASE_FRAME, ee_link=EE_LINK,
+                    velocity_scale=0.1, acceleration_scale=0.1, diagnostics=action)
+            return success
         except RuntimeError as exc:
             self.get_logger().error(str(exc))
+            action['exception'] = str(exc)
             return False
+        finally:
+            if diagnostic is not None:
+                diagnostic.finish(success, action)
 
     def set_targets_from_contacts(self, contacts: dict, object_xyz) -> bool:
         """Pre-squash position and arc center from the detected press contact
@@ -329,9 +356,24 @@ class ArcStatic(Node):
             self.get_logger().error(f"No TF {BASE_FRAME} <- base_link -- not moving.")
             return False
         R, t = tf
-        ball = R @ np.asarray(press["ball_center"]) + t
-        self._pre_squash_pos = (float(ball[0]), float(ball[1]), float(ball[2]) + SQUASH_STANDOFF)
-        self._arc_center = tuple(float(v) for v in R @ np.asarray(pivot) + t)
+        targets = press_targets(press, R, t)
+        self._approach_provenance = dict(saved_press=press,
+            world_from_base_link=dict(R=R.tolist(), t=t.tolist()),
+            standoff_m=SQUASH_STANDOFF,
+            contacts_file=getattr(self, '_approach_contacts_file', None),
+            artifact_sha256=getattr(self, '_approach_artifact_hashes', {}))
+        self._pre_squash_pos = tuple(float(v) for v in targets["pre_press"])
+        self._arc_center = tuple(float(v) for v in targets["pivot"])
+        # Display the exact transformed targets supplied to MoveIt, not a new selection.
+        from visualization_msgs.msg import MarkerArray
+        from irb120_perception.press_targets import build_press_markers
+        self._target_marker_pub = self.create_publisher(
+            MarkerArray, '/contact_point_selector/markers', 1)
+        def publish_targets():
+            self._target_marker_pub.publish(build_press_markers(
+                targets, BASE_FRAME, self.get_clock().now().to_msg(), 'Arc command targets'))
+        self._target_marker_timer = self.create_timer(.5, publish_targets)
+        publish_targets()
         self.get_logger().info(f"Press contact -> pre-squash {self._pre_squash_pos}, arc center {self._arc_center}")
         return True
 
@@ -901,7 +943,17 @@ def main(args=None) -> int:
     raw_args = list(sys.argv[1:] if args is None else args)
     ros_args_index = raw_args.index("--ros-args") if "--ros-args" in raw_args else len(raw_args)
     parser = argparse.ArgumentParser(description="Press-pull tip at the detected press contact")
-    parser.add_argument("object", choices=sorted(VALID_OBJECTS))
+    parser.add_argument(
+        "object",
+        help=f"Object name. Registered ({sorted(VALID_OBJECTS)}) objects pick up their "
+             "force_ref_n from object_params.json automatically; any other snapshot/episode "
+             "label works too if you pass --force-ref.",
+    )
+    parser.add_argument(
+        "--force-ref", type=float, default=None, metavar="N",
+        help="Press force target in Newtons. Required for an object not in object_params.json; "
+             "overrides the registered value otherwise.",
+    )
     parser.add_argument(
         "--quality", choices=["h264", "lossless"], default="h264",
         help="Video quality this run (default: h264 — everyday runs). Use 'lossless' for a "
@@ -917,8 +969,9 @@ def main(args=None) -> int:
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
-    node = ArcStatic(parsed.object)
-    episode = Episode.resolve(parsed.episode, parsed.object, node)
+    node = ArcStatic(parsed.object, force_ref_override=parsed.force_ref)
+    episode = Episode.resolve(parsed.episode, parsed.object, node,
+                              allow_unconfigured_object=parsed.force_ref is not None)
     stage = None
     attempt = 0
     force_ref = node._force_ctrl.reference
@@ -934,6 +987,17 @@ def main(args=None) -> int:
                 "For RGB, review the preceding pivot_boundary_review.json first.")
             return 1
         node.get_logger().info(f"Using {parsed.pivot} pivot from {contacts_filename}")
+        perceive_stage = next(s for s in reversed(episode.load()['stages'])
+                              if s['kind'] == 'perceive' and s['status'] == 'ok')
+        node._approach_contacts_file = str(episode.path / perceive_stage['dir'] / contacts_filename)
+        import hashlib
+        snapshot_dir = episode.path / perceive_stage['dir']
+        node._approach_artifact_hashes = {
+            name: hashlib.sha256((snapshot_dir / name).read_bytes()).hexdigest()
+            for name in (contacts_filename, 'final_selection.jpg', 'cam1_camera_info.json',
+                         'cam2_camera_info.json', 'cam3_camera_info.json')
+            if (snapshot_dir / name).exists()}
+        node._approach_diagnostic_path = stage.path / 'approach_diagnostics.jsonl'
         if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
@@ -974,7 +1038,7 @@ def main(args=None) -> int:
         )
 
         if not node._operator_confirm(
-            "At pre-squash pose. Confirm clear contact conditions before descending."
+            "Approach action finished. Check the actual finger against the preview before descending."
         ):
             return 0
 

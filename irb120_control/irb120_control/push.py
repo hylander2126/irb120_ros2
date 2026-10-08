@@ -46,7 +46,6 @@ from irb120_control.util.runtime_log_dir import (
     save_run_metadata,
     start_recording,
     stop_recording,
-    VALID_OBJECTS,
 )
 
 
@@ -288,14 +287,14 @@ def main(args=None) -> int:
     raw_args = list(sys.argv[1:] if args is None else args)
     ros_args_index = raw_args.index("--ros-args") if "--ros-args" in raw_args else len(raw_args)
     parser = argparse.ArgumentParser(description="Straight-ahead Cartesian push at the detected planar_push contact")
-    parser.add_argument("object", choices=sorted(VALID_OBJECTS))
+    parser.add_argument("object", help="Object/episode label; push uses the saved contact, not object-specific parameters")
     parser.add_argument("--episode", default="new", metavar="new|last|PATH",
                         help="Episode to record into (default: a new one). See util/episode.py.")
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
     node = Push(parsed.object)
-    episode = Episode.resolve(parsed.episode, parsed.object, node)
+    episode = Episode.resolve(parsed.episode, parsed.object, node, allow_unconfigured_object=True)
     stage = None
     push_ok = return_ok = home_ok = None
     try:

@@ -46,6 +46,7 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         super().__init__('object_detector_dbscan_sam_cull')
         self.declare_parameter('input_cloud', '/object_detector/object_points')
         self.declare_parameter('color_topic', '/realsense/color/image_raw')
+        self.declare_parameter('depth_topic', '/realsense/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/realsense/color/camera_info')
         self.declare_parameter('sam_checkpoint', '')
         self.declare_parameter('sam_model_type', 'vit_t')
@@ -57,12 +58,14 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         self.box_padding_px = int(p('box_padding_px').value)
         self.min_interval = float(p('min_cull_interval_sec').value)
         self._latest_color = None
+        self._latest_depth = None
         self._info = None
         self._last_run = None
         self._predictor = None
         self._diagnostic_mask = None
         self._mask_pub = self.create_publisher(Image, "~/sam_mask", 10)
         self._color_pub = self.create_publisher(Image, "~/sam_color", 10)
+        self._depth_pub = self.create_publisher(Image, "~/sam_depth", 10)
         self._metadata_pub = self.create_publisher(String, "~/sam_metadata", 10)
 
         checkpoint = p('sam_checkpoint').value
@@ -78,6 +81,7 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         qos = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
                          history=QoSHistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(Image, p('color_topic').value, self._color_cb, qos)
+        self.create_subscription(Image, p('depth_topic').value, self._depth_cb, qos)
         self.create_subscription(CameraInfo, p('camera_info_topic').value, self._info_cb, qos)
         self.create_subscription(PointCloud2, p('input_cloud').value, self._cloud_cb, qos)
         self.get_logger().info('DBSCAN SAM culler ready' if self._predictor else
@@ -85,6 +89,9 @@ class DBSCANSAMCuller(ObjectDetectorBase):
 
     def _color_cb(self, msg):
         self._latest_color = msg
+
+    def _depth_cb(self, msg):
+        self._latest_depth = msg
 
     def _info_cb(self, msg):
         self._info = msg
@@ -115,6 +122,10 @@ class DBSCANSAMCuller(ObjectDetectorBase):
             self.get_logger().warn(f'TF lookup failed: {exc}')
             return
         color_msg = self._latest_color
+        # Grabbed here, before the ~seconds-long SAM call below, so its skew from
+        # color_msg reflects two back-to-back reads of live topics, not whatever a
+        # downstream consumer can still find in its own buffer once cull() returns.
+        depth_msg = self._latest_depth
         self._diagnostic_mask = None
         kept = self._cull(source, color_msg, self._info, cam_tf)
         # Pair diagnostic images by the input CLOUD stamp, just like object_points.
@@ -131,11 +142,20 @@ class DBSCANSAMCuller(ObjectDetectorBase):
             rgb_msg.header.stamp = copy.deepcopy(msg.header.stamp)
             self._mask_pub.publish(mask_msg)
             self._color_pub.publish(rgb_msg)
-            self._metadata_pub.publish(String(data=json.dumps({
+            metadata = {
                 'cloud_stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'color_stamp': color_msg.header.stamp.sec + color_msg.header.stamp.nanosec*1e-9,
                 'mask_source': 'live MobileSAM culler exact RGB input',
-            })))
+                'depth_paired_at_source': depth_msg is not None,
+            }
+            if depth_msg is not None:
+                depth_stamp = depth_msg.header.stamp.sec + depth_msg.header.stamp.nanosec*1e-9
+                metadata['depth_stamp'] = depth_stamp
+                metadata['rgb_depth_delta_s'] = abs(depth_stamp - metadata['color_stamp'])
+                depth_out = copy.deepcopy(depth_msg)
+                depth_out.header.stamp = copy.deepcopy(msg.header.stamp)
+                self._depth_pub.publish(depth_out)
+            self._metadata_pub.publish(String(data=json.dumps(metadata)))
         header = msg.header
         header.frame_id = self.base_frame
         if len(kept) < 3:

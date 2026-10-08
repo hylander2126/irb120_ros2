@@ -132,3 +132,34 @@ def test_t_shape_with_missing_top_samples_uses_camera_validated_inference(tmp_pa
     assert result['press']['available']
     assert result['press']['normal']==[0.,0.,1.]
     assert abs(result['press']['along_edge_offset'])<.006
+
+
+def test_rejected_observed_top_retries_inference_with_camera_validation(tmp_path, monkeypatch):
+    from test_contact_point_selector import box
+    from irb120_perception import experimental_view_check as module
+    from irb120_perception import experimental_top_support as support
+    xyz, _ = box()
+    xyz[:, 2] -= .021
+    np.savez(tmp_path/'object_cloud.npz', xyz=xyz)
+    monkeypatch.setattr(support, 'has_upward_upper_surface', lambda *a: True)
+    original_assess = support.assess
+    def reject_observed(*args, require_local_support=True):
+        if require_local_support:
+            return 'reject', 'observed normal unreliable'
+        return original_assess(*args, require_local_support=False)
+    monkeypatch.setattr(support, 'assess', reject_observed)
+    monkeypatch.setattr(module, 'check_view', lambda *a, **kw:
+                        dict(usable=True, normal=[0., 0., 1.], normal_dot_pull=0.))
+    kwargs = dict(cameras={'cam': (np.ones((2, 2), dtype=np.uint16), {})},
+                  render_overlays=False, press_pivot_override=[.51, .01, -.021])
+    result, report = module.evaluate(tmp_path, {}, **kwargs)
+    assert result['press']['available']
+    assert report['horizontal_top_inference']['trigger'] == 'no validated observed press contact'
+    assert report['observed_attempt']['candidates']
+    assert report['geometry']['pivot'] == [.51, .01, -.021]
+    assert any(c['inferred_horizontal_top'] and c['decision'] == 'pass'
+               for c in report['candidates'])
+    monkeypatch.setattr(module, 'check_view', lambda *a, **kw: dict(usable=False))
+    result, report = module.evaluate(tmp_path, {}, **kwargs)
+    assert not result['press']['available']
+    assert report['counts']['pass'] == 0

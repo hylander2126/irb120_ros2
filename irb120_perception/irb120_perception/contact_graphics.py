@@ -1,6 +1,7 @@
 """Lightweight camera-depth-aware contact drawings, without selection or ROS."""
 import cv2
 import numpy as np
+from .press_targets import pre_press_center
 
 
 class DepthDrawing:
@@ -102,24 +103,27 @@ def contact_graphic(color, depth, info, contact=None, geometry=None, occlusion=F
         point = np.asarray(contact['point']); center = np.asarray(contact['ball_center'])
         radius = float(np.linalg.norm(center-point))
         camera = -drawing.R.T @ drawing.t
-        delta = camera-center; distance = np.linalg.norm(delta)
-        if distance > radius > 0:
-            normal = delta/distance
-            reference = np.eye(3)[np.argmin(np.abs(normal))]
-            u = np.cross(normal, reference); u /= np.linalg.norm(u)
-            v = np.cross(normal, u)
-            theta = np.linspace(0, 2*np.pi, 65)
-            ring = (center+radius**2/distance*normal + radius*np.sqrt(1-(radius/distance)**2)*
-                    (np.cos(theta)[:, None]*u+np.sin(theta)[:, None]*v))
-            for a, b in zip(ring[:-1], ring[1:]):
-                drawing.line(a, b, (255, 0, 255))
-        drawing.line(center+[0, 0, .03], center, (255, 255, 0), arrow=True)
+        pre_press = pre_press_center(center)
+        for ring_center, ring_color in [(center, (255, 0, 255)), (pre_press, (255, 255, 0))]:
+            delta = camera-ring_center; distance = np.linalg.norm(delta)
+            if distance > radius > 0:
+                normal = delta/distance
+                reference = np.eye(3)[np.argmin(np.abs(normal))]
+                u = np.cross(normal, reference); u /= np.linalg.norm(u)
+                v = np.cross(normal, u)
+                theta = np.linspace(0, 2*np.pi, 65)
+                ring = (ring_center+radius**2/distance*normal + radius*np.sqrt(1-(radius/distance)**2)*
+                        (np.cos(theta)[:, None]*u+np.sin(theta)[:, None]*v))
+                for a, b in zip(ring[:-1], ring[1:]):
+                    drawing.line(a, b, ring_color)
+        drawing.line(pre_press, center, (255, 255, 0), arrow=True)
+        drawing.marker(pre_press, (255, 255, 0))
         drawing.marker(center, (255, 0, 255))
+        for name, position, shade in [("PRE", pre_press, (255, 255, 0)),
+                                      ("CONTACT", point, (0, 255, 255))]:
+            uv, z = drawing.project([position])
+            if z[0] > .05 and np.isfinite(uv).all():
+                pixel = tuple(np.rint(uv[0]+[8, -5]).astype(int))
+                cv2.putText(drawing.image, name, pixel, cv2.FONT_HERSHEY_SIMPLEX, .35, shade, 1, cv2.LINE_AA)
         drawing.marker(point, (0, 255, 255))
-    cv2.rectangle(drawing.image, (0, 0), (color.shape[1], 45), (20, 20, 20), -1)
-    for y, line in enumerate([('Solid: visible | dotted: hidden | dim dots: unknown' if occlusion else
-                              'Flat projection: outlines do not certify visibility or clearance'),
-                              'Ball: magenta; descent: cyan; pivot tangent: orange; pull: yellow; -X: gray']):
-        cv2.putText(drawing.image, line, (6, 16+20*y), cv2.FONT_HERSHEY_SIMPLEX,
-                    .4, (255, 255, 255), 1)
     return drawing.image

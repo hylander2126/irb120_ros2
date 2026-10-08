@@ -7,9 +7,7 @@ from scipy.spatial import cKDTree
 
 
 def write_review(snapshot, report, points, normals, cameras):
-    from .contact_validation import render, render_geometry
-    if report.get('geometry'):
-        render_geometry(snapshot, snapshot, report['geometry'], cameras)
+    from .contact_validation import render
     eligible = sorted((r for r in report['candidates'] if r['decision']=='pass'),
                       key=lambda r:-r['torque_per_pull_N_m'])
     options=[];tree=cKDTree(points)
@@ -28,6 +26,12 @@ def write_review(snapshot, report, points, normals, cameras):
         render(snapshot,snapshot,option,cameras)
         if len(options)==3:
             break
+    # A snapshot may be rendered once for cloud and again for the applied SAM
+    # pivot. Keep only the final queue's images, rather than accumulating six.
+    current_images = {o['id']+'.jpg' for o in options}
+    for image in snapshot.glob('press_option_*.jpg'):
+        if image.name not in current_images:
+            image.unlink()
     review_id=hashlib.sha256('|'.join(sorted(o['id'] for o in options)).encode()).hexdigest()[:12]
     payload=dict(experiment=report['experiment'],snapshot=str(snapshot.resolve()),review_id=review_id,
                  selected_point=report['selected_point'],options=options,
@@ -38,8 +42,6 @@ def write_review(snapshot, report, points, normals, cameras):
            'These candidates passed the experimental gates; that is not a manipulation-success guarantee. '
            'Choose preferred / acceptable / bad / unsure, or none acceptable. '
            'Return the snapshot and option ID with a short reason. Labels do not apply contacts.','']
-    if report.get('geometry'):
-        lines += ['![Pivot and pull direction](geometry.jpg)', '']
     if not options:
         lines+=['No locally supported candidates: abstain and resnapshot/reposition.','']
     for o in options:

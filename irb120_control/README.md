@@ -207,3 +207,49 @@ Connected 8/12 mm depth neighborhoods must give consistent normal signs and
 angles. Candidate evidence and color overlays are saved for every camera.
 See `../EXPERIMENT_RESUME.md` for implementation details, the live shadow test,
 remaining execution limitations, and tomorrow's resume instructions.
+
+### Preview the saved press before motion
+
+`ros2 run irb120_control episode preview --episode <episode-folder>` publishes
+the latest successful saved perception stage to the existing RViz MarkerArray
+`/contact_point_selector/markers`. It performs no capture or robot motion.
+Cyan is the pre-press ball (30 mm above the contact ball), magenta is the
+contact ball at its actual radius, yellow is the surface contact, and orange
+is the pivot. The label identifies the episode, stage and contacts file.
+Use `--pivot rgb` if executing `arc_static --pivot rgb`; the default reads
+`contacts.json`, which may already contain an applied SAM pivot. Stop preview
+with Ctrl-C before running arc; arc publishes its own transformed command
+targets on the same topic. Markers expire when publication stops.
+
+Preview and arc share target calculation; the final-selection camera image
+now explicitly shows both the cyan PRE ball and magenta contact ball. The
+image is a projection using saved camera calibration, not independent 3D
+ground truth. Contact estimation and the 30 mm approach offset are unchanged.
+Arc reuses a snapshot only if perceive is the episode's last stage; otherwise
+it captures a new snapshot. To inspect a target and then execute that exact
+snapshot, preview a newly captured episode and pass the same episode to arc.
+
+Approach diagnostics are written automatically to the motion stage's
+`approach_diagnostics.jsonl`. Records include the exact contacts file and
+preview/calibration file hashes, saved contact, base-to-world transform, target
+frame/link/orientation, timestamped EE TF and its age, measured joints and
+controller reference/feedback at 5 Hz, and MoveIt's action status plus planned
+and returned executed trajectories. Before/after `/compute_fk` queries use
+measured joints and MoveIt's model, independently of availability of the EE TF.
+Signed actual-minus-target XYZ error is printed in millimetres. Missing TF/FK
+evidence is explicitly logged; action success is not labeled pose verification.
+Logs are appended throughout approach, before any later home attempt. This
+adds diagnostics only; target selection and motion commands are unchanged.
+
+### Cable-neutral wrist limit
+
+Joint 6 is hardcoded to [-60, +60] degrees about zero in the robot URDF,
+MoveIt joint limits, and approach/home path constraints. Pose approaches also
+constrain tool orientation throughout the path within 60 degrees per rotation-vector
+component of the requested final orientation. Free-space moves plan first and
+check every returned joint-6 waypoint before execution; out-of-range angles,
+missing wrist data, and adjacent wrist jumps over 60 degrees are rejected.
+Angles are never wrapped or recentered. Starts outside the wrist window fail.
+Collision avoidance remains active; no clearance padding was changed.
+Restart the running bringup/MoveIt/Servo stack after rebuilding to load the new
+robot model. These are software planning bounds, not ABB safety-rated limits.

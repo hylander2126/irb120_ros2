@@ -103,10 +103,11 @@ class Episode:
         return cls(path)
 
     @classmethod
-    def resolve(cls, spec: str, object_name: str, node=None) -> "Episode":
+    def resolve(cls, spec: str, object_name: str, node=None,
+                allow_unconfigured_object: bool = False) -> "Episode":
         """'new', 'last' (most recent episode for this object), or a path."""
         if spec == "new":
-            return cls.create(object_name, node)
+            return cls.create(object_name, node, allow_unconfigured_object=allow_unconfigured_object)
         if spec == "last":
             episodes = sorted(_episodes_dir(object_name).glob("*/episode.json"))
             if not episodes:
@@ -172,11 +173,13 @@ class Episode:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["snapshot", "show", "note", "outcome"])
+    p.add_argument("command", choices=["snapshot", "preview", "show", "note", "outcome"])
     p.add_argument("text", nargs="?", default="",
                    help="snapshot: object name; note: the text; outcome: " + "/".join(OUTCOMES))
     p.add_argument("--reason", default="", help="outcome reason")
     p.add_argument("--episode", default=None, help="episode folder (default: the most recent one)")
+    p.add_argument("--pivot", choices=["cloud", "rgb"], default="cloud",
+                   help="preview: same contacts-file choice as arc_static")
     args = p.parse_args()
 
     if args.command == "snapshot":
@@ -199,6 +202,11 @@ def main() -> None:
         if not episodes:
             raise SystemExit("no episodes yet")
         episode = Episode(episodes[-1].parent)
+
+    if args.command == "preview":
+        from irb120_control.util.press_preview import preview
+        preview(episode, "contacts_rgb_pivot.json" if args.pivot == "rgb" else "contacts.json")
+        return
 
     if args.command == "note":
         episode.add_note(args.text)

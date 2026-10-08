@@ -5,8 +5,6 @@ take_snapshot() saves into <episode>/NN_perceive/:
   object_cloud.npz         the object cloud the contacts come from (DBSCAN -> SAM cull), base_link
   object_cloud_dbscan.npz  the raw DBSCAN cloud it was culled from, for comparison
   contacts.json            full select_contact_points() output for that cloud (base_link)
-  cam1_sam_mask.png        optional SAM mask matched to the selected culled cloud
-  cam1_sam_color.png       exact RGB input for that mask
   camN_color.png           one color frame per camera, taken with the cloud
   Aligned depth is used in memory and retained in the bag, not separate images.
   camN_camera_info.json    intrinsics + the camera's pose in base_link
@@ -52,6 +50,7 @@ DBSCAN_TOPIC = "/object_detector/object_points"
 CULL_TOPIC = "/object_detector_dbscan_sam_cull/object_points"
 SAM_MASK_TOPIC = "/object_detector_dbscan_sam_cull/sam_mask"
 SAM_COLOR_TOPIC = "/object_detector_dbscan_sam_cull/sam_color"
+SAM_DEPTH_TOPIC = "/object_detector_dbscan_sam_cull/sam_depth"
 SAM_METADATA_TOPIC = "/object_detector_dbscan_sam_cull/sam_metadata"
 DETECTOR_ACTIVE_SERVICE = "/object_detector/set_active"
 
@@ -206,6 +205,69 @@ def _overlay(color, K, D, R, t, cloud, culled, contacts, depth=None):
     return img
 
 
+def _crop_panel(img, point, info, half=110, size=320, label=""):
+    """Zoomed, labeled single-camera panel centered on `point`'s projection.
+
+    Falls back to the full (downsized) frame when `point` is None or projects
+    outside/behind the camera -- still useful to show "not visible from here".
+    """
+    panel = img
+    if point is not None:
+        tf = info["base_to_optical"]
+        cam = np.asarray(point) @ np.asarray(tf["R"]).T + np.asarray(tf["t"])
+        if cam[2] > 0.05:
+            uv, _ = cv2.projectPoints(cam.reshape(1, 3), np.zeros(3), np.zeros(3),
+                                      np.asarray(info["K"], float), np.asarray(info.get("D", [])))
+            x, y = uv.reshape(2)
+            h, w = img.shape[:2]
+            x0 = int(max(0, min(w - 2 * half, x - half)))
+            y0 = int(max(0, min(h - 2 * half, y - half)))
+            region = img[y0:y0 + 2 * half, x0:x0 + 2 * half]
+            if region.size:
+                panel = cv2.resize(region, (size, size))
+    else:
+        panel = cv2.resize(img, (size, int(size * img.shape[0] / img.shape[1])))
+    panel = panel.copy()
+    cv2.rectangle(panel, (0, 0), (panel.shape[1], 20), (20, 20, 20), -1)
+    cv2.putText(panel, label, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    return panel
+
+
+def _final_selection_montage(review_frames, contacts, pivot_record):
+    """Full camera views of the final contacts, keeping the pivot in context."""
+    from irb120_perception.contact_graphics import contact_graphic, DepthDrawing
+    press = contacts.get("press") or {}
+    if not press.get("available"):
+        return None
+    panels = []
+    for cam in ("cam1", "cam2", "cam3"):
+        if cam not in review_frames:
+            continue
+        color, depth, info = review_frames[cam]
+        img = contact_graphic(color, depth, info, press, press.get("geometry"))
+        drawing = DepthDrawing(img, depth, info, occlusion=False)
+        for mode, label, shade in [("planar_push", "PUSH", (0, 230, 0)),
+                                   ("forward_tip", "FORWARD TIP", (0, 140, 255))]:
+            selected = contacts.get(mode) or {}
+            if not selected.get("available"):
+                continue
+            point = np.asarray(selected["point"])
+            drawing.marker(point, shade)
+            direction = (selected.get("geometry") or {}).get("direction", selected.get("direction"))
+            if direction is not None:
+                drawing.line(point, point+.04*np.asarray(direction), shade, arrow=True)
+            uv, z = drawing.project([point])
+            if z[0] > .05 and np.isfinite(uv).all():
+                offset = [8, 20] if mode == "forward_tip" else [8, -6]
+                cv2.putText(drawing.image, label, tuple(np.rint(uv[0]+offset).astype(int)),
+                            cv2.FONT_HERSHEY_SIMPLEX, .4, shade, 1, cv2.LINE_AA)
+        panels.append(drawing.image)
+    if not panels:
+        return None
+    height = min(p.shape[0] for p in panels)
+    return np.hstack([cv2.resize(p, (int(p.shape[1]*height/p.shape[0]), height)) for p in panels])
+
+
 def take_snapshot(node, episode, label: str = "") -> dict:
     """Run one perceive stage in `episode`; returns its snapshot.json record (ok=True on success)."""
     stage = episode.begin_stage("perceive", label=label)
@@ -213,7 +275,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     record = {"ok": False, "label": label, "min_ball_center_z": MIN_BALL_CENTER_Z}
     frames = {cam: {} for cam in CAMERAS}
     dbscan, cull = [], []
-    sam_masks, sam_colors = deque(maxlen=16), deque(maxlen=16)
+    sam_masks, sam_colors, sam_depths = deque(maxlen=16), deque(maxlen=16), deque(maxlen=16)
     sam_metadata = deque(maxlen=16)
     cam1_depths = deque(maxlen=90)
     subs = [node.create_subscription(PointCloud2, DBSCAN_TOPIC, dbscan.append, 10),
@@ -224,6 +286,11 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                                           lambda msg: sam_masks.append(msg), 10),
                  node.create_subscription(Image, SAM_COLOR_TOPIC,
                                           lambda msg: sam_colors.append(msg), 10),
+                 # Directly paired by the culler at the same moment as sam_color, before its
+                 # ~seconds-long SAM call -- preferred over the cam1_depths rolling-buffer
+                 # search below, which can miss by seconds once that call runs long.
+                 node.create_subscription(Image, SAM_DEPTH_TOPIC,
+                                          lambda msg: sam_depths.append(msg), 10),
                  node.create_subscription(String, SAM_METADATA_TOPIC,
                                           lambda msg: sam_metadata.append(msg), 10),
                  node.create_subscription(Image, "/realsense/aligned_depth_to_color/image_raw",
@@ -232,7 +299,6 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     for cam, ns in CAMERAS.items():
         for key, msg_type, topic in (("color", Image, f"/{ns}/color/image_raw"),
                                      ("depth", Image, f"/{ns}/aligned_depth_to_color/image_raw"),
-                                     ("infra1", Image, f"/{ns}/infra1/image_rect_raw"),
                                      ("info", CameraInfo, f"/{ns}/color/camera_info")):
             subs.append(node.create_subscription(
                 msg_type, topic, lambda m, c=cam, k=key: frames[c].__setitem__(k, m), qos_profile_sensor_data))
@@ -308,17 +374,16 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     kept = {tuple(p) for p in np.round(obj, 5)}
     culled = np.array([p for p in raw if tuple(np.round(p, 5)) not in kept]).reshape(-1, 3)
     bridge = CvBridge()
+    sam_images = None
     record['sam_mask'] = {'available': False, 'reason': 'no matching mask/color pair'}
     if cull_msg is not None:
         pair = [next((m for m in queue if m.header.stamp == cull_msg.header.stamp), None)
                 for queue in (sam_masks, sam_colors)]
         if all(m is not None for m in pair):
             mask, rgb = pair
-            ok_mask = cv2.imwrite(str(out / 'cam1_sam_mask.png'),
-                                 bridge.imgmsg_to_cv2(mask, desired_encoding='mono8'))
-            ok_rgb = cv2.imwrite(str(out / 'cam1_sam_color.png'),
-                                bridge.imgmsg_to_cv2(rgb, desired_encoding='bgr8'))
-            record['sam_mask'] = {'available': bool(ok_mask and ok_rgb),
+            sam_images = (bridge.imgmsg_to_cv2(mask, desired_encoding='mono8'),
+                          bridge.imgmsg_to_cv2(rgb, desired_encoding='bgr8'))
+            record['sam_mask'] = {'available': True, 'storage': 'in_memory_only',
                                   'cloud_stamp': _stamp(cull_msg),
                                   'stamp_semantics': 'cloud association, not RGB acquisition'}
             for message in sam_metadata:
@@ -327,16 +392,25 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                 except (ValueError, TypeError):
                     continue
                 if metadata.get('cloud_stamp') == [cull_msg.header.stamp.sec, cull_msg.header.stamp.nanosec]:
-                    closest = _closest_depth_frame(
+                    # Prefer the culler's own depth frame: it grabbed this at the same
+                    # moment as sam_color, before its SAM call, so the skew in
+                    # 'rgb_depth_delta_s' (already computed by the culler) reflects two
+                    # back-to-back topic reads -- not however long that call then took.
+                    paired = next((m for m in sam_depths if m.header.stamp == cull_msg.header.stamp), None)
+                    closest = paired if paired is not None else _closest_depth_frame(
                         [*cam1_depths, images.get('cam1', {}).get('depth')], metadata['color_stamp'])
+                    if paired is None and closest is not None:
+                        metadata['depth_stamp'] = _stamp(closest)
+                        metadata['rgb_depth_delta_s'] = abs(metadata['depth_stamp']-metadata['color_stamp'])
+                        metadata['depth_source'] = 'perception_snapshot nearest-buffered-frame fallback'
+                    elif paired is not None:
+                        metadata['depth_source'] = 'culler-paired at source'
                     if closest is not None:
                         sam_depth = bridge.imgmsg_to_cv2(closest, desired_encoding="passthrough")
                         if sam_depth.dtype != np.uint16:
                             sam_depth = np.nan_to_num(sam_depth * 1000.0).clip(0, 65535).astype(np.uint16)
                         np.savez_compressed(out / 'cam1_sam_depth.npz', depth_mm=sam_depth,
                                             stamp=_stamp(closest), encoding="16UC1")
-                        metadata['depth_stamp'] = _stamp(closest)
-                        metadata['rgb_depth_delta_s'] = abs(metadata['depth_stamp']-metadata['color_stamp'])
                     write_json_atomic(out / 'cam1_sam_metadata.json', metadata)
                     break
     review_frames = {}
@@ -348,9 +422,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         color = bridge.imgmsg_to_cv2(m["color"], desired_encoding="bgr8")
         depth = None
         cv2.imwrite(str(out / f"{cam}_color.png"), color)
-        if "infra1" in m:
-            infrared = bridge.imgmsg_to_cv2(m["infra1"], desired_encoding="passthrough")
-            cv2.imwrite(str(out / f"{cam}_infra1.png"), infrared)
+
         if "depth" in m:
             depth = bridge.imgmsg_to_cv2(m["depth"], desired_encoding="passthrough")
             if depth.dtype != np.uint16:  # 32FC1 metres -> mm
@@ -395,9 +467,15 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     experiment = os.environ.get("IRB120_EXPERIMENTAL_VIEW_CHECK", "apply")
     if experiment not in ("off", "shadow", "apply"):
         raise ValueError("IRB120_EXPERIMENTAL_VIEW_CHECK must be off, shadow, or apply")
+    rule = os.environ.get("IRB120_EXPERIMENTAL_PRESS_RULE", "top_support_v1")
+    # Whatever built contacts['press'] below (the plain selector, or this rule)
+    # is also what the RGB-pivot reseed further down must re-run -- an object
+    # whose only valid press needs the rule's inferred-top-surface candidates
+    # (e.g. a rounded cylinder cap with no clean observed upward normal) has no
+    # press at all under the plain selector, pivot override or not.
+    contacts_baseline_for_reseed = contacts
     if experiment != "off" and record["ok"]:
         from irb120_perception.experimental_view_check import evaluate
-        rule = os.environ.get("IRB120_EXPERIMENTAL_PRESS_RULE", "top_support_v1")
         proposed, evidence = evaluate(out, contacts,
             cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
                      if depth is not None}, rule=rule)
@@ -411,18 +489,21 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
             refresh_overlays(contacts)
 
-    # RGB pivot runs alongside the production cloud pivot by default. `shadow`
-    # records a candidate without using it; `apply` re-seeds select_contact_points'
-    # press pivot with a reviewable SAM/RGB boundary fit once it clears the gates
-    # in pivot_boundary_review.evaluate(), moving the selected press point itself
-    # (not just the arc's rotation center) -- set IRB120_RGB_PIVOT=apply to use it.
-    pivot_mode = os.environ.get("IRB120_RGB_PIVOT", "shadow")
+    # `apply` is the default: re-seed select_contact_points' press pivot with a
+    # reviewable SAM/RGB boundary fit once it clears the gates in
+    # pivot_boundary_review.evaluate(), moving the selected press point itself
+    # (not just the arc's rotation center). `shadow` records a candidate without
+    # using it (rollback/debug); `off` disables the RGB pivot path entirely.
+    pivot_mode = os.environ.get("IRB120_RGB_PIVOT", "apply")
     if pivot_mode not in ("off", "shadow", "apply"):
         raise ValueError("IRB120_RGB_PIVOT must be off, shadow, or apply")
     if pivot_mode != "off" and record["ok"]:
         from irb120_perception.pivot_boundary_review import (
             contacts_with_candidate_pivot, evaluate as evaluate_pivot_boundary)
-        pivot_report = evaluate_pivot_boundary(out)
+        pivot_report = evaluate_pivot_boundary(
+            out, snapshot_record=record, sam_images=sam_images, rule=rule if experiment != 'off' else 'top_support_v1',
+            cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
+                     if depth is not None})
         pivot_record = {"mode": pivot_mode,
                         "candidate_status": pivot_report.get("candidate_status"),
                         "reason": pivot_report.get("fallback_reason"),
@@ -435,12 +516,24 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         if pivot_mode == "apply" and pivot_report.get("candidate_status") == "reviewable":
             pivot = (pivot_report.get("geometry") or {}).get("candidate_pivot_base_m")
             try:
-                reseeded = _jsonable(select_contact_points(
-                    obj, min_ball_center_z=MIN_BALL_CENTER_Z, press_pivot_override=pivot))
+                if experiment != "off" and record["ok"]:
+                    from irb120_perception.experimental_view_check import evaluate as evaluate_view_check
+                    reseeded, reseeded_evidence = evaluate_view_check(
+                        out, contacts_baseline_for_reseed,
+                        cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
+                                 if depth is not None},
+                        rule=rule, render_overlays=True, press_pivot_override=pivot)
+                else:
+                    reseeded = _jsonable(select_contact_points(
+                        obj, min_ball_center_z=MIN_BALL_CENTER_Z, press_pivot_override=pivot))
                 if not (reseeded.get("press") or {}).get("available"):
                     raise ValueError("press contact unavailable after RGB pivot reseed")
                 write_json_atomic(out / "contacts_pre_rgb_pivot.json", contacts)
                 contacts = reseeded
+                if experiment != "off":
+                    write_json_atomic(out / "experimental_view_check.json", reseeded_evidence)
+                    write_json_atomic(out / "contacts_experimental_view_check.json", contacts)
+                write_json_atomic(out / "contacts_rgb_pivot.json", contacts)
                 write_json_atomic(out / "contacts.json", contacts)
                 record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
                 refresh_overlays(contacts)
@@ -466,6 +559,17 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             node.get_logger().warn(f"[snapshot] contact graphics: {exc}")
     graphics["elapsed_seconds"] = time.monotonic()-graphics_start
     record["contact_graphics"] = graphics
+
+    # One multi-camera strip for the combination actually used (SAM pivot +
+    # its press point when applied, else the cloud-pivot fallback) -- the
+    # same "trio" treatment press_review.py gives the pointcloud alternatives.
+    try:
+        montage = _final_selection_montage(review_frames, contacts, record.get("rgb_pivot") or {})
+        if montage is not None and cv2.imwrite(str(out / "final_selection.jpg"), montage):
+            record["final_selection"] = {"file": "final_selection.jpg"}
+    except (ValueError, KeyError, OSError, cv2.error) as exc:
+        node.get_logger().warn(f"[snapshot] final selection montage: {exc}")
+
     write_json_atomic(out / "snapshot.json", record)
     stage.end("ok" if record["ok"] else "failed",
               **{k: record[k] for k in ("points", "dbscan_points", "available", "bag_mb", "error") if k in record})

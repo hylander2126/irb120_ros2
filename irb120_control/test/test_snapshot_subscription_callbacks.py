@@ -48,9 +48,9 @@ def test_snapshot_subscriptions_use_inspectable_callbacks(monkeypatch, tmp_path)
     with pytest.raises(_SpinAborted):
         module.take_snapshot(node, episode)
 
-    # DBSCAN/cull + SAM mask/color/metadata + cam1 depth = at least 7 subscriptions,
+    # DBSCAN/cull + SAM mask/color/depth/metadata + cam1 depth = at least 8 subscriptions,
     # each of which must have survived rclpy's own signature check above.
-    assert len(node.callbacks) >= 7
+    assert len(node.callbacks) >= 8
 
 
 def test_closest_depth_frame_prefers_settle_snapshot_over_stale_deque():

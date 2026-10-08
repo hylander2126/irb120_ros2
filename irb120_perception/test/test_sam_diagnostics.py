@@ -25,9 +25,11 @@ def test_diagnostics_keep_exact_rgb_and_cloud_association(monkeypatch):
     cloud.header.stamp.nanosec = 678
     mask = np.array([[True, False, True], [False, True, False]])
     node = SimpleNamespace(_active=True, _predictor=object(), _latest_color=color,
+                           _latest_depth=None,
                            _info=object(), _last_run=None, min_interval=0,
                            base_frame='base_link', tf_buffer=Mock(),
-                           _mask_pub=Mock(), _color_pub=Mock(), _metadata_pub=Mock(),
+                           _mask_pub=Mock(), _color_pub=Mock(), _depth_pub=Mock(),
+                           _metadata_pub=Mock(),
                            _publish_results=Mock(), get_logger=lambda: Mock())
 
     def cull(points, rgb, info, tf):
@@ -47,3 +49,47 @@ def test_diagnostics_keep_exact_rgb_and_cloud_association(monkeypatch):
     assert metadata['cloud_stamp'] == [15, 678]
     np.testing.assert_array_equal(np.frombuffer(saved_mask.data, np.uint8).reshape(2, 3), mask*255)
     np.testing.assert_array_equal(node._publish_results.call_args.args[1][0], source)
+    assert metadata['depth_paired_at_source'] is False
+    assert 'depth_stamp' not in metadata
+    node._depth_pub.publish.assert_not_called()
+
+
+def test_depth_paired_at_the_same_moment_as_color_not_after_the_sam_call(monkeypatch):
+    """depth_msg must be read before _cull(), so its skew from color_msg reflects
+    two back-to-back topic reads, not however long the SAM inference call takes."""
+    import irb120_perception.object_detector_dbscan_sam_cull as module
+    source = np.array([[0., 0, 1], [.01, 0, 1], [.02, 0, 1]])
+    monkeypatch.setattr(module, 'pointcloud2_to_xyz', lambda msg: source)
+    color = Image(height=2, width=3, encoding='rgb8', step=9)
+    color.data = bytes(range(18))
+    color.header.frame_id = 'cam_optical'
+    color.header.stamp.sec, color.header.stamp.nanosec = 12, 345
+    depth = Image(height=2, width=3, encoding='16UC1', step=6)
+    depth.data = bytes(range(12))
+    depth.header.stamp.sec, depth.header.stamp.nanosec = 12, 100_000_345
+    cloud = PointCloud2()
+    cloud.header.frame_id = 'base_link'
+    cloud.header.stamp.sec, cloud.header.stamp.nanosec = 15, 678
+    mask = np.array([[True, False, True], [False, True, False]])
+    node = SimpleNamespace(_active=True, _predictor=object(), _latest_color=color,
+                           _latest_depth=depth,
+                           _info=object(), _last_run=None, min_interval=0,
+                           base_frame='base_link', tf_buffer=Mock(),
+                           _mask_pub=Mock(), _color_pub=Mock(), _depth_pub=Mock(),
+                           _metadata_pub=Mock(),
+                           _publish_results=Mock(), get_logger=lambda: Mock())
+
+    def cull(points, rgb, info, tf):
+        node._latest_depth = None  # simulate a stall/drop during the costly SAM call
+        node._diagnostic_mask = mask
+        return points
+
+    node._cull = cull
+    module.DBSCANSAMCuller._cloud_cb(node, cloud)
+    saved_depth = node._depth_pub.publish.call_args.args[0]
+    metadata = json.loads(node._metadata_pub.publish.call_args.args[0].data)
+    assert saved_depth.header.stamp == cloud.header.stamp
+    assert saved_depth.data == depth.data
+    assert metadata['depth_paired_at_source'] is True
+    assert metadata['depth_stamp'] == 12 + 100_000_345e-9
+    assert metadata['rgb_depth_delta_s'] == pytest.approx(0.1)

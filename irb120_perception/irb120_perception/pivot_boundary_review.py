@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from scipy.spatial import cKDTree
 
+from irb120_perception.contact_point_selector import select_contact_points
 from irb120_perception.depth_plane_audit import audit
 
 
@@ -184,7 +185,13 @@ def project(points, info):
 
 
 def review_overlay(color, pixels, accepted, info, report):
-    """Full frame plus magnified support, baseline and candidate in one artifact."""
+    """Full frame plus magnified support, baseline and candidate in one artifact.
+
+    Delineates the two pivot selectors (cloud vs. SAM/RGB candidate) and each
+    one's corresponding press contact (always chosen by the same pointcloud
+    heuristic in contact_point_selector; only the pivot it is scored against
+    differs), then labels whichever one is this report's final choice.
+    """
     canvas = color.copy()
     for pixel, keep in zip(pixels, accepted):
         cv2.circle(canvas, tuple(np.rint(pixel).astype(int)), 1,
@@ -199,6 +206,15 @@ def review_overlay(color, pixels, accepted, info, report):
         edge = project(geometry['pivot_edge_base_m'], info)
         cv2.line(canvas, tuple(edge[0]), tuple(edge[1]), (255, 220, 0), 1)
         cv2.drawMarker(canvas, tuple(pivot), (255, 220, 0), cv2.MARKER_TILTED_CROSS, 7, 1)
+    comparison = report.get('press_comparison') or {}
+    cloud_press = (comparison.get('cloud_pivot') or {}).get('press')
+    if cloud_press is not None:
+        cv2.drawMarker(canvas, tuple(project(cloud_press['point'], info)[0]), (255, 0, 255),
+                       cv2.MARKER_SQUARE, 10, 2)
+    sam_press = (comparison.get('sam_pivot') or {}).get('press')
+    if sam_press is not None:
+        cv2.drawMarker(canvas, tuple(project(sam_press['point'], info)[0]), (0, 255, 0),
+                       cv2.MARKER_STAR, 12, 2)
     h, w = canvas.shape[:2]
     if len(pixels):
         low = np.maximum(np.floor(pixels.min(axis=0)).astype(int)-[20, 25], 0)
@@ -210,17 +226,27 @@ def review_overlay(color, pixels, accepted, info, report):
         if crop.size:
             crop = cv2.resize(crop, (w, max(80, min(240, int(crop.shape[0]*w/crop.shape[1])))))
             canvas = np.vstack([canvas, crop])
-    banner = np.full((90, w, 3), 24, np.uint8)
-    lines = ['OFFLINE ONLY | green: screened | red: rejected',
-             'cyan: candidate tangent | magenta: existing cloud pivot',
+    final_choice = comparison.get('final_choice')
+    if final_choice == 'sam_pivot':
+        final_line = 'VALIDATED PROPOSAL: green star, SAM pivot + its press point'
+    elif final_choice == 'cloud_pivot' and cloud_press is not None:
+        final_line = ('VALIDATED PROPOSAL: magenta square, cloud pivot + its press point '
+                       f'(SAM candidate unusable: {comparison.get("sam_pivot_error") or "see status line"})')
+    else:
+        final_line = 'NO VALIDATED PRESS SELECTED (see candidate status)'
+    banner = np.full((135, w, 3), 24, np.uint8)
+    lines = ['OFFLINE ONLY | green dots: screened | red dots: rejected',
+             'cyan: SAM/RGB candidate tangent+pivot | magenta cross: cloud pivot',
+             'magenta square: press point via cloud pivot | green star: press point via SAM pivot',
+             final_line,
              report.get('candidate_status', 'unavailable') + ': ' + report['fallback_reason']]
     for i, line in enumerate(lines):
-        cv2.putText(banner, line[:95], (8, 22+i*27), cv2.FONT_HERSHEY_SIMPLEX,
-                    .43, (240, 240, 240), 1, cv2.LINE_AA)
+        cv2.putText(banner, line[:110], (8, 22+i*25), cv2.FONT_HERSHEY_SIMPLEX,
+                    .42, (240, 240, 240), 1, cv2.LINE_AA)
     return np.vstack([banner, canvas])
 
 
-def evaluate(snapshot):
+def evaluate(snapshot, *, snapshot_record=None, cameras=None, rule='top_support_v1', sam_images=None):
     snapshot = Path(snapshot)
     contacts = json.loads((snapshot/'contacts.json').read_text())
     baseline = ((contacts.get('press') or {}).get('geometry') or {}).get('pivot')
@@ -229,12 +255,15 @@ def evaluate(snapshot):
                   physics=dict(selected_pivot_base_m=baseline, support_type='cloud_fallback', confidence=0.),
                   evidence={}, candidate_status='unavailable',
                   fallback_reason='offline boundary review only; support fitting not validated')
-    color = cv2.imread(str(snapshot/'cam1_sam_color.png')) if (snapshot/'cam1_sam_color.png').exists() else None
+    color = (sam_images[1] if sam_images is not None else
+             cv2.imread(str(snapshot/'cam1_sam_color.png')) if (snapshot/'cam1_sam_color.png').exists() else None)
+    if sam_images is not None:
+        report['image'] = 'in_memory_sam_rgb'
     try:
         mask_path = snapshot/'cam1_sam_mask.png'
-        if not mask_path.exists():
+        if sam_images is None and not mask_path.exists():
             raise ValueError('missing saved SAM mask; collect a new snapshot')
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        mask = sam_images[0] if sam_images is not None else cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if mask is None or color is None or mask.shape != color.shape[:2]:
             raise ValueError('missing or incompatible SAM mask/color')
         info = json.loads((snapshot/'cam1_camera_info.json').read_text())
@@ -301,11 +330,14 @@ def evaluate(snapshot):
                                       x_shift_per_pixel_mm=pixel_sensitivity,
                                       x_shift_per_mm_table_height_mm=plane_sensitivity)
             reasons = []
-            timing = provenance.get('rgb_depth_delta_s', float('inf'))
-            if not np.isfinite(timing) or not 0 <= timing <= .04:
-                reasons.append('RGB-depth timing not verified within 40 ms')
-            if delta is not None and abs(delta[0]) > 20:
-                reasons.append('RGB/cloud pivot X disagreement exceeds 20 mm')
+            # The object is stationary throughout the perception window. Keep
+            # acquisition timing as evidence, not a rejection criterion.
+            report['evidence']['timing_policy'] = 'known_static_perception_window'
+            # No RGB/cloud disagreement gate: on rounded supports the cloud pivot is
+            # the one historically shown to be off by 20-32 mm while RGB stays within
+            # a few mm, so a large disagreement is more often evidence against cloud
+            # than against the candidate. Every applied candidate is still reviewed
+            # visually via final_selection.jpg before trusting the next run.
             if plane_sensitivity*table['p95_abs_mm'] > 10:
                 reasons.append('table residual amplified beyond 10 mm in X')
             report['candidate_status'] = 'rejected' if reasons else 'reviewable'
@@ -313,6 +345,58 @@ def evaluate(snapshot):
         except ValueError as exc:
             report['candidate_status'] = 'rejected'
             report['fallback_reason'] = str(exc)
+        # Both pivots feed the SAME press-point heuristic in contact_point_selector;
+        # only the pivot each is scored/edge-centered against differs. Recomputing
+        # the SAM-pivot press here (rather than reusing contacts_with_candidate_pivot's
+        # pivot-only swap) shows the press point actually moving with the pivot.
+        comparison = {}
+        baseline_contact = contacts.get('press') or {}
+        if baseline_contact.get('available') and baseline_contact.get('point') is not None:
+            comparison['cloud_pivot'] = dict(
+                pivot=baseline,
+                press=dict(point=baseline_contact['point'], ball_center=baseline_contact.get('ball_center')))
+        if 'candidate_pivot_base_m' in report['geometry']:
+            try:
+                snapshot_meta = snapshot/'snapshot.json'
+                meta = (snapshot_record if snapshot_record is not None else
+                        json.loads(snapshot_meta.read_text()) if snapshot_meta.exists() else {})
+                min_ball_center_z = meta.get('min_ball_center_z')
+                baseline_path = snapshot/'contacts_baseline.json'
+                view_check_mode = (meta.get('experimental_view_check') or {}).get('mode')
+                if view_check_mode not in (None, 'off') and baseline_path.exists():
+                    # contacts.json's press came from this rule (observed + any
+                    # inferred top-surface candidates, camera-view-check filtered),
+                    # not the plain selector below -- reseed through the same path
+                    # or an object whose only valid press needs those extra
+                    # candidates (e.g. a rounded cylinder cap with no clean observed
+                    # upward normal) spuriously reports no press at all.
+                    from irb120_perception.experimental_view_check import evaluate as evaluate_view_check
+                    comparison_cameras = {} if cameras is None else cameras
+                    for cam in (('cam1', 'cam2', 'cam3') if cameras is None else ()):
+                        info_path, depth_path = snapshot/f'{cam}_camera_info.json', snapshot/f'{cam}_aligned_depth.npz'
+                        if info_path.exists() and depth_path.exists():
+                            comparison_cameras[cam] = (np.load(depth_path)['depth_mm'], json.loads(info_path.read_text()))
+                    reseeded_contacts, _ = evaluate_view_check(
+                        snapshot, json.loads(baseline_path.read_text()), cameras=comparison_cameras,
+                        rule=rule, render_overlays=False, press_pivot_override=pivot.tolist())
+                    sam_press = reseeded_contacts.get('press') or {}
+                else:
+                    reseeded = select_contact_points(cloud, min_ball_center_z=min_ball_center_z,
+                                                     press_pivot_override=pivot)
+                    sam_press = reseeded.get('press') or {}
+                    if sam_press.get('available'):
+                        sam_press = dict(sam_press, point=sam_press['point'].tolist(),
+                                         ball_center=sam_press['ball_center'].tolist())
+                if not sam_press.get('available'):
+                    raise ValueError(sam_press.get('reason') or 'press unavailable with SAM pivot')
+                comparison['sam_pivot'] = dict(
+                    pivot=fit['pivot'],
+                    press=dict(point=sam_press['point'], ball_center=sam_press['ball_center']))
+            except ValueError as exc:
+                comparison['sam_pivot_error'] = str(exc)
+        comparison['final_choice'] = ('sam_pivot' if report['candidate_status'] == 'reviewable'
+                                      and 'sam_pivot' in comparison else 'cloud_pivot' if 'cloud_pivot' in comparison else 'unavailable')
+        report['press_comparison'] = comparison
         color = review_overlay(color, boundary, accepted, info, report)
     except (ValueError, KeyError, OSError, cv2.error) as exc:
         report['fallback_reason'] = str(exc)

@@ -5,11 +5,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import math
+import copy
 from typing import Sequence
 
 import rclpy
 from geometry_msgs.msg import Pose as GeometryPose
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import MoveGroup, ExecuteTrajectory
+from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
 from moveit_msgs.msg import (
     BoundingVolume,
@@ -23,6 +26,63 @@ from moveit_msgs.msg import (
 )
 from shape_msgs.msg import SolidPrimitive
 from .joint_verification import JointGoalVerifier
+
+
+# Fixed cable-neutral window. Never wrap angles or recenter on the current pose.
+CABLE_LIMIT = math.pi / 3
+
+
+def cable_path_constraints():
+    constraints = Constraints()
+    constraints.joint_constraints = [JointConstraint(
+        joint_name='joint_6', position=0., tolerance_above=CABLE_LIMIT,
+        tolerance_below=CABLE_LIMIT, weight=1.)]
+    return constraints
+
+
+def validate_cable_trajectory(trajectory):
+    joints = trajectory.joint_trajectory
+    if 'joint_6' not in joints.joint_names or not joints.points:
+        return False
+    index = joints.joint_names.index('joint_6')
+    previous = None
+    for point in joints.points:
+        if len(point.positions) != len(joints.joint_names):
+            return False
+        angle = point.positions[index]
+        if not math.isfinite(angle) or abs(angle) > CABLE_LIMIT:
+            return False
+        if previous is not None and abs(angle-previous) > CABLE_LIMIT:
+            return False
+        previous = angle
+    return True
+
+
+def execute_checked_plan(node, trajectory, timeout_sec):
+    if not validate_cable_trajectory(trajectory):
+        node.get_logger().error('Trajectory violates joint 6 cable limits (+/-60 deg); not executing')
+        return False
+    client = ActionClient(node, ExecuteTrajectory, '/execute_trajectory')
+    try:
+        if not client.wait_for_server(timeout_sec=5.):
+            return False
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        future = client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.)
+        if not future.done() or future.result() is None or not future.result().accepted:
+            return False
+        handle = future.result()
+        result = handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result, timeout_sec=timeout_sec)
+        if not result.done():
+            handle.cancel_goal_async()
+            node.get_logger().error('Trajectory execution timed out; cancellation requested')
+            return False
+        return (result.result() is not None and result.result().status == 4
+                and result.result().result.error_code.val == MoveItErrorCodes.SUCCESS)
+    finally:
+        client.destroy()
 
 
 def verify_joint_goal(node, joint_names, joint_positions, tolerance, timeout_sec=5.0):
@@ -77,7 +137,13 @@ def _wait_for_joint_states(node, timeout_sec: float = 10.0) -> bool:
     received = [False]
 
     def _cb(_msg: JointState) -> None:
-        received[0] = True
+        if 'joint_6' not in _msg.name:
+            return
+        index = list(_msg.name).index('joint_6')
+        if index >= len(_msg.position):
+            return
+        angle = _msg.position[index]
+        received[0] = math.isfinite(angle) and abs(angle) <= CABLE_LIMIT
 
     sub = node.create_subscription(JointState, "/joint_states", _cb, 1)
     end = node.get_clock().now().nanoseconds * 1e-9 + timeout_sec
@@ -86,7 +152,7 @@ def _wait_for_joint_states(node, timeout_sec: float = 10.0) -> bool:
     node.destroy_subscription(sub)
 
     if not received[0]:
-        node.get_logger().warn("Timed out waiting for /joint_states — planning may fail")
+        node.get_logger().warn("No measured joint 6 inside fixed +/-60 deg cable window; not planning")
         return False
     return True
 
@@ -106,6 +172,7 @@ def plan_and_execute_pose_goal(
     timeout_server_sec: float = 10.0,
     timeout_goal_send_sec: float = 15.0,
     timeout_result_sec: float = 30.0,
+    diagnostics: dict | None = None,
 ) -> bool:
     """Plan and execute a constrained pose goal using MoveGroup.
 
@@ -113,6 +180,9 @@ def plan_and_execute_pose_goal(
     provided, without requiring a full PoseGoalDefaults instance.
     """
 
+    if diagnostics is not None:
+        diagnostics.update(frame=base_frame, link=ee_link, target_position=list(target_position),
+                           target_orientation_xyzw=list(target_orientation), status='started')
     defaults = defaults or PoseGoalDefaults()
     if velocity_scale is not None:
         defaults = PoseGoalDefaults(
@@ -142,6 +212,8 @@ def plan_and_execute_pose_goal(
     node.get_logger().info(f"Moving to pose target: ({px}, {py}, {pz})")
 
     if not move_group_client.wait_for_server(timeout_sec=timeout_server_sec):
+        if diagnostics is not None:
+            diagnostics["status"] = "server_unavailable"
         node.get_logger().error("MoveGroup action server not available")
         return False
 
@@ -149,7 +221,8 @@ def plan_and_execute_pose_goal(
     # return INVALID_MOTION_PLAN (-10) if it has no current robot state yet,
     # which happens in the ~1-2s window after EGM connects and /joint_states
     # starts flowing.
-    _wait_for_joint_states(node, timeout_sec=10.0)
+    if not _wait_for_joint_states(node, timeout_sec=10.0):
+        return False
 
     pos_constraint = PositionConstraint()
     pos_constraint.header.frame_id = base_frame
@@ -192,6 +265,16 @@ def plan_and_execute_pose_goal(
     request = MotionPlanRequest()
     request.group_name = group_name
     request.goal_constraints = [goal_constraints]
+    request.path_constraints = cable_path_constraints()
+    # Keep the tool near its requested radial-out orientation during approach,
+    # not only at the destination. Joint 6 separately limits cable winding.
+    path_orientation = copy.deepcopy(ori_constraint)
+    path_orientation.parameterization = OrientationConstraint.ROTATION_VECTOR
+    path_orientation.absolute_x_axis_tolerance = CABLE_LIMIT
+    path_orientation.absolute_y_axis_tolerance = CABLE_LIMIT
+    path_orientation.absolute_z_axis_tolerance = CABLE_LIMIT
+    request.path_constraints.orientation_constraints = [path_orientation]
+
     request.num_planning_attempts = defaults.planning_attempts
     request.allowed_planning_time = defaults.allowed_planning_time
     request.max_velocity_scaling_factor = defaults.velocity_scaling_factor
@@ -209,31 +292,47 @@ def plan_and_execute_pose_goal(
 
     goal = MoveGroup.Goal()
     goal.request = request
+    goal.planning_options.plan_only = True
 
     future = move_group_client.send_goal_async(goal)
     rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
     if not future.done() or future.result() is None:
+        if diagnostics is not None:
+            diagnostics["status"] = "send_timeout_or_failure"
         node.get_logger().error("Failed to send MoveGroup goal")
         return False
 
     handle = future.result()
     if not handle.accepted:
+        if diagnostics is not None:
+            diagnostics["status"] = "goal_rejected"
         node.get_logger().error("MoveGroup goal rejected")
         return False
 
     result_future = handle.get_result_async()
     rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_result_sec)
     if not result_future.done() or result_future.result() is None:
+        if diagnostics is not None:
+            diagnostics["status"] = "result_timeout_or_failure"
         node.get_logger().error("MoveGroup result not received")
         return False
 
     result = result_future.result().result
+    if diagnostics is not None:
+        from rosidl_runtime_py.convert import message_to_ordereddict
+        diagnostics.update(status='result_received', action_status=result_future.result().status,
+                           moveit_error_code=result.error_code.val,
+                           planned_trajectory=message_to_ordereddict(result.planned_trajectory),
+                           trajectory_start=message_to_ordereddict(result.trajectory_start),
+                           executed_trajectory=message_to_ordereddict(result.executed_trajectory))
     if result.error_code.val != MoveItErrorCodes.SUCCESS:
         node.get_logger().error(f"MoveGroup failed: error_code={result.error_code.val}")
         return False
 
-    node.get_logger().info("Reached pose target.")
-    return True
+    success = execute_checked_plan(node, result.planned_trajectory, timeout_result_sec)
+    if diagnostics is not None:
+        diagnostics['execution_success'] = success
+    return success
 
 
 # Joint names for the IRB120 manipulator group (order matches robot URDF/SRDF)
@@ -296,6 +395,7 @@ def plan_and_execute_joint_goal(
     request = MotionPlanRequest()
     request.group_name = group_name
     request.goal_constraints = [goal_constraints]
+    request.path_constraints = cable_path_constraints()
     request.num_planning_attempts = planning_attempts
     request.allowed_planning_time = allowed_planning_time
     request.max_velocity_scaling_factor = velocity_scaling_factor
@@ -303,6 +403,7 @@ def plan_and_execute_joint_goal(
 
     goal = MoveGroup.Goal()
     goal.request = request
+    goal.planning_options.plan_only = True
 
     future = move_group_client.send_goal_async(goal)
     rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
@@ -326,6 +427,8 @@ def plan_and_execute_joint_goal(
         node.get_logger().error(f"MoveGroup joint goal failed: error_code={result.error_code.val}")
         return False
 
+    if not execute_checked_plan(node, result.planned_trajectory, timeout_result_sec):
+        return False
     if not verify_joint_goal(node, joint_names, joint_positions, joint_tolerance):
         return False
     node.get_logger().info("Reached joint target; measured joints verified.")

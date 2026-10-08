@@ -16,7 +16,8 @@ def squash_tick():
     fn = ast.parse('def tick(self, pz):\n    pass').body[0]
     fn.body = branch.body
     module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
-    env = {}
+    from irb120_perception.press_targets import PRESS_STANDOFF
+    env = {"PRESS_STANDOFF": PRESS_STANDOFF}
     for n in tree.body:
         if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in (
                 'SQUASH_STANDOFF', 'SQUASH_EXTRA_DESCENT_M', 'SQUASH_TIMEOUT_SEC',

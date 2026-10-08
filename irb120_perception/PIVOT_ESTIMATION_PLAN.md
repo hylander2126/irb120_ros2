@@ -124,6 +124,35 @@ For each known object:
 
 ## Current Status
 
+**Update (2026-10-08): promoted to the online default.** `IRB120_RGB_PIVOT` now
+defaults to `apply` despite the heart-geometry regression noted below (RGB
+lateral/X error worse than cloud for that case); this was an explicit decision
+to prefer the SAM pivot by default, not a resolution of that caveat. `shadow`
+remains available for rollback/comparison. The offline reviewer
+(`pivot_boundary_review.py`) now also renders each pivot's own press point
+(`press_comparison` in its JSON output) and labels the final-chosen one.
+
+**Update (2026-10-08): RGB/cloud disagreement gate removed.** The candidate
+used to be auto-rejected when it disagreed with the cloud pivot by more than
+20 mm in X. Removed: on rounded supports the cloud pivot is the one shown
+above to be off by 20-32 mm while RGB stays within a few mm, so a large
+disagreement was usually evidence against cloud, not the candidate -- the gate
+had it backwards for exactly the objects RGB helps most with.
+`pivot_delta_from_cloud_mm` is still recorded as diagnostic evidence. The
+remaining gates (RGB-depth timing, table-residual sensitivity) stand. This
+raises reliance on the per-snapshot visual review (`final_selection.jpg` /
+`cam1_pivot_boundary_review.png`) as the actual check before trusting a run,
+since one fewer automatic gate stands between a bad candidate and `apply`.
+
+Separately, the RGB-depth timing gate's main real-world failure mode (cross-
+process nearest-depth-frame search losing sync during the SAM culler's ~2 s
+inference call) was root-caused and fixed: the culler now pairs its own depth
+frame at the same instant it grabs color, before that call, and publishes it
+directly (`~sam_depth`) instead of leaving `perception_snapshot.py` to guess
+afterward. Both the culler and control nodes need a rebuild/restart to pick
+either change up.
+
+
 Experimental capture and offline review are implemented (2026-10-07). Production
 pivot/contact selection remains unchanged. Both ROS packages have been rebuilt;
 a running culler needs a restart before it emits the new diagnostics.
@@ -206,3 +235,15 @@ column extractor and vertical depth probes assume the current Cam1 view.
 Distorted depth is rejected because the reused table fitter assumes rectified
 aligned depth. Angled diagnostic edges must not be handed to the fixed-XZ
 controller without resolving that geometric mismatch.
+
+### Static perception and press fallback update — 2026-10-08
+
+RGB/depth timestamp separation is recorded but no longer rejects a SAM pivot:
+the object is known static during this perception window. Geometric support
+and table-fit checks still apply. If observed press candidates all fail
+validation, retry inferred cap candidates through the existing camera gates.
+The live pivot comparison receives in-memory snapshot settings and camera
+frames; it no longer depends on snapshot.json being written first. Applied
+SAM selection also updates the experimental evidence and review graphics.
+Offline replay of cylinder_r5/20261008_111502 accepts the SAM pivot and yields
+69 validated press candidates; no hardware motion was performed.
