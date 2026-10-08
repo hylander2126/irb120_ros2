@@ -341,7 +341,7 @@ def generate_launch_description():
 
     egm_cond_time_arg = DeclareLaunchArgument(
         'egm_cond_time',
-        default_value='180.0',
+        default_value='360.0',
         description=(
             'EGM CondTime in seconds (RobotWare-side hard stop — see egm_handler_node '
             'comment). 180s (3 min) default is the safe interactive value; raise it for '
