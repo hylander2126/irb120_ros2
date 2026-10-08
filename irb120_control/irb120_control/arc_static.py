@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Static-wrist force-informed arc-following squash-and-pull for the IRB120.
+"""Static-wrist force-informed arc-following press-pull tip for the IRB120.
 
-Squash phase: identical to squash_pull — descend until force reference is met.
+Squash phase: descend until the press force reference is met.
 Arc-follow phase: EE follows a circular arc whose:
   - center = the detected tipping pivot (press contact's pivot, world frame)
   - radius = the post-squash EE distance from that pivot
@@ -531,7 +531,7 @@ class ArcStatic(Node):
             response = "q"
         if response == "q":
             self._done = True
-            self.get_logger().warn("Operator aborted arc squash-pull sequence")
+            self.get_logger().warn("Operator aborted arc press-pull sequence")
             return False
         return True
 

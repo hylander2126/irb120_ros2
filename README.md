@@ -198,24 +198,27 @@ isolation (see the header comment in each file).
 
 ---
 
-## Squash-pull
+## Press-pull tip
 
 Requires T1 + T2 + T3 with `start_servo:=true`.
 
 ```bash
 ros2 launch irb120_control bringup_stack.launch.py start_servo:=true # default
 # then in another terminal:
-ros2 run irb120_control squash_pull
+ros2 run irb120_control arc_static flashlight          # one press-pull tip
+ros2 run irb120_control run_pipeline flashlight        # or the full tip + push pipeline
 ```
 
 The node:
-1. Uses MoveIt to plan to the pre-squash pose (position + orientation)
-2. Prompts for operator confirmation
-3. Descends with force feedback (halves speed on first contact)
-4. Pulls laterally while maintaining contact force via PI control
-5. Retracts to clearance height
+1. Takes a perception snapshot and uses its detected press contact and tipping pivot
+2. Uses MoveIt to plan to the pre-squash pose above the press contact
+3. Prompts for operator confirmation
+4. Presses down until the press force reference is met
+5. Pulls along an arc about the pivot while holding the radial press force (PI control),
+   then reverses the arc to set the object back down
+6. Retracts, returns home and takes another snapshot
 
-Tune constants at the top of [squash_pull.py](irb120_control/irb120_control/squash_pull.py).
+Tune constants at the top of [arc_static.py](irb120_control/irb120_control/arc_static.py).
 
 ---
 
@@ -244,7 +247,7 @@ ros2 run controller_manager spawner joint_trajectory_controller -c /controller_m
 
 | Package | Purpose |
 |---|---|
-| `irb120_control` | Hardware bringup, controllers, EGM handler, application nodes (keyboard jog, squash-pull, net/ft) |
+| `irb120_control` | Hardware bringup, controllers, EGM handler, application nodes (keyboard jog, press-pull tip, push, net/ft) |
 | `irb120_moveit_config` | MoveIt config (SRDF, kinematics, OMPL, Servo, joint limits) |
 | `irb120_perception` | Object detection (DBSCAN / SAM2), robot mask filter, perception debugger |
 | `irb120_handeye` | Hand-eye calibration bringup, pose runner, calibration data files, and per-camera bringup (driver + solved TF) for both RealSense cameras |

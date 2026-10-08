@@ -67,7 +67,7 @@ a MoveIt collision object during the approach only; `util/object_obstacle.py`).
 
 ```bash
 ros2 run irb120_control episode snapshot flashlight           # perception only, no motion
-ros2 run irb120_control run_pipeline flashlight --trials 10   # push + press-pull tip, asks for the outcome
+ros2 run irb120_control run_pipeline heart_a --trials 10      # tip then push, pauses between steps, asks for the outcome
 ros2 run irb120_control push flashlight                        # or step by step, into a new episode...
 ros2 run irb120_control arc_static flashlight --episode last   # ...and continue it
 ros2 run irb120_control arc_static_batch flashlight --trials 10
@@ -75,6 +75,32 @@ ros2 run irb120_control episode note "object slid ~5 mm sideways during push"
 ros2 run irb120_control episode outcome success --reason "tipped past theta* and settled back"
 ros2 run irb120_control episode show
 ```
+
+### Step order: tip first, then push
+
+`run_pipeline` tips before it pushes by default (`--order push-tip` for the
+other way round). Reasons:
+
+- The tip is non-destructive by design: it returns the object to rest, so the
+  push afterwards still sees roughly the original pose. The push moves the
+  object 80 mm and can yaw it, and the press contact and pivot are selected
+  for the pose the object started in. Non-destructive measurements first.
+- The push can tip the object instead of sliding it: its lowest allowed ball
+  center is 81 mm above the table (`MIN_BALL_CENTER_Z`), high relative to the
+  CoM of small objects.
+- The push measures the sliding force mu*m*g. Turning that into mu needs the
+  mass, which the tip estimates.
+
+The case for pushing first is that it might show which tip suits the object
+(forward/top-push vs press-pull). It gives a one-sided hint at best. A
+forward push at height h tips the object (rather than sliding it) when
+mu > x_c / h, which doesn't depend on mass and gets easier the higher the
+contact. So if the low push already tips the object, a forward tip from the
+higher forward contact would too. If the push slides, though, that says
+nothing about the higher contact, and the sliding force alone can't be turned
+into mu without the mass. A forward-tip attempt that detects sliding and
+falls back to press-pull may decide this more directly. Open TODO:
+`choose_tip()` in `orchestrator.py`.
 
 `estimate_params` reads episode logs as well as the older
 `<object>/push` and `<object>/arc_squash` folders.
@@ -126,7 +152,7 @@ PID and contact-loss handling remain active.
 5. Record the outcome with `ros2 run irb120_control episode outcome success
    --reason "your observations"` (choose the appropriate outcome).
 
-Use these staged commands for tip-then-push; `run_pipeline` still pushes first.
+`run_pipeline` runs this tip-then-push sequence (`--order push-tip` for the old order).
 If the object is manually repositioned, start a fresh snapshot/episode before
 using contacts again. Do not reuse a snapshot from before repositioning.
 

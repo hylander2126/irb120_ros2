@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared EGM start/stop helpers for motion scripts (push, squash_pull, etc.).
+"""Shared EGM start/stop helpers for motion scripts (push, arc_static press-pull, etc.).
 
 EGM is the underlying hardware interface that enables ALL robot motion,
 including JTC-based MoveIt trajectories. Scripts must call ensure_egm_active()

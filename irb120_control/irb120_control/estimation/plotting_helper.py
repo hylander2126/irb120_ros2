@@ -12,7 +12,7 @@ from matplotlib.ticker import AutoMinorLocator, ScalarFormatter
 
 def _title_to_filename(title: str, suffix: str = ".png") -> str:
     """Convert a figure title into a filesystem-safe filename."""
-    prefix = "../figures/squash_pull/"
+    prefix = "../figures/press_pull/"
     safe = re.sub(r"[{}$]", "", title.strip())
     safe = re.sub(r'[\\/:*?"<>|]+', "_", safe)
     safe = re.sub(r"\s+", "_", safe)
