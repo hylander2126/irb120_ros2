@@ -425,9 +425,6 @@ Visualization Manager:
       Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
-  Transformation:
-    Current:
-      Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
