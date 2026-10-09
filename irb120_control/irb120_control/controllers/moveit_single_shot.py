@@ -157,6 +157,50 @@ def _wait_for_joint_states(node, timeout_sec: float = 10.0) -> bool:
     return True
 
 
+def _plan_with_retries(node, move_group_client, goal, *, what, plan_retries,
+                       timeout_goal_send_sec, timeout_result_sec, diagnostics=None):
+    """Send a plan-only MoveGroup goal, replanning on a MoveIt planning failure.
+
+    Returns the last action result wrapper (``.status``, ``.result``), or None if
+    the goal could not be sent/accepted/answered. plan_only: a failed plan never
+    moves the robot, so replanning is safe. OMPL samples randomly, and
+    ValidateSolution re-checks the time-parameterized path, so a path that grazes
+    the object box (pre-push pose, ~10 mm clearance) can fail once
+    (INVALID_MOTION_PLAN) and pass on the next try.
+    """
+    wrapped = None
+    for attempt in range(1, plan_retries + 1):
+        future = move_group_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
+        if not future.done() or future.result() is None:
+            if diagnostics is not None:
+                diagnostics["status"] = "send_timeout_or_failure"
+            node.get_logger().error(f"Failed to send {what}")
+            return None
+
+        handle = future.result()
+        if not handle.accepted:
+            if diagnostics is not None:
+                diagnostics["status"] = "goal_rejected"
+            node.get_logger().error(f"{what} rejected")
+            return None
+
+        result_future = handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_result_sec)
+        if not result_future.done() or result_future.result() is None:
+            if diagnostics is not None:
+                diagnostics["status"] = "result_timeout_or_failure"
+            node.get_logger().error(f"{what} result not received")
+            return None
+
+        wrapped = result_future.result()
+        code = wrapped.result.error_code.val
+        if code == MoveItErrorCodes.SUCCESS:
+            return wrapped
+        node.get_logger().error(f"{what} failed: error_code={code} (plan {attempt}/{plan_retries})")
+    return wrapped
+
+
 def plan_and_execute_pose_goal(
     node,
     move_group_client,
@@ -169,6 +213,7 @@ def plan_and_execute_pose_goal(
     defaults: PoseGoalDefaults | None = None,
     velocity_scale: float | None = None,
     acceleration_scale: float | None = None,
+    plan_retries: int = 3,
     timeout_server_sec: float = 10.0,
     timeout_goal_send_sec: float = 15.0,
     timeout_result_sec: float = 30.0,
@@ -294,39 +339,21 @@ def plan_and_execute_pose_goal(
     goal.request = request
     goal.planning_options.plan_only = True
 
-    future = move_group_client.send_goal_async(goal)
-    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
-    if not future.done() or future.result() is None:
-        if diagnostics is not None:
-            diagnostics["status"] = "send_timeout_or_failure"
-        node.get_logger().error("Failed to send MoveGroup goal")
+    wrapped = _plan_with_retries(node, move_group_client, goal, what="MoveGroup pose goal",
+                                 plan_retries=plan_retries,
+                                 timeout_goal_send_sec=timeout_goal_send_sec,
+                                 timeout_result_sec=timeout_result_sec, diagnostics=diagnostics)
+    if wrapped is None:
         return False
-
-    handle = future.result()
-    if not handle.accepted:
-        if diagnostics is not None:
-            diagnostics["status"] = "goal_rejected"
-        node.get_logger().error("MoveGroup goal rejected")
-        return False
-
-    result_future = handle.get_result_async()
-    rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_result_sec)
-    if not result_future.done() or result_future.result() is None:
-        if diagnostics is not None:
-            diagnostics["status"] = "result_timeout_or_failure"
-        node.get_logger().error("MoveGroup result not received")
-        return False
-
-    result = result_future.result().result
+    result = wrapped.result
     if diagnostics is not None:
         from rosidl_runtime_py.convert import message_to_ordereddict
-        diagnostics.update(status='result_received', action_status=result_future.result().status,
+        diagnostics.update(status='result_received', action_status=wrapped.status,
                            moveit_error_code=result.error_code.val,
                            planned_trajectory=message_to_ordereddict(result.planned_trajectory),
                            trajectory_start=message_to_ordereddict(result.trajectory_start),
                            executed_trajectory=message_to_ordereddict(result.executed_trajectory))
     if result.error_code.val != MoveItErrorCodes.SUCCESS:
-        node.get_logger().error(f"MoveGroup failed: error_code={result.error_code.val}")
         return False
 
     success = execute_checked_plan(node, result.planned_trajectory, timeout_result_sec)
@@ -355,6 +382,7 @@ def plan_and_execute_joint_goal(
     acceleration_scaling_factor: float = 0.1,
     planning_attempts: int = 5,
     allowed_planning_time: float = 10.0,
+    plan_retries: int = 3,
     timeout_server_sec: float = 10.0,
     timeout_goal_send_sec: float = 15.0,
     timeout_result_sec: float = 30.0,
@@ -405,27 +433,13 @@ def plan_and_execute_joint_goal(
     goal.request = request
     goal.planning_options.plan_only = True
 
-    future = move_group_client.send_goal_async(goal)
-    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_goal_send_sec)
-    if not future.done() or future.result() is None:
-        node.get_logger().error("Failed to send MoveGroup joint goal")
+    wrapped = _plan_with_retries(node, move_group_client, goal, what="MoveGroup joint goal",
+                                 plan_retries=plan_retries,
+                                 timeout_goal_send_sec=timeout_goal_send_sec,
+                                 timeout_result_sec=timeout_result_sec)
+    if wrapped is None or wrapped.result.error_code.val != MoveItErrorCodes.SUCCESS:
         return False
-
-    handle = future.result()
-    if not handle.accepted:
-        node.get_logger().error("MoveGroup joint goal rejected")
-        return False
-
-    result_future = handle.get_result_async()
-    rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_result_sec)
-    if not result_future.done() or result_future.result() is None:
-        node.get_logger().error("MoveGroup joint result not received")
-        return False
-
-    result = result_future.result().result
-    if result.error_code.val != MoveItErrorCodes.SUCCESS:
-        node.get_logger().error(f"MoveGroup joint goal failed: error_code={result.error_code.val}")
-        return False
+    result = wrapped.result
 
     if not execute_checked_plan(node, result.planned_trajectory, timeout_result_sec):
         return False

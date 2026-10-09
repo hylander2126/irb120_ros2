@@ -340,6 +340,13 @@ push, or tip from) now lives entirely in `contact_point_selector.py` — see
 outputs, and parameters. It's called on the SAM-culled cloud by
 `irb120_control/util/perception_snapshot.py`, not launched as a node.
 
+The default press path then filters candidates through per-camera depth checks
+(`experimental_view_check.py`; usage and gates in `irb120_control/README.md`,
+"Camera-validated top-support selection"). Its `check_view` searches only a pixel
+window that provably contains the 12 mm neighborhood rather than back-projecting
+the whole depth image per candidate; results are identical and a perceive stage
+dropped from ~55 s to ~15 s (details: `../NOTES.md`, 2026-10-09).
+
 `object_detector` publishes `~/object_points`
 (`sensor_msgs/PointCloud2`, fields `x,y,z,label:int32`) — every detected
 object's raw cluster points in one cloud, tagged with the same integer id

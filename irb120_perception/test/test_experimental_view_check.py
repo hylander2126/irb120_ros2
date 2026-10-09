@@ -47,3 +47,54 @@ def test_missing_views_veto_copy_only(tmp_path):
     assert not result['press']['available']
     assert baseline['press']['available']
     assert result['planar_push']==baseline['planar_push']
+
+
+def _full_image_support(point, depth, info, table_offset=0.):
+    """Reference for check_view's 12 mm neighborhood, computed over the WHOLE
+    image (the pre-crop implementation), as (count, unit normal up to sign)."""
+    import cv2
+    K = np.asarray(info['K']); R = np.asarray(info['base_to_optical']['R'])
+    t = np.asarray(info['base_to_optical']['t'])
+    q = R@point+t
+    uv = np.rint((K@q)[:2]/q[2]).astype(int)
+    measured = depth[uv[1], uv[0]]/1000.
+    v, u = np.indices(depth.shape); z = depth.astype(float)/1000.
+    base = (np.stack([(u-K[0, 2])*z/K[0, 0], (v-K[1, 2])*z/K[1, 1], z], axis=-1)-t)@R
+    base[:, :, 2] -= table_offset
+    distances = np.linalg.norm(base-point, axis=-1)
+    mask = ((depth > 0) & (distances <= .012) & (np.abs(z-measured) <= .008)).astype(np.uint8)
+    _, labels = cv2.connectedComponents(mask, connectivity=4)
+    local = base[labels == labels[uv[1], uv[0]]]
+    local = local-local.mean(0)
+    return len(local), np.linalg.eigh(local.T@local)[1][:, 0]
+
+
+def test_cropped_neighborhood_matches_full_image():
+    """check_view crops to a pixel window around the projection for speed; the
+    support it finds must be exactly the full-image one, including candidates
+    at the image border, on a depth step, and with a table-plane correction."""
+    c, s = np.cos(np.radians(35)), np.sin(np.radians(35))
+    R = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])  # oblique view of the scene
+    info = dict(K=[[610, 0, 320], [0, 610, 240], [0, 0, 1]], D=[0]*5,
+                base_to_optical=dict(R=R.tolist(), t=[0., 0., 0.]))
+    v, u = np.indices((480, 640))
+    depth = (450+.08*u+.15*v).astype(np.uint16)       # sloped surface
+    depth[200:260, 300:380] -= 25                      # raised block: depth step
+    K = np.asarray(info['K'])
+    checked = 0
+    for (pu, pv) in [(0, 0), (639, 479), (5, 240), (320, 230), (300, 200), (379, 259),
+                     (340, 262), (600, 30), (150, 400)]:
+        z = depth[pv, pu]/1000.
+        optical = np.array([(pu-K[0, 2])*z/K[0, 0], (pv-K[1, 2])*z/K[1, 1], z])
+        for plane, offset in ((None, 0.), (np.array([0., 0., -.023]), -.003)):
+            point = R.T@optical+[0, 0, offset]
+            view = check_view(point, np.array([1., 0., 0.]), depth, info,
+                              table_plane=plane, table_z=-.02)
+            if 'count' not in view:  # exited before the neighborhood step
+                continue
+            count, normal = _full_image_support(point, depth, info, offset)
+            assert view['count'] == count
+            checked += 1
+            if view['usable']:
+                assert abs(abs(np.dot(view['normal'], normal))-1) < 1e-9
+    assert checked >= 10

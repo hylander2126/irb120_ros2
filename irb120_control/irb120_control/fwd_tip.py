@@ -38,6 +38,7 @@ from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.perception_snapshot import (
     begin_motion_stage, latest_object_cloud, lookup, take_snapshot,
 )
+from irb120_control.util.stall_guard import StallGuard
 from irb120_control.util.runtime_log_dir import (
     module_constants, save_ft_pose_log, save_run_metadata, start_recording, stop_recording,
 )
@@ -51,7 +52,7 @@ CONTROL_HZ = 100.
 SENSOR_TIMEOUT_SEC = .3
 LINE_TOLERANCE_M = .003
 ORIENTATION_TOLERANCE_RAD = math.radians(3.)
-STANDOFF_M = .04
+STANDOFF_M = .02  # ball-centre standoff; tip_targets raises it if needed to clear the padded box
 
 
 def rotate(q, vector):
@@ -90,6 +91,7 @@ class ForwardTip(Node):
         self.pre_ready = False
         self.egm_requested = False
         self._last_report = 0.
+        self._stall_guard = StallGuard()  # tells our own freezes from sensor dropouts
 
     def _now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -141,7 +143,7 @@ class ForwardTip(Node):
 
     def set_targets(self, contacts, cloud):
         ball, direction, pivot, pre = tip_targets(contacts.get('forward_tip') or {}, cloud, STANDOFF_M)
-        transform = lookup(self, BASE_FRAME, SERVO_FRAME)
+        transform = lookup(self, BASE_FRAME, SERVO_FRAME, timeout_sec=10.)
         if transform is None:
             raise ValueError('No world <- base_link transform')
         rotation, translation = transform
@@ -186,17 +188,30 @@ class ForwardTip(Node):
         self._servo_cmd.publish_zero()
         self.get_logger().error(f'Forward tip stopped: {reason}')
 
+    def _hold_after_stall(self, what):
+        # This tick ran late: the process froze and the sensor messages are still queued.
+        self.get_logger().warn(f'Control loop stalled in {self.motion.state}: {what} -- holding one tick')
+        self._servo_cmd.publish_zero()
+
     def _tick(self):
         if self.motion.done:
             self._servo_cmd.publish_zero()
             return
+        late = self._stall_guard.tick()
         now = time.monotonic()
-        if self._force_received is None or now - self._force_received > SENSOR_TIMEOUT_SEC:
+        force_age = float('inf') if self._force_received is None else now - self._force_received
+        if force_age > SENSOR_TIMEOUT_SEC:
+            if StallGuard.defer(late, force_age):
+                self._hold_after_stall(f'force {force_age * 1000:.0f} ms old')
+                return
             self._stop('stale_force')
             return
         try:
             pose = self._transform(EE_LINK)
         except (TransformException, ValueError):
+            if late:  # TF is queued behind the freeze too; a real dropout fails the next tick
+                self._hold_after_stall('pose missing or stale')
+                return
             self._stop('missing_or_stale_pose')
             return
         delta = pose[:3] - self._start_pose[:3]
@@ -239,6 +254,7 @@ class ForwardTip(Node):
         self.motion = TipMotion(self.config, expected, time.monotonic())
         self._used_serial = self._force_serial  # only post-tare, fresh samples arm contact
         self._recording = True
+        self._stall_guard.reset()
         timer = self.create_timer(1. / CONTROL_HZ, self._tick)
         try:
             while rclpy.ok() and not self.motion.done:

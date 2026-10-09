@@ -68,8 +68,9 @@ Travel/forward-time limits reverse and mark the attempt failed. Excess force,
 stale feedback, or height/orientation/lateral drift stop motion; home is skipped
 unless the finger's return to the pre-tip pose was verified. Runs save a
 `forward_tip` episode stage, F/T and pose NPZ, motion diagnostics, metadata and
-videos, followed by a snapshot after verified home. The automatic mode selector
-is still pending; `run_pipeline` continues to choose press-pull.
+videos, followed by a snapshot after verified home. `run_pipeline` chooses it
+when there is no press contact, or after a press-pull that failed or slipped
+(see "Which tip" below).
 
 ## Running experiments: episodes
 
@@ -93,6 +94,17 @@ after returning home. `push` pushes at the detected `planar_push` contact;
 `arc_static` squashes at the detected `press` contact and arcs about its pivot.
 The approach moves plan around the detected object (its padded bounding box is
 a MoveIt collision object during the approach only; `util/object_obstacle.py`).
+The move home plans around the same box (stretched `PUSH_DISTANCE` in +X after a
+push). The push pre-pose clears the padded box by only 10 mm, so OMPL's
+collision-check spacing (`longest_valid_segment_fraction` in
+`irb120_moveit_config/config/ompl_planning.yaml`, 0.001 ≈ 6 mm of finger travel)
+must stay well below that; at the old 0.005 (~30 mm) paths clipped the box and
+MoveIt's post-plan validation rejected them (`error_code=99999`,
+`INVALID_MOTION_PLAN`). As a backstop, pose and joint goals
+(`moveit_single_shot.py`) replan up to `plan_retries=3` times on a planning
+failure; this is plan-only and never moves the robot. These failures are MoveIt
+planning, not EGM: each motion script starts its own EGM session
+(`egm_cond_time`, default 360 s).
 
 ```bash
 ros2 run irb120_control episode snapshot flashlight           # perception only, no motion
@@ -127,9 +139,27 @@ mu > x_c / h, which doesn't depend on mass and gets easier the higher the
 contact. So if the low push already tips the object, a forward tip from the
 higher forward contact would too. If the push slides, though, that says
 nothing about the higher contact, and the sliding force alone can't be turned
-into mu without the mass. A forward-tip attempt that detects sliding and
-falls back to press-pull may decide this more directly. Open TODO:
-`choose_tip()` in `orchestrator.py`.
+into mu without the mass.
+
+### Which tip: press-pull first, forward tip as the fallback
+
+`choose_tip()` in `orchestrator.py` runs press-pull when the snapshot has a press
+contact, and forward tip when it doesn't. Press-pull goes first because it has
+the estimator and a controlled return arc, and its pivot is the near edge, which
+cam1/cam2 see. The forward-tip pivot is the far edge, which only cam3 sees and
+which is unvalidated.
+
+Whether press-pull works depends on the mass, which is unknown until it has run:
+the finger slips when the pull needed exceeds mu_finger times the press force
+(the monitor). So slip is detected afterwards, not predicted. After a press-pull,
+the orchestrator takes the spread of |ball - commanded pivot| over the last
+attempt's ARC/UNARC. Without slip the ball stays on a circle about the pivot. If
+the spread is over 4 mm (`estimate_params.NOSLIP_TOL_MM`), or the press-pull
+failed, it offers a forward tip on the snapshot taken after it. In step mode,
+`s` skips that fallback. `--tip press|forward` forces one tip, with no fallback.
+
+Forward tip does not detect sliding: an object with x_c / h above the table mu
+is pushed up to its 80 mm travel limit.
 
 `estimate_params` reads episode logs as well as the older
 `<object>/push` and `<object>/arc_squash` folders.
@@ -215,6 +245,15 @@ depth is corrected by its locally fitted table plane before the 5 mm comparison.
 Per-camera timestamp agreement is not checked; use a stationary object. Camera
 checks use the saved proposed direction, not a new robot trajectory.
 
+Performance: the view check runs up to three times per snapshot (initial
+selection, the RGB-pivot review's comparison, and the RGB-pivot reseed). Each
+`check_view` call back-projects only a pixel window around the candidate's
+projection that provably contains every pixel within 12 mm (plus any table-plane
+correction), instead of the whole depth image. Results are identical to the
+full-image computation. This cut a perceive stage from ~55 s to ~15 s; the
+remainder is mostly DBSCAN settling and the short bag. Derivation and
+measurements: `../NOTES.md` (2026-10-09).
+
 Offline replay (writes only experimental artifacts, not contacts.json):
 
 ```bash
@@ -226,15 +265,17 @@ path is now the runtime default. No controller modifications are involved.
 
 ## RGB boundary pivot trial
 
-New snapshots run the Cam1 RGB boundary estimator in shadow mode by default.
-The normal `contacts.json` remains the cloud-pivot path. When the RGB candidate
-passes its timing, depth, table-plane, connectivity, fit, and disagreement
-gates, the stage also contains:
+New snapshots run the Cam1 RGB boundary estimator in apply mode by default
+(`IRB120_RGB_PIVOT=apply`). When the RGB candidate is `reviewable`, the press is
+re-selected against that pivot (same candidate pipeline and view check) and
+written to `contacts.json`; the cloud-pivot result is kept in
+`contacts_pre_rgb_pivot.json`. `IRB120_RGB_PIVOT=shadow` records the candidate
+without applying it. The stage contains:
 
 - `pivot_boundary_review.json` — both pivots and all gate evidence;
 - `cam1_pivot_boundary_review.png` — magnified comparison overlay;
-- `contacts_rgb_pivot.json` — the same selected press and ball center, with only
-  the arc pivot replaced by the RGB candidate.
+- `contacts_rgb_pivot.json` — the contacts with the RGB pivot (identical to
+  `contacts.json` when applied).
 
 Collect and inspect a motion-free snapshot first:
 
@@ -260,7 +301,7 @@ The default path filters all geometrically feasible press candidates
 before scoring. Relaxed/topmost fallbacks are disabled only in experimental mode.
 Connected 8/12 mm depth neighborhoods must give consistent normal signs and
 angles. Candidate evidence and color overlays are saved for every camera.
-See `../EXPERIMENT_RESUME.md` for implementation details, the live shadow test,
+See `../RESUME_EXPERIMENT_AGENTS.md` for implementation details, the live shadow test,
 remaining execution limitations, and tomorrow's resume instructions.
 
 ### Preview the saved press before motion

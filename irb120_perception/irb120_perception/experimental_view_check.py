@@ -69,7 +69,22 @@ def check_view(point, direction, depth, info, table_plane=None, table_z=TABLE_Z)
         return dict(usable=False, reason='missing depth or depth mismatch/occlusion',
                     depth_residual_mm=float(residual * 1000),
                     table_offset_mm=table_offset*1000)
-    v, u = np.indices(depth.shape); z = depth.astype(float) / 1000.
+    # Only pixels whose base point can land within 12 mm of `point` matter.
+    # Back-projecting the whole image here (once per candidate per camera)
+    # dominated snapshot time, so crop to a conservative window: a point
+    # within rho of q has |X/Z - qx/qz| <= rho*(qz+|qx|)/((qz-rho)*qz), same
+    # for Y. The table correction shifts the sphere by at most |table_offset|.
+    # Every mask pixel lies inside the window, so components (and results)
+    # are identical to the full-image computation.
+    rho = .012+abs(table_offset)
+    if q[2] <= rho:
+        return dict(usable=False, reason='behind camera or unsupported distorted depth')
+    half = [int(np.ceil(K[i, i]*rho*(q[2]+abs(q[i]))/((q[2]-rho)*q[2])))+2 for i in (0, 1)]
+    u0, u1 = max(uv[0]-half[0], 0), min(uv[0]+half[0]+1, depth.shape[1])
+    v0, v1 = max(uv[1]-half[1], 0), min(uv[1]+half[1]+1, depth.shape[0])
+    depth = depth[v0:v1, u0:u1]
+    uv = uv-[u0, v0]
+    v, u = np.indices(depth.shape); u += u0; v += v0; z = depth.astype(float) / 1000.
     optical = np.stack([(u-K[0, 2])*z/K[0, 0], (v-K[1, 2])*z/K[1, 1], z], axis=-1)
     base = (optical-t) @ R
     if table_plane is not None:

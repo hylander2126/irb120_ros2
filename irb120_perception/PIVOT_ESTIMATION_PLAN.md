@@ -176,8 +176,9 @@ a running culler needs a restart before it emits the new diagnostics.
   trial; it is not a calibrated confidence.
 - `cam1_pivot_boundary_review.png` shows screened/rejected contour samples,
   the candidate tangent/pivot in cyan, the original cloud pivot in magenta,
-  and a magnified boundary panel. No `contacts.json` changes are made.
-- New snapshots run this shadow path by default and write
+  and a magnified boundary panel. No `contacts.json` changes are made
+  (shadow mode; superseded by the 2026-10-08 apply-by-default update above).
+- (Pre-2026-10-08 behavior, now `IRB120_RGB_PIVOT=shadow`:) snapshots ran this shadow path and wrote
   `contacts_rgb_pivot.json` only for a reviewable result. `arc_static --pivot
   rgb` opts one press-and-pull trial into that file; `--pivot cloud` remains the
   default and uses `contacts.json`. The RGB variant changes only the arc pivot,

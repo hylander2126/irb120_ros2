@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from irb120_control.util.forward_tip_motion import TipConfig, TipMotion
+from irb120_control.util.stall_guard import StallGuard
 
 SOURCE = Path(__file__).parents[1] / 'irb120_control' / 'fwd_tip.py'
 
@@ -20,9 +21,9 @@ def methods():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'ForwardTip')
     keep = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'rotate']
     keep += [n for n in cls.body if isinstance(n, ast.FunctionDef)
-             and n.name in ('_tick', '_on_wrench')]
+             and n.name in ('_tick', '_on_wrench', '_hold_after_stall')]
     env = dict(np=np, math=math, time=SimpleNamespace(monotonic=lambda: 1.),
-               TransformException=LookupError, WrenchStamped=object,
+               TransformException=LookupError, WrenchStamped=object, StallGuard=StallGuard,
                BASE_FRAME='world', EE_LINK='finger_ball_center', SENSOR_TIMEOUT_SEC=.3,
                LINE_TOLERANCE_M=.003, ORIENTATION_TOLERANCE_RAD=math.radians(3.),
                WRENCH_AXES_FRAME=WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME=WRENCH_HEADER_FRAME)
@@ -46,6 +47,8 @@ def fake_node():
     node._pose_log = []
     node._motion_log = []
     node._now_s.return_value = 1.
+    node._stall_guard = StallGuard()
+    node._hold_after_stall = lambda what: methods()['_hold_after_stall'](node, what)
     return node
 
 
@@ -72,6 +75,29 @@ def test_tick_stops_on_stale_data_or_pose_drift(failure):
     methods()['_tick'](node)
     node._stop.assert_called_once()
     node._servo_cmd.publish_twist.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', ['force', 'tf'])
+def test_late_tick_holds_one_tick_instead_of_stopping(failure):
+    """A tick that ran late means this process froze; its queued data isn't judged stale."""
+    node = fake_node()
+    node._stall_guard.tick = lambda: True
+    if failure == 'force':
+        node._force_received = .6  # 0.4 s old: stale, but within the defer cap
+    else:
+        node._transform.side_effect = LookupError('stale')
+    methods()['_tick'](node)
+    node._stop.assert_not_called()
+    node._servo_cmd.publish_zero.assert_called_once()
+    node._servo_cmd.publish_twist.assert_not_called()
+
+
+def test_late_tick_still_stops_on_force_older_than_the_defer_cap():
+    node = fake_node()
+    node._stall_guard.tick = lambda: True
+    node._force_received = 1. - .6
+    methods()['_tick'](node)
+    node._stop.assert_called_once_with('stale_force')
 
 
 def test_wrench_is_rotated_from_its_declared_frame_before_projection():

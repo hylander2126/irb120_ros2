@@ -119,15 +119,24 @@ def lookup(node, target: str, source: str, timeout_sec: float = 2.0):
     if getattr(node, "_tf_buffer", None) is None:
         node._tf_buffer = Buffer()
         node._tf_listener = TransformListener(node._tf_buffer, node)
-    deadline = time.monotonic() + timeout_sec
+    start = time.monotonic()
+    next_report = start + 0.5  # only speak up if the wait is noticeable
     while True:
         try:
             tf = node._tf_buffer.lookup_transform(target, source, rclpy.time.Time())
             t, q = tf.transform.translation, tf.transform.rotation
+            if next_report > start + 0.5:
+                node.get_logger().info(f"TF {target} <- {source} received after {time.monotonic() - start:.1f}s")
             return _quat_matrix(q.x, q.y, q.z, q.w), np.array([t.x, t.y, t.z])
         except Exception:
-            if time.monotonic() > deadline:
+            now = time.monotonic()
+            if now - start > timeout_sec:
+                node.get_logger().error(f"TF {target} <- {source} not available after {timeout_sec:.1f}s")
                 return None
+            if now >= next_report:
+                node.get_logger().info(
+                    f"Waiting for TF {target} <- {source} ({now - start:.1f}/{timeout_sec:.0f}s)...")
+                next_report = now + 1.0
             rclpy.spin_once(node, timeout_sec=0.05)
 
 
@@ -579,11 +588,12 @@ def take_snapshot(node, episode, label: str = "") -> dict:
 
 
 def latest_contacts(episode, filename="contacts.json"):
-    """Contacts variant from the last successful perceive stage, else None."""
-    stages = episode.load()["stages"]
-    if not stages or stages[-1]["kind"] != "perceive" or stages[-1]["status"] != "ok":
+    """Contacts variant from the last successful perceive stage, else None -- also None if
+    the robot has moved since (aborted motion stages don't count; see Episode.last_scene_stage)."""
+    stage = episode.last_scene_stage()
+    if stage is None or stage["kind"] != "perceive":
         return None
-    path = episode.path / stages[-1]["dir"] / filename
+    path = episode.path / stage["dir"] / filename
     if not path.exists():
         return None
     with open(path) as f:

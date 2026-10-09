@@ -2,8 +2,14 @@
 import numpy as np
 import pytest
 
-o3d = pytest.importorskip('open3d')
-from irb120_control.tsdf_mesh import clean_mesh
+# A module-level pytest.importorskip here skipped the WHOLE control test
+# session (every other file reported nothing), so skip per test instead.
+try:
+    import open3d as o3d
+    from irb120_control.tsdf_mesh import clean_mesh
+except ImportError:
+    o3d = None
+pytestmark = pytest.mark.skipif(o3d is None, reason='open3d not installed')
 
 
 def test_rejects_flying_fragment_and_closes_missing_surface():

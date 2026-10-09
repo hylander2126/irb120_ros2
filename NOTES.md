@@ -6,6 +6,88 @@ cost time to discover and would cost time again.
 
 ---
 
+## 2026-10-09 — Perceive ~55 s → ~15 s; push "EGM bail" was a MoveIt plan failure
+
+### Perceive time was `check_view`, not the cameras
+
+File mtimes in a perceive stage give the real timeline. In episode
+`tipT_a/20261009_162353/00_perceive` (55 s total): ~6.5 s DBSCAN settle + SAM
+cull (`wait_s`), ~4.5 s short bag, ~2 s save, then **~42 s of post-processing**:
+view check 15 s → pivot boundary review 14 s → view-check reseed 13 s.
+
+All three are the same `experimental_view_check.evaluate()` (the pivot review's
+SAM-pivot comparison and the RGB-pivot reseed each run it again), and almost all of
+its time was `check_view()`. For every press candidate × camera (~700 calls per
+pass) that passed the 5 mm depth gate, it back-projected the **entire 640×480 depth
+image** into base_link just to find the pixels within 12 mm of the candidate.
+Offline it is ~5 s per pass; live, with the cameras/SAM/MoveIt sharing the CPU, ~13 s.
+
+Fix (`irb120_perception/experimental_view_check.py`, `check_view`): crop to a pixel
+window around the projected candidate before back-projecting. With `q` the
+candidate in the optical frame and `rho = 12 mm + |table_offset|` (the table
+correction shifts base z by a constant), any point within `rho` of `q` satisfies
+
+    |X/Z − qx/qz| ≤ rho·(qz + |qx|) / ((qz − rho)·qz)      (same for Y)
+
+so the half-window is `ceil(f · that) + 2` px (+2 covers pixel rounding),
+clipped to the image. Every pixel that can pass the 12 mm test lies inside the
+window, so the connected component, the 8/12 mm PCA fits, and every returned
+value are **identical** to the full-image computation (pixel order is preserved,
+so even the floating-point sums match). Gates and thresholds are unchanged.
+
+Verified: on both perceive stages of that episode, with and without the pivot
+override, old vs new `evaluate()` give byte-identical contacts and per-candidate
+evidence; one pass went 5.3 s → 0.13 s. Regression test:
+`test_cropped_neighborhood_matches_full_image` (image borders, a depth step, and a
+table-plane correction against a full-image reference).
+
+What remains (~13–15 s) is mostly fixed cost: the DBSCAN accumulator settle
+(`SETTLE_CLOUDS`), `ros2 bag record` start-up for the 1 s bag
+(`BAG_SECONDS = 0` in `perception_snapshot.py` saves ~4 s if the bag isn't needed),
+and the detector on/off service calls.
+
+### The push "EGM went idle" abort was a rejected home plan
+
+The run aborted with `MoveGroup joint goal failed: error_code=99999` →
+"no usable snapshot after it". `move_group` log at that moment:
+`ValidateSolution … INVALID_MOTION_PLAN`, contact between `detected_object` and
+`ball` at waypoint 9/64. The "EGM feedback lost" line 60 ms later is push's own
+`deactivate_egm()`. EGM had been up 43 s; `egm_cond_time` defaults to 360 s and
+every motion script starts its own EGM session, so perceive time does not count
+against it.
+
+Same failure as 2026-09-25 below: home is planned from the pre-push pose, close to
+the object box stretched `PUSH_DISTANCE` in +X; OMPL accepts a path its coarser
+checking thinks is clear, the denser post-plan validation rejects it. RRTConnect is
+random, so a replan usually passes. `plan_and_execute_joint_goal` now replans up to
+`plan_retries=3` times (plan-only requests, so a failed plan never moves the
+robot). This covers every home move (`push`, `arc_static`, `fwd_tip`).
+
+**Same day, second run:** the push *approach* (a pose goal, not covered by the
+above) failed the same way: `ValidateSolution` contact `detected_object`/`ball` at
+waypoint 49/58, right before the pre-push pose. Root cause of both: OMPL's
+`longest_valid_segment_fraction: 0.005` × the joint-space extent (~10.5 rad from the
+URDF limits) = 0.053 rad between collision checks, ~30 mm of finger travel at full
+reach. The pre-push ball deliberately clears the padded box by only 10 mm
+(`push_geometry.APPROACH_CLEARANCE`), so OMPL routinely returned paths that clipped
+the box between its checks, and the denser post-plan validation rejected them.
+Fixes: `irb120_moveit_config/config/ompl_planning.yaml` now uses 0.001 (~6 mm
+spacing, well under the 10 mm clearance; needs a bringup/move_group restart), and
+pose goals share the replan helper (`_plan_with_retries`) as a backstop. Watch
+`Calling Planner 'OMPL'` → `AddTimeOptimalParameterization` in the move_group log for
+planning time (5x the collision checks per edge; the push approach already took
+~4.6 s at 0.005 with its orientation path constraint, `allowed_planning_time` 10 s).
+
+### Test suite note
+
+`irb120_control/test/test_tsdf_mesh.py` used a module-level
+`pytest.importorskip('open3d')`; without open3d that skipped the **entire** control
+test session ("1 skipped", nothing else reported), which hid stale mocks in
+`test_egm_startup.py` and `test_joint_goal_result.py`. It now skips per test.
+`test_flake8`/`test_pep257` still fail on package-wide pre-existing style issues.
+
+---
+
 ## 2026-10-05 — Proposed confidence-scored digital twin (pending prior-work review)
 
 The current RViz twin is only a rendered view of the latest SAM-culled cloud and
@@ -39,6 +121,11 @@ Not timing. `move_group` found a path home (0.04 s) but `ValidateSolution` rejec
 home move starts at the pre-push pose, only ~14 mm from the object's padded collision box;
 OMPL's coarser collision checking accepted a path that clips the box corner, and the finer
 post-plan validation caught it. Failed safe (no motion).
+
+**Update 2026-10-09:** recurred (home and the push approach) and aborted pipeline
+episodes. Root cause was OMPL's coarse collision-check spacing (~30 mm); fixed in
+`ompl_planning.yaml`, with replanning as a backstop. See the entry above. The
+geometric ideas below remain the fallback if that is not enough.
 
 Ideas:
 - Retreat straight back in -X (Cartesian, e.g. an extra 50 mm on the return) before planning home.

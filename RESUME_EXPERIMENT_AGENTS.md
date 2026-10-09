@@ -1,8 +1,17 @@
 # Resume: experimental camera-filtered press selection, 2026-10-05
 
+> **Status (2026-10-09):** historical resume notes. The camera-validated
+> top-support selection described here is now the runtime **default**
+> (`IRB120_EXPERIMENTAL_VIEW_CHECK=apply`, `IRB120_EXPERIMENTAL_PRESS_RULE=top_support_v1`);
+> `off` restores baseline selection. Current usage: `irb120_control/README.md`,
+> "Camera-validated top-support selection (default)". `check_view` now back-projects
+> only a pixel window around each candidate (identical results, ~40x faster); see
+> `NOTES.md` 2026-10-09.
+
 ## Implemented
 
-Temporary experimental_view_check_v2; off by default. Same environment switch:
+Temporary experimental_view_check_v2; originally off by default (now apply, see
+status above). Same environment switch:
 IRB120_EXPERIMENTAL_VIEW_CHECK=shadow|apply|off. Shadow saves proposed contacts
 without changing executable contacts.json. Apply writes the experimental press
 selection there. Existing snapshots are not retroactively changed.
@@ -14,7 +23,8 @@ fallback is allowed in experimental mode. No logistic regression or controller
 changes. Original fused normal/ball-center calculation remains unchanged.
 
 Each camera uses a 4-connected neighborhood around the candidate's projected
-pixel, within 12 mm of its 3-D location and 8 mm of pixel depth. Fits at 8 and
+pixel, within 12 mm of its 3-D location and 8 mm of pixel depth (searched in a
+pixel window that provably contains that 12 mm ball, not the whole image). Fits at 8 and
 12 mm must each have 20 samples and pass planarity; normal angles must agree
 within 20 degrees and dot-product signs must match. Existing 5 mm visibility,
 25 degree intercamera agreement, and strict dot <= 0 rules remain. One usable
@@ -97,4 +107,5 @@ remain valid, depth occlusion abstention, and normal disagreement/rejection.
 
 Discard experiment by removing experimental_view_check.py, its tests, the
 experimental_press_filter hook, and the marked snapshot experiment block.
-Default behavior remains unchanged when no switch is set.
+With no switch set the view check now runs in apply mode (see status above);
+set IRB120_EXPERIMENTAL_VIEW_CHECK=off for the baseline selector.

@@ -61,6 +61,7 @@ from irb120_control.util.motion_geometry import (
     quat_to_pitch,
     radial_force_xz,
 )
+from irb120_control.util.stall_guard import StallGuard
 from irb120_control.util.runtime_log_dir import (
     load_object_params,
     module_constants,
@@ -239,6 +240,7 @@ class ArcStatic(Node):
         self._have_force = False
         self._last_wrench_s: float | None = None  # node-clock receipt time of the latest sample
         self._abort_reason: str | None = None
+        self._stall_guard = StallGuard()  # tells our own freezes from F/T dropouts
         self._contact_felt = False
         self._last_tf_warn_time = 0.0
         self._state_start_time = 0.0
@@ -364,7 +366,7 @@ class ArcStatic(Node):
         if not press["available"] or pivot is None:
             self.get_logger().error(f"No press contact/pivot: {press.get('reason')} -- not moving.")
             return False
-        tf = lookup(self, BASE_FRAME, "base_link")
+        tf = lookup(self, BASE_FRAME, "base_link", timeout_sec=10.0)
         if tf is None:
             self.get_logger().error(f"No TF {BASE_FRAME} <- base_link -- not moving.")
             return False
@@ -716,10 +718,17 @@ class ArcStatic(Node):
             self._servo_cmd.publish_zero(self._state, self._force_z)
             return
 
+        late = self._stall_guard.tick()
         # RETRACT is open-loop upward motion and needs no force, so it is the safe exit.
         if self._state != "RETRACT" and self._wrench_stale():
             age = (float("inf") if self._last_wrench_s is None
                    else self._now_s() - self._last_wrench_s)
+            if StallGuard.defer(late, age):
+                # This tick ran late: the process froze and the wrenches are still queued.
+                self.get_logger().warn(
+                    f"Control loop stalled in {self._state}: F/T {age * 1000:.0f} ms old -- holding one tick")
+                self._servo_cmd.publish_zero(self._state, self._force_z)
+                return
             self.get_logger().error(
                 f"F/T stream stale in {self._state}: no wrench for {age:.2f} s "
                 f"(limit {FT_STALE_SEC:.2f} s) -- retracting without retry")
@@ -937,6 +946,7 @@ class ArcStatic(Node):
     def run_attempt(self) -> None:
         """Run the FSM until its retract finishes."""
         self._motion_phase = 'interaction'
+        self._stall_guard.reset()
         timer = self.create_timer(1.0 / CONTROL_HZ, self._tick)
         try:
             while rclpy.ok() and not self._done:
@@ -1162,6 +1172,7 @@ def main(args=None) -> int:
             stage.end("ok" if node._completed and home_ok else "failed" if motion_started else "aborted",
                       completed=node._completed, first_attempt_completed=node._completed and attempt == 1,
                       attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
+                      abort_reason=node._abort_reason,
                       home_verification=getattr(node, "_last_joint_goal_verification", None),
                       pre_squash=node._pre_squash_pos, arc_center=node._arc_center)
             if home_ok and rclpy.ok():

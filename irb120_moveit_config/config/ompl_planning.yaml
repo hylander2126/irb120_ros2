@@ -20,4 +20,9 @@ manipulator:
   planner_configs:
     - RRTConnectkConfigDefault
   projection_evaluator: joints(joint_1,joint_2)
-  longest_valid_segment_fraction: 0.005
+  # Collision-check spacing along each OMPL edge, as a fraction of the joint-space
+  # extent (~10.5 rad for these URDF limits). 0.005 = 0.053 rad, ~30 mm of finger
+  # travel at full reach: OMPL accepted paths that clipped the object box between
+  # checks and ValidateSolution then rejected them (INVALID_MOTION_PLAN on the
+  # push approach/home, ~10 mm clearance). 0.001 = ~6 mm, well under that clearance.
+  longest_valid_segment_fraction: 0.001

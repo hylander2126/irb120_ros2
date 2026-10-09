@@ -126,9 +126,19 @@ class Episode:
         change(data)
         write_json_atomic(self.path / "episode.json", data)
 
+    def last_scene_stage(self):
+        """Most recent stage that can have changed or measured the scene, or None. Skips motion
+        stages 'aborted' before the robot moved and perceive stages that did not end 'ok'
+        (failed or interrupted), so a retry reuses the perception that is still current."""
+        for s in reversed(self.load()["stages"]):
+            if s["status"] == "aborted" or (s["kind"] == "perceive" and s["status"] != "ok"):
+                continue
+            return s
+        return None
+
     def last_stage_kind(self):
-        stages = self.load()["stages"]
-        return stages[-1]["kind"] if stages else None
+        stage = self.last_scene_stage()
+        return stage["kind"] if stage else None
 
     def begin_stage(self, kind: str, **info) -> Stage:
         index = len(self.load()["stages"])

@@ -14,7 +14,7 @@ def handler(stop=1, settings=1, start=1, services=True, jtc=True):
         _wait_for_startup_services=Mock(return_value=services),
         _call_trigger=Mock(side_effect=[(stop, ''), (start, '')]),
         _set_egm_settings=Mock(return_value=(settings, '')),
-        _wait_for_jtc=Mock(return_value=jtc),
+        _wait_for_control_ready=Mock(return_value=jtc),
         get_logger=Mock(return_value=Mock()),
         egm_stop_srv='stop', egm_start_srv='start', startup_service_timeout_sec=30.,
     )
@@ -40,7 +40,7 @@ def test_failure_never_announces_ready(failure):
     if failure in ('stop', 'settings'):
         assert fake._call_trigger.call_count == 1
     if failure != 'jtc':
-        fake._wait_for_jtc.assert_not_called()
+        fake._wait_for_control_ready.assert_not_called()
 
 
 def test_failed_settings_read_is_not_written_back():
