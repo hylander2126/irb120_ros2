@@ -42,6 +42,35 @@ ros2 run irb120_control arc_static monitor
 The ROS parameter form remains supported for launch files and other ROS-native
 configuration, but it is not required for normal command-line use.
 
+## Forward tip (MVP)
+
+```bash
+ros2 run irb120_control fwd_tip monitor
+ros2 run irb120_control fwd_tip monitor --episode last
+```
+
+Requires the normal bringup with MoveIt Servo enabled (`start_servo:=true`).
+Uses the saved `forward_tip` contact and pushes horizontally normal to its
+pivot edge, with fixed finger height and orientation. After confirmed contact,
+it reverses when the absolute force along the push direction falls to **10% of
+its running peak** for five fresh samples, after at least 2 mm of tipping travel.
+It returns along the same line to the measured pre-tip pose, then goes home.
+Gravity must restore the object; completing the finger return does not prove
+that an object which slid or passed its balance point has untipped.
+
+Defaults: 5 mm/s, 80 mm maximum travel after contact, 20 N resultant force limit.
+Options: `--speed` (m/s), `--max-travel` (m), `--reverse-fraction`, `--force-limit`
+(N), `--episode new|last|PATH`, and `--quality h264|lossless`.
+The initial 0.5 N contact threshold arms reversal; unloaded noise cannot trigger it.
+The normal pre-motion confirmation and unloaded F/T tare run at the pre-tip pose.
+
+Travel/forward-time limits reverse and mark the attempt failed. Excess force,
+stale feedback, or height/orientation/lateral drift stop motion; home is skipped
+unless the finger's return to the pre-tip pose was verified. Runs save a
+`forward_tip` episode stage, F/T and pose NPZ, motion diagnostics, metadata and
+videos, followed by a snapshot after verified home. The automatic mode selector
+is still pending; `run_pipeline` continues to choose press-pull.
+
 ## Running experiments: episodes
 
 Every run is an *episode*: one folder with everything it produced plus a
