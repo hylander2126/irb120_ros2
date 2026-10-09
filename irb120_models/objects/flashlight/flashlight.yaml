@@ -1,0 +1,37 @@
+# Ground truth for the Curved Flashlight. This file is the source of truth for the object;
+# flashlight.urdf and meshes/flashlight.stl are generated from it. See irb120_models/README.md.
+name: flashlight
+label: Curved Flashlight
+status: provisional
+body_frame: cad
+mesh: meshes/flashlight.gltf  # Onshape export, metres
+rest_pose:                   # CAD frame -> table frame as it sits in the experiments
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: 0.387
+  sigma: null
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+com:
+  value: null                # not yet known in the CAD frame; see 'recorded'
+  sigma: null
+  source: null
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.0303, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded:                    # CoM measured against the tip edge; used until com is set above
+  edge: default
+  com_from_edge: [0.0280, 0.0, 0.0938]   # [horizontal distance from the edge, 0, height]
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+cad:                         # values from a CAD model, where one exists
+  theta_star_deg: 15.126
+  source: "CAD (per Steven, 2026-10-09). Informational only: ground truth is the measured CoM."
+notes:
+  - "Default edge assumes tipping toward CAD +x about the base rim (radius 0.0303 m). Check it."

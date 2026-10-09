@@ -18,8 +18,8 @@
   <xacro:property name="egm_port" value="$(arg egm_port)"/>
   <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
 
-  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58_macro.xacro"/>
-  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58.ros2_control.xacro"/>
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58_macro.xacro"/>
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58.ros2_control.xacro"/>
   <xacro:abb_irb120_3_58 prefix=""/>
 
   <xacro:abb_irb120_3_58_ros2_control

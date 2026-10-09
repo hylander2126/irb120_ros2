@@ -50,6 +50,8 @@ from irb120_control.controllers.servo_command_publisher import ServoCommandPubli
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
 from irb120_control.util.ft_tare import tare_netft
+from irb120_control.util.ft_capture import FTCapture, stamp_s
+from irb120_control.util.ft_frames import ESTIMATOR_POSE_FRAME
 from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, lookup, take_snapshot
 from irb120_control.util.motion_geometry import (
@@ -140,6 +142,12 @@ KI_Y_FORCE = 0#.0005      # m/s per N·s of accumulated Y force error
 MAX_Y_SPEED = 0.015     # m/s clamp on Y correction output
 
 CONTROL_HZ = 100.0
+# The FSM acts on the latest /netft_data_transformed sample. If that stream stops (the
+# preprocessor withholds output when its gravity-comp TF is older than 0.5 s, or the
+# sensor drops out), the last value would otherwise be reused forever: SQUASH would keep
+# descending on a stale "no contact" reading, ARC would regulate against a frozen force.
+# At ~470 Hz, 0.1 s is ~47 missing samples and 10 control ticks.
+FT_STALE_SEC = 0.1
 REQUIRE_OPERATOR_CONFIRM = True
 
 LOST_CONTACT_FORCE_THRESH_N = 0.3
@@ -183,8 +191,8 @@ class ArcStatic(Node):
         except ValueError:
             if force_ref_override is None:
                 raise ValueError(
-                    f"Object '{obj}' is not in object_params.json "
-                    f"(known: {sorted(VALID_OBJECTS)}). Add it there, or "
+                    f"Object '{obj}' has no model in irb120_models "
+                    f"(known: {sorted(VALID_OBJECTS)}). Add objects/<name>/<name>.yaml there, or "
                     "pass --force-ref N for an ad hoc test object."
                 ) from None
             params = {}
@@ -204,7 +212,7 @@ class ArcStatic(Node):
         if force_ref_override is not None:
             force_ref = float(force_ref_override)
         elif "force_ref_n" not in params:
-            raise ValueError(f"Object '{obj}' is missing required 'force_ref_n' in object_params.json")
+            raise ValueError(f"Object '{obj}' has no 'force_ref_n' in irb120_control/config/object_control.yaml")
         else:
             force_ref = float(params["force_ref_n"])
         self.get_logger().info(f"Object: {obj}  force_ref={force_ref:.1f}N  hard_limit={FORCE_HARD_LIMIT_N:.1f}N")
@@ -229,6 +237,8 @@ class ArcStatic(Node):
         self._force_z = 0.0
         self._force_z_signed = 0.0
         self._have_force = False
+        self._last_wrench_s: float | None = None  # node-clock receipt time of the latest sample
+        self._abort_reason: str | None = None
         self._contact_felt = False
         self._last_tf_warn_time = 0.0
         self._state_start_time = 0.0
@@ -252,6 +262,9 @@ class ArcStatic(Node):
 
         self._pause_servo_client   = self.create_client(SetBool, "/servo_node/pause_servo")
 
+        self._tare_events: list = []
+        self._ft_capture = FTCapture(self, self._now_s)
+        self._pose_tf_stamp_s = float("nan")
         self._ft_transformed_log: list = []
         self._pose_log: list = []     # rows: [time_s, x, y, z, qx, qy, qz, qw, arc_angle_rad, wrist_pitch_rad, state_id]
         self._obj_pose_log: list = [] # rows: [time_s, x, y, z, qx, qy, qz, qw, obj_pitch_rad]
@@ -398,6 +411,22 @@ class ArcStatic(Node):
     #  Subscribers
     # ------------------------------------------------------------------ #
 
+    def tare_with_metadata(self) -> bool:
+        """Record the latest unloaded mean and tare timing without changing tare_netft."""
+        requested = self._now_s()
+        samples = [row[1:7] for row in self._ft_transformed_log
+                   if 0.0 <= requested - row[0] <= 0.3]
+        event = {
+            "requested_time_s": requested,
+            "pre_tare_mean_wrench": np.mean(samples, axis=0).tolist() if samples else None,
+            "pre_tare_sample_count": len(samples),
+            "wrench_order": "fx fy fz tx ty tz; N and N*m",
+        }
+        self._tare_events.append(event)
+        success = tare_netft(self)
+        event.update(completed_time_s=self._now_s(), success=success)
+        return success
+
     def _on_wrench(self, msg: WrenchStamped) -> None:
         # Keep the signed fixed-orientation XZ force for actual-angle radial/tangent projections.
         self._force_x = msg.wrench.force.x
@@ -406,20 +435,24 @@ class ArcStatic(Node):
         self._force_z = abs(self._force_z_signed)
         self._have_force = True
         t = self._now_s()
+        self._last_wrench_s = t
         try:
-            tf = self._tf_buffer.lookup_transform(BASE_FRAME, "ft_link", rclpy.time.Time())
+            tf = self._tf_buffer.lookup_transform(BASE_FRAME, ESTIMATOR_POSE_FRAME, rclpy.time.Time())
             tr = tf.transform.translation
             ro = tf.transform.rotation
             ft_px, ft_py, ft_pz = tr.x, tr.y, tr.z
             ft_qx, ft_qy, ft_qz, ft_qw = ro.x, ro.y, ro.z, ro.w
+            tf_stamp = stamp_s(tf.header.stamp)
         except TransformException:
             ft_px = ft_py = ft_pz = float("nan")
             ft_qx = ft_qy = ft_qz = ft_qw = float("nan")
+            tf_stamp = float("nan")
         self._ft_transformed_log.append([
             t,
             msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z,
             msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z,
             ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw,
+            stamp_s(msg.header.stamp), tf_stamp,
         ])
         if self._force_z > 0.25 and t - self._last_wrench_log_time > 0.2:
             self._last_wrench_log_time = t
@@ -468,6 +501,7 @@ class ArcStatic(Node):
         except TransformException as exc:
             self._warn_throttled(f"Waiting for TF {BASE_FRAME} -> {EE_LINK}: {exc}")
             return None
+        self._pose_tf_stamp_s = stamp_s(transform.header.stamp)
         tr = transform.transform.translation
         q = transform.transform.rotation
         return tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w
@@ -674,9 +708,25 @@ class ArcStatic(Node):
     #  Main control tick
     # ------------------------------------------------------------------ #
 
+    def _wrench_stale(self) -> bool:
+        return self._last_wrench_s is None or self._now_s() - self._last_wrench_s > FT_STALE_SEC
+
     def _tick(self) -> None:
         if self._done:
             self._servo_cmd.publish_zero(self._state, self._force_z)
+            return
+
+        # RETRACT is open-loop upward motion and needs no force, so it is the safe exit.
+        if self._state != "RETRACT" and self._wrench_stale():
+            age = (float("inf") if self._last_wrench_s is None
+                   else self._now_s() - self._last_wrench_s)
+            self.get_logger().error(
+                f"F/T stream stale in {self._state}: no wrench for {age:.2f} s "
+                f"(limit {FT_STALE_SEC:.2f} s) -- retracting without retry")
+            self._abort_reason = "ft_stale"
+            self._retry_requested = False
+            self._servo_cmd.publish_zero(self._state, self._force_z)
+            self._transition("RETRACT")
             return
 
         pose_row = self._lookup_pose()
@@ -694,7 +744,8 @@ class ArcStatic(Node):
             else float("nan")
         )
         state_id = STATE_IDS.get(self._state, 0)
-        self._pose_log.append([t, px, py, pz, qx, qy, qz, qw, arc_angle, current_pitch, state_id])
+        self._pose_log.append([t, px, py, pz, qx, qy, qz, qw, arc_angle, current_pitch, state_id,
+                               self._pose_tf_stamp_s])
 
         contact_force = self._controlled_contact_force(px, pz) if self._have_force else 0.0
         if self._have_force and contact_force > FORCE_HARD_LIMIT_N and self._state != "RETRACT":
@@ -859,6 +910,7 @@ class ArcStatic(Node):
     def reset_attempt(self, force_ref: float) -> None:
         """Reset transient FSM/controller state before another full attempt."""
         self._state = "SQUASH"
+        self._abort_reason = None
         self._done = False
         self._completed = False
         self._retry_requested = False
@@ -946,13 +998,13 @@ def main(args=None) -> int:
     parser.add_argument(
         "object",
         help=f"Object name. Registered ({sorted(VALID_OBJECTS)}) objects pick up their "
-             "force_ref_n from object_params.json automatically; any other snapshot/episode "
-             "label works too if you pass --force-ref.",
+             "force_ref_n from config/object_control.yaml automatically; any other "
+             "snapshot/episode label works too if you pass --force-ref.",
     )
     parser.add_argument(
         "--force-ref", type=float, default=None, metavar="N",
-        help="Press force target in Newtons. Required for an object not in object_params.json; "
-             "overrides the registered value otherwise.",
+        help="Press force target in Newtons. Required for an object without a force_ref_n in "
+             "config/object_control.yaml; overrides the registered value otherwise.",
     )
     parser.add_argument(
         "--quality", choices=["h264", "lossless"], default="h264",
@@ -966,6 +1018,8 @@ def main(args=None) -> int:
         help="Pivot variant from the perception stage (default: cloud). 'rgb' requires a "
              "reviewable contacts_rgb_pivot.json and changes only the arc center.",
     )
+    parser.add_argument("--tare-at-start", action="store_true",
+                        help="Legacy protocol: tare once before the initial approach.")
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
@@ -1001,7 +1055,7 @@ def main(args=None) -> int:
         if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
-        if not tare_netft(node):
+        if parsed.tare_at_start and not node.tare_with_metadata():
             return 1
 
         if not start_recording(node, str(stage.path), quality=parsed.quality):
@@ -1022,6 +1076,10 @@ def main(args=None) -> int:
         if not node.move_to_pre_squash():
             node.get_logger().error("Approach failed. Aborting.")
             return 1
+
+        if not parsed.tare_at_start:
+            if not node.pause_servo() or not node.tare_with_metadata():
+                return 1
 
         node.get_logger().info(
             f"[PARAMS] object={node._object}  "
@@ -1072,6 +1130,7 @@ def main(args=None) -> int:
                     str(stage.path),
                     "arc_static",
                     node._obj_pose_log,
+                    ft_raw_log=node._ft_capture.raw,
                     command_log=node._command_log,
                     timestamp=ts,
                     commanded_pivot=node._arc_center,
@@ -1081,13 +1140,17 @@ def main(args=None) -> int:
                                separators=(',', ':')) + '\n')
                 save_run_metadata(str(stage.path), "arc_static", ts, {
                     **module_constants(globals()),
+                    **node._ft_capture.metadata(),
                     "object": node._object,
                     "pre_squash": node._pre_squash_pos,
                     "arc_center": node._arc_center,
+                    "tare_at_start": parsed.tare_at_start,
+                    "tare_events": node._tare_events,
                     "final_force_ref_n": force_ref,
                     "attempts": attempt,
                     "completed": node._completed,
                     "first_attempt_completed": node._completed and attempt == 1,
+                    "abort_reason": node._abort_reason,
                     "home_ok": home_ok,
                     "home_verification": getattr(node, "_last_joint_goal_verification", None),
                 })

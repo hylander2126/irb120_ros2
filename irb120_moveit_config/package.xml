@@ -2,13 +2,13 @@
 <package format="3">
   <name>irb120_moveit_config</name>
   <version>0.0.1</version>
-  <description>Minimal MoveIt 2 configuration for ABB IRB120 with irb120_control description.</description>
+  <description>Minimal MoveIt 2 configuration for ABB IRB120 with the irb120_models description.</description>
   <maintainer email="stevenhyland1@gmail.com">hylander2126</maintainer>
   <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>irb120_control</exec_depend>
+  <exec_depend>irb120_models</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_ros_planning_interface</exec_depend>

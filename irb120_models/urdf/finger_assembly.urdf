@@ -10,7 +10,7 @@
         <visual>
             <origin xyz="3.75342e-18 0 0.01325" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/finger_assembly/ball.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/finger_assembly/ball.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.615686_0.811765_0.929412_0.000000_0.000000">
                 <color rgba="0.615686 0.811765 0.929412 1" />
@@ -19,7 +19,7 @@
         <collision>
             <origin xyz="3.75342e-18 0 0.01325" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/finger_assembly/ball.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/finger_assembly/ball.gltf" scale="1 1 1" />
             </geometry>
         </collision>
     </link>
@@ -33,7 +33,7 @@
         <visual>
             <origin xyz="0 0 0" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/finger_assembly/pusher_body.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/finger_assembly/pusher_body.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.615686_0.811765_0.929412_0.000000_0.000000">
                 <color rgba="0.615686 0.811765 0.929412 1" />
@@ -42,7 +42,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/finger_assembly/pusher_body.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/finger_assembly/pusher_body.gltf" scale="1 1 1" />
             </geometry>
         </collision>
     </link>

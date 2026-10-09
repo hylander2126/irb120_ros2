@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- GENERATED from flashlight.yaml by `object_models generate`. Do not edit. -->
+<!-- status: provisional. Body frame = CAD frame of flashlight.yaml. -->
+<robot name="flashlight">
+  <link name="flashlight">
+    <visual>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/flashlight/meshes/flashlight.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/flashlight/meshes/flashlight.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

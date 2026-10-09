@@ -17,6 +17,7 @@
 
   <!-- Robot bringup and MoveIt -->
   <depend>irb120_control</depend>
+  <depend>irb120_models</depend>
   <depend>irb120_moveit_config</depend>
   <depend>moveit_configs_utils</depend>
   <depend>moveit_ros_move_group</depend>

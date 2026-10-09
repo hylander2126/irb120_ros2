@@ -40,6 +40,8 @@ from irb120_control.util.episode import Episode
 from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.push_geometry import push_approach
 from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, take_snapshot
+from irb120_control.util.ft_capture import FTCapture, stamp_s
+from irb120_control.util.ft_frames import ESTIMATOR_POSE_FRAME
 from irb120_control.util.runtime_log_dir import (
     module_constants,
     save_ft_pose_log,
@@ -102,9 +104,17 @@ class Push(Node):
         self._pose_log: list[list[float]] = []
         self._log_start_s: float | None = None
         self._recording_ft      = False
+        self._pose_tf_stamp_s = float("nan")
+        self._ft_capture = FTCapture(self, self._log_time_s, lambda: self._recording_ft)
         self._push_started      = False
         self._debug_timer       = None
         self._pose_log_timer    = self.create_timer(0.01, self._log_pose_cb)
+
+    def _log_time_s(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._log_start_s is None:
+            self._log_start_s = now
+        return now - self._log_start_s
 
     # ------------------------------------------------------------------ logging
 
@@ -120,7 +130,8 @@ class Push(Node):
         self._pose_log.append([
             now_s - self._log_start_s,
             pose.position.x, pose.position.y, pose.position.z,
-            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+            float("nan"), float("nan"), 0, self._pose_tf_stamp_s,
         ])
 
     # ------------------------------------------------------------------ wrench
@@ -135,19 +146,21 @@ class Push(Node):
             if self._log_start_s is None:
                 self._log_start_s = now_s
             try:
-                tf = self._tf_buffer.lookup_transform(BASE_FRAME, "ft_link", rclpy.time.Time())
+                tf = self._tf_buffer.lookup_transform(BASE_FRAME, ESTIMATOR_POSE_FRAME, rclpy.time.Time())
                 tr = tf.transform.translation
                 ro = tf.transform.rotation
                 ft_px, ft_py, ft_pz = tr.x, tr.y, tr.z
                 ft_qx, ft_qy, ft_qz, ft_qw = ro.x, ro.y, ro.z, ro.w
+                tf_stamp = stamp_s(tf.header.stamp)
             except TransformException:
-                ft_px = ft_py = ft_pz = 0.0
-                ft_qx = ft_qy = ft_qz = 0.0
-                ft_qw = 1.0
+                ft_px = ft_py = ft_pz = float("nan")
+                ft_qx = ft_qy = ft_qz = ft_qw = float("nan")
+                tf_stamp = float("nan")
             self._ft_log.append([
                 now_s - self._log_start_s,
                 f.x, f.y, f.z, t.x, t.y, t.z,
                 ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw,
+                stamp_s(msg.header.stamp), tf_stamp,
             ])
 
     # ------------------------------------------------------------------ debug
@@ -177,6 +190,7 @@ class Push(Node):
     def _lookup_ee_pose(self) -> Pose | None:
         try:
             tf = self._tf_buffer.lookup_transform(BASE_FRAME, EE_LINK, rclpy.time.Time())
+            self._pose_tf_stamp_s = stamp_s(tf.header.stamp)
         except TransformException:
             return None
         p = Pose()
@@ -390,9 +404,11 @@ def main(args=None) -> int:
                 try:
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     save_ft_pose_log(node._ft_log, node._pose_log, subdir=str(stage.path),
-                                     prefix="push_ft_pose", timestamp=ts)
+                                     prefix="push_ft_pose", timestamp=ts, ft_raw_log=node._ft_capture.raw)
                     save_run_metadata(str(stage.path), "push_ft_pose", ts, {
                         **module_constants(globals()),
+                        **node._ft_capture.metadata(),
+                        "receive_time_origin_ros_s": node._log_start_s,
                         "object": node._object,
                         "pre_push": node._pre_push_pos,
                         "push_ok": push_ok,

@@ -28,7 +28,7 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            "description_package": "irb120_control",
+            "description_package": "irb120_models",
             "description_file": "irb120_with_finger.xacro",
             "runtime_config_package": "irb120_control",
             "controllers_file": "irb120_controllers.yaml",

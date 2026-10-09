@@ -1,0 +1,38 @@
+# Ground truth for the Heart Prism. This file is the source of truth for the object;
+# heart.urdf and meshes/heart.stl are generated from it. See irb120_models/README.md.
+name: heart
+label: Heart Prism
+status: provisional
+body_frame: cad
+mesh: meshes/heart.gltf  # Onshape export, metres
+rest_pose:                   # CAD frame -> table frame as it sits in the experiments
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: 0.239
+  sigma: null
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+com:
+  value: null                # not yet known in the CAD frame; see 'recorded'
+  sigma: null
+  source: null
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.0, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded:                    # CoM measured against the tip edge; used until com is set above
+  edge: default
+  com_from_edge: [0.0458, 0.0, 0.1000]   # [horizontal distance from the edge, 0, height]
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+cad:                         # values from a CAD model, where one exists
+  theta_star_deg: 23.984
+  source: "CAD (per Steven, 2026-10-09). Informational only: ground truth is the measured CoM."
+notes:
+  - "rest_pose and tip_edges are placeholders. The mesh is 0.10 m tall along CAD z, the same
+    as the recorded com height, so the CAD frame is not the resting pose."

@@ -1,0 +1,31 @@
+# Ground truth for the Tip T. This file is the source of truth for the object;
+# tipT.urdf and meshes/tipT.stl are generated from it. See irb120_models/README.md.
+name: tipT
+label: Tip T
+status: provisional
+body_frame: cad
+mesh: meshes/tipT.gltf  # Onshape export, metres
+rest_pose:                   # CAD frame -> table frame as it sits in the experiments
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: null
+  sigma: null
+  source: null
+com:
+  value: null                # not yet known in the CAD frame; see 'recorded'
+  sigma: null
+  source: null
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.0, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded: null
+notes:
+  - "Mesh only. Mass, CoM, rest pose and tip edge still to be measured."

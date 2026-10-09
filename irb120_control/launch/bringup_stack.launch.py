@@ -76,7 +76,7 @@ def generate_launch_description():
     handeye_cfg_pkg = get_package_share_directory("irb120_handeye")
     perception_pkg = get_package_share_directory("irb120_perception")
 
-    urdf_path = os.path.join(pkg_share, "urdf", "irb120_with_finger.xacro")
+    urdf_path = os.path.join(get_package_share_directory("irb120_models"), "urdf", "irb120_with_finger.xacro")
     # calibration:=true swaps the finger for the ChArUco board + mount in both the
     # URDF and SRDF (collision pairs differ).
     description_mappings = {"use_charuco_mount": LaunchConfiguration("calibration")}
@@ -208,6 +208,7 @@ def generate_launch_description():
         package="irb120_control",
         executable="netft_preprocessor",
         name="netft_preprocessor",
+        parameters=[{"calibration_file": LaunchConfiguration("ft_calibration_file")}],
         output="screen",
     )
 
@@ -381,6 +382,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument("ft_calibration_file", default_value="",
+                              description="Reviewed F/T calibration JSON; empty uses legacy constants"),
         perception_active_at_start_arg,
         calibration_arg,
         cam2_raw_depth_arg,

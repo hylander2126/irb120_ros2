@@ -25,7 +25,7 @@ def generate_launch_description():
         MoveItConfigsBuilder("irb120", package_name="irb120_moveit_config")
         .robot_description(
             file_path=os.path.join(
-                get_package_share_directory("irb120_control"),
+                get_package_share_directory("irb120_models"),
                 "urdf",
                 "irb120_with_finger.xacro",
             ),

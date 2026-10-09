@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- GENERATED from cylinder.yaml by `object_models generate`. Do not edit. -->
+<!-- status: provisional. Body frame = CAD frame of cylinder.yaml. -->
+<robot name="cylinder">
+  <link name="cylinder">
+    <visual>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/cylinder/meshes/cylinder.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/cylinder/meshes/cylinder.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

@@ -13,14 +13,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/base_link.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/base_link.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/base_link.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/base_link.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -34,14 +34,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_1.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_1.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_1.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_1.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -55,14 +55,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_2.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_2.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_2.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_2.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -76,14 +76,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_3.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_3.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_3.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_3.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -97,14 +97,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_4.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_4.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_4.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_4.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -118,14 +118,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_5.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_5.stl"/>
         </geometry>
         <xacro:material_abb_orange />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_5.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_5.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>
@@ -139,14 +139,14 @@
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/visual/link_6.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/visual/link_6.stl"/>
         </geometry>
         <xacro:material_abb_black />
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <mesh filename="package://irb120_control/meshes/irb120_3_58/collision/link_6.stl"/>
+          <mesh filename="package://irb120_models/meshes/irb120_3_58/collision/link_6.stl"/>
         </geometry>
         <xacro:material_abb_yellow />
       </collision>

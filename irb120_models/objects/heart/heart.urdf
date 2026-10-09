@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- GENERATED from heart.yaml by `object_models generate`. Do not edit. -->
+<!-- status: provisional. Body frame = CAD frame of heart.yaml. -->
+<robot name="heart">
+  <link name="heart">
+    <visual>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/heart/meshes/heart.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/heart/meshes/heart.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

@@ -32,6 +32,7 @@ from irb120_control.controllers.servo_command_publisher import ServoCommandPubli
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
 from irb120_control.util.forward_tip_motion import TipConfig, TipMotion, tip_targets
+from irb120_control.util.ft_frames import WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME
 from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.perception_snapshot import (
@@ -114,9 +115,14 @@ class ForwardTip(Node):
             f, t = msg.wrench.force, msg.wrench.torque
             force = np.array([f.x, f.y, f.z])
             torque = np.array([t.x, t.y, t.z])
-            ft_pose = self._transform('ft_link')
+            # The preprocessor labels its output 'ft_link', a frame the URDF no longer has;
+            # the axes are tool0's (util/ft_frames.py). Looking up 'ft_link' dropped every
+            # sample, so the freshness watchdog stopped every run with stale_force.
+            ft_pose = self._transform(WRENCH_AXES_FRAME)
             if msg.header.frame_id != BASE_FRAME:
-                source_pose = ft_pose if msg.header.frame_id == 'ft_link' else self._transform(msg.header.frame_id)
+                axes = (WRENCH_AXES_FRAME if msg.header.frame_id == WRENCH_HEADER_FRAME
+                        else msg.header.frame_id)
+                source_pose = ft_pose if axes == WRENCH_AXES_FRAME else self._transform(axes)
                 force = rotate(source_pose[3:], force)
                 torque = rotate(source_pose[3:], torque)
             if not np.isfinite(np.r_[force, torque]).all():

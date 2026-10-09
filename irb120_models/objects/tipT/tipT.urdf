@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- GENERATED from tipT.yaml by `object_models generate`. Do not edit. -->
+<!-- status: provisional. Body frame = CAD frame of tipT.yaml. -->
+<robot name="tipT">
+  <link name="tipT">
+    <visual>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/tipT/meshes/tipT.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://irb120_models/objects/tipT/meshes/tipT.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

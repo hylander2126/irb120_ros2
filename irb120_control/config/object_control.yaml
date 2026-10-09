@@ -1,0 +1,17 @@
+# Per-object controller settings for arc_static / arc_static_batch.
+# Ground truth (mass, CoM, mesh, tip edges) is NOT here: it lives in the irb120_models
+# package, objects/<name>/<name>.yaml. An object needs an entry here only to be run
+# without --force-ref.
+objects:
+  box:
+    force_ref_n: 5.0
+  heart:
+    force_ref_n: 7.0
+  flashlight:
+    force_ref_n: 5.0
+  monitor:
+    force_ref_n: 10.0
+  soda:
+    force_ref_n: 5.0
+  cylinder:
+    force_ref_n: 5.0

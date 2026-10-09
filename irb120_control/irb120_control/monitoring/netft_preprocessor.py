@@ -26,12 +26,20 @@ Session tare (/netft_preprocessor/set_tare, SetBool)
   data=false — clear the session tare (calibration constants remain).
 """
 
+import json
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import rclpy
 from geometry_msgs.msg import WrenchStamped
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import SetBool
+from std_msgs.msg import String
+from irb120_control.util.ft_frames import WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME
+from irb120_control.util.ft_capture import state_qos
+from irb120_control.util.ft_calibration import default_calibration_path, load_calibration
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -50,7 +58,8 @@ INPUT_TOPIC   = "/netft_data"
 OUTPUT_TOPIC  = "/netft_data_transformed"
 MONITOR_TOPIC = "/netft_data_monitor"
 BASE_FRAME    = "world"
-OUTPUT_FRAME  = "ft_link"
+OUTPUT_FRAME  = WRENCH_HEADER_FRAME
+TF_FRAME = WRENCH_AXES_FRAME
 
 ENABLE_EMA = True
 EMA_ALPHA  = 0.20
@@ -60,13 +69,35 @@ TF_POLL_HZ   = 50.0      # rate at which R_cur is refreshed from TF
 MONITOR_HZ   = 25.0      # rate of /netft_data_monitor for live plotting
 
 # IMPORTANT: NetFT internal tool transform is set so reported axes match world/robot frame
-# (no rotation in xacro ft_mount_rpy). "Up" is +Z, "forward" is +X.
+# (the old ft_link was identical to tool0). Keep axes separate from the legacy header label.
 
 
 class NetFTPreprocessor(Node):
     def __init__(self):
         super().__init__("netft_preprocessor")
 
+        # An explicit calibration_file wins; otherwise the reviewed config/ft_calibration.json
+        # if one has been installed; otherwise the legacy constants below (logged loudly).
+        self._calibration_file = str(self.declare_parameter('calibration_file', '').value)
+        self._calibration_source = 'file'
+        if not self._calibration_file and default_calibration_path().exists():
+            self._calibration_file = str(default_calibration_path())
+            self._calibration_source = 'config/ft_calibration.json'
+        self._electrical_zero = ELECTRICAL_ZERO.copy()
+        self._g_world = G_WORLD.copy()
+        self._torque_zero = TORQUE_ZERO.copy()
+        self._tool_com = np.zeros(3)
+        self._calibration_sha256 = None
+        if self._calibration_file:
+            (self._electrical_zero, self._g_world, self._torque_zero,
+             self._tool_com) = load_calibration(self._calibration_file)
+            self._calibration_sha256 = hashlib.sha256(Path(self._calibration_file).read_bytes()).hexdigest()
+            self.get_logger().info(f"F/T calibration: {self._calibration_file}")
+        else:
+            self._calibration_source = 'legacy constants; recalibration pending'
+            self.get_logger().warn("F/T calibration: legacy constants (no calibration file). Recalibrate.")
+        self._state_pub = self.create_publisher(String, '/netft_preprocessor/state', state_qos())
+        self._last_tf_success = None
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -83,7 +114,8 @@ class NetFTPreprocessor(Node):
         # --- comp state ---
         # G_WORLD rotated into current sensor frame; recomputed by TF poll.
         self._R_cur          = np.eye(3)
-        self._g_world_cur_S  = G_WORLD.copy()  # = R_cur^T @ G_WORLD
+        self._g_world_cur_S  = self._g_world.copy()  # = R_cur^T @ G_WORLD
+        self._tool_torque_S  = np.cross(self._tool_com, self._g_world_cur_S)  # tool weight moment
 
         # --- session tare state ---
         # Captured ONCE per `set_tare data=true` request, then applied each sample.
@@ -110,13 +142,14 @@ class NetFTPreprocessor(Node):
         self._watchdog_timer = self.create_timer(10.0, self._watchdog_cb)
         self.create_timer(1.0 / TF_POLL_HZ, self._tf_poll_cb)
 
+        self._publish_state()
         self.get_logger().info(
             f"NetFT preprocessor: {INPUT_TOPIC} -> {OUTPUT_TOPIC} + {MONITOR_TOPIC} @ {MONITOR_HZ:.0f} Hz"
         )
         self.get_logger().info(
-            f"Comp constants:  ELECTRICAL_ZERO=({ELECTRICAL_ZERO[0]:+.3f},{ELECTRICAL_ZERO[1]:+.3f},{ELECTRICAL_ZERO[2]:+.3f}) N  "
-            f"G_WORLD=({G_WORLD[0]:+.3f},{G_WORLD[1]:+.3f},{G_WORLD[2]:+.3f}) N "
-            f"(|G|={np.linalg.norm(G_WORLD):.3f} N, mass={np.linalg.norm(G_WORLD)/9.81:.4f} kg)"
+            f"Comp constants:  ELECTRICAL_ZERO=({self._electrical_zero[0]:+.3f},{self._electrical_zero[1]:+.3f},{self._electrical_zero[2]:+.3f}) N  "
+            f"G_WORLD=({self._g_world[0]:+.3f},{self._g_world[1]:+.3f},{self._g_world[2]:+.3f}) N "
+            f"(|G|={np.linalg.norm(self._g_world):.3f} N, mass={np.linalg.norm(self._g_world)/9.81:.4f} kg)"
         )
         self.get_logger().info(
             "Session tare:    ros2 service call /netft_preprocessor/set_tare std_srvs/srv/SetBool '{data: true}'"
@@ -128,19 +161,31 @@ class NetFTPreprocessor(Node):
 
     def _tf_poll_cb(self):
         try:
-            tf = self._tf_buffer.lookup_transform(BASE_FRAME, OUTPUT_FRAME, rclpy.time.Time())
+            tf = self._tf_buffer.lookup_transform(BASE_FRAME, TF_FRAME, rclpy.time.Time())
         except TransformException:
-            return  # keep previous values
+            self._warn_throttled(f"Waiting for gravity-compensation TF {BASE_FRAME} -> {TF_FRAME}")
+            return
+        now = self._safe_now()
+        stamp = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
+        if stamp == 0 or not -0.1 <= now - stamp <= 0.5:
+            self._warn_throttled("Stale gravity-compensation TF; waiting for current robot pose")
+            return
+        self._last_tf_success = now
         q = tf.transform.rotation
         self._R_cur = self._quat_to_rot(q.x, q.y, q.z, q.w)
         # Pre-compute G_WORLD in current sensor frame so the hot path is a single subtract.
-        self._g_world_cur_S = self._R_cur.T @ G_WORLD
+        self._g_world_cur_S = self._R_cur.T @ self._g_world
+        self._tool_torque_S = np.cross(self._tool_com, self._g_world_cur_S)
 
     # ------------------------------------------------------------------
     # Session tare service
     # ------------------------------------------------------------------
 
     def _on_set_tare(self, req: SetBool.Request, res: SetBool.Response) -> SetBool.Response:
+        if req.data and (self._last_tf_success is None or self._safe_now() - self._last_tf_success > 0.5):
+            res.success = False
+            res.message = "Cannot tare without a current gravity-compensation TF"
+            return res
         if req.data:
             # Capture residual offset at the current pose (after calibration comp).
             self._taring     = True
@@ -156,6 +201,7 @@ class NetFTPreprocessor(Node):
             self._taring      = False
             res.success = True
             res.message = "Session tare cleared (calibration constants unchanged)."
+        self._publish_state()
         self.get_logger().info(res.message)
         return res
 
@@ -165,10 +211,28 @@ class NetFTPreprocessor(Node):
         self._tare_t      = self._tare_acc_t * inv
         self._tare_active = True
         self._taring      = False
+        self._publish_state()
         self.get_logger().info(
             f"Session tare captured. residual_f=({self._tare_f[0]:+.4f},{self._tare_f[1]:+.4f},{self._tare_f[2]:+.4f}) "
             f"residual_t=({self._tare_t[0]:+.4f},{self._tare_t[1]:+.4f},{self._tare_t[2]:+.4f})"
         )
+
+    def _publish_state(self):
+        state = {
+            'schema_version': 1, 'time_s': self._safe_now(),
+            'axes_frame': TF_FRAME, 'header_frame': OUTPUT_FRAME,
+            'calibration_file': self._calibration_file or None,
+            'calibration_sha256': self._calibration_sha256,
+            'calibration_source': self._calibration_source,
+            'electrical_zero': self._electrical_zero.tolist(),
+            'g_world': self._g_world.tolist(), 'torque_zero': self._torque_zero.tolist(),
+            'tool_com_m': self._tool_com.tolist(),
+            'ema_enabled': ENABLE_EMA, 'ema_alpha': EMA_ALPHA,
+            'tare_active': self._tare_active, 'taring': self._taring,
+            'tare_samples': self._tare_count,
+            'tare_force': self._tare_f.tolist(), 'tare_torque': self._tare_t.tolist(),
+        }
+        self._state_pub.publish(String(data=json.dumps(state)))
 
     # ------------------------------------------------------------------
     # Watchdog
@@ -197,9 +261,13 @@ class NetFTPreprocessor(Node):
             self._publish(np.zeros(3), np.zeros(3), msg.header.stamp)
             return
 
+        if self._last_tf_success is None or self._safe_now() - self._last_tf_success > 0.5:
+            self._warn_throttled("No current gravity-compensation TF; withholding compensated wrench")
+            return
+
         # Apply calibration comp.
-        f = f - ELECTRICAL_ZERO - self._g_world_cur_S
-        t = t - TORQUE_ZERO
+        f = f - self._electrical_zero - self._g_world_cur_S
+        t = t - self._torque_zero - self._tool_torque_S
 
         # Session tare: accumulate raw post-comp residual, then subtract once captured.
         if self._taring:

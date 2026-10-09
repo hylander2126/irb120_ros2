@@ -53,15 +53,21 @@ NOSLIP_TOL_MM = 4.0
 # is a pure translation along the tool axis. See _reconstruct_sensor_pose.
 EE_TO_SENSOR_OFFSET_X = 0.08225 + 0.0866512
 
-# Ground-truth object properties. CoM/theta* for box/heart/flashlight are from CAD +
-# scale; monitor's are approximate (CoM +-1 cm, theta* +-0.2 deg).
+# Ground-truth object properties: mass from a scale and the CoM measured empirically
+# (monitor's CoM to about +-1 cm). theta* is DERIVED from that measured CoM as the
+# sharp-edge balance angle atan(com_x / com_z), so every object, CAD or not, is scored
+# against the same measured reference. The CAD theta* values these entries used to carry
+# are kept as theta_cad_deg for reference only (they disagree with the measured CoM by
+# 0.3-2.5 deg; the soda's even differs between files: 21.801 here, 20.126 elsewhere).
 GROUND_TRUTH = {
-    "box":        {"mass": 0.676, "com": np.array([0.05,   0.0, 0.15]),   "theta_deg": 17.532},
-    "heart":      {"mass": 0.239, "com": np.array([0.0458, 0.0, 0.10]),   "theta_deg": 23.984},
-    "flashlight": {"mass": 0.387, "com": np.array([0.028,  0.0, 0.0938]), "theta_deg": 15.126},
-    "soda":       {"mass": 2.054, "com": np.array([0.0525, 0.0, 0.15]),   "theta_deg": 21.801},
-    "monitor":    {"mass": 5.04,  "com": np.array([0.06,   0.0, 0.232]),  "theta_deg": 14.5},
+    "box":        {"mass": 0.676, "com": np.array([0.05,   0.0, 0.15]),   "theta_cad_deg": 17.532},
+    "heart":      {"mass": 0.239, "com": np.array([0.0458, 0.0, 0.10]),   "theta_cad_deg": 23.984},
+    "flashlight": {"mass": 0.387, "com": np.array([0.028,  0.0, 0.0938]), "theta_cad_deg": 15.126},
+    "soda":       {"mass": 2.054, "com": np.array([0.0525, 0.0, 0.15]),   "theta_cad_deg": 21.801},
+    "monitor":    {"mass": 5.04,  "com": np.array([0.06,   0.0, 0.232]),  "theta_cad_deg": 14.5},
 }
+for _gt in GROUND_TRUTH.values():
+    _gt["theta_deg"] = float(np.degrees(np.arctan2(_gt["com"][0], _gt["com"][2])))
 
 _LPF_B, _LPF_A = butter(4, 6, fs=500, btype='low')
 

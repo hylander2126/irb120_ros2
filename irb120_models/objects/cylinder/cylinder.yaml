@@ -1,0 +1,36 @@
+# Ground truth for the Cylinder. This file is the source of truth for the object;
+# cylinder.urdf and meshes/cylinder.stl are generated from it. See irb120_models/README.md.
+name: cylinder
+label: Cylinder
+status: provisional
+body_frame: cad
+mesh: meshes/cylinder.gltf  # Onshape export, metres
+rest_pose:                   # CAD frame -> table frame as it sits in the experiments
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: 0.364
+  sigma: null
+  source: "object_params.json in irb120_control (uncommitted entry), migrated 2026-10-09."
+com:
+  value: null                # not yet known in the CAD frame; see 'recorded'
+  sigma: null
+  source: null
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.03, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded:                    # CoM measured against the tip edge; used until com is set above
+  edge: default
+  com_from_edge: [0.0, 0.0, 0.1]   # [horizontal distance from the edge, 0, height]
+  source: "object_params.json in irb120_control (uncommitted entry), migrated 2026-10-09."
+notes:
+  - "The recorded values are placeholders: com_from_edge x = 0 is a centre value, z = 0.1 is
+    the full mesh height, and theta* 15 does not follow from them. Ground truth in progress."
+  - "Default edge assumes tipping toward CAD +x about the base rim (radius 0.03 m)."

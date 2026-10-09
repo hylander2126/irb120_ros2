@@ -23,8 +23,8 @@
   <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
   <xacro:property name="use_charuco_mount" value="$(arg use_charuco_mount)"/>
 
-  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58_macro.xacro"/>
-  <xacro:include filename="$(find irb120_control)/urdf/irb120_3_58.ros2_control.xacro"/>
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58_macro.xacro"/>
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58.ros2_control.xacro"/>
   <xacro:abb_irb120_3_58 prefix="${prefix}"/>
 
   <xacro:abb_irb120_3_58_ros2_control
@@ -111,7 +111,7 @@
 
 
   <!-- The physical calibration and production chains share the robot adapters and NetFT. -->
-  <xacro:include filename="$(find irb120_control)/urdf/sensor_and_adapter_assembly.urdf"/>
+  <xacro:include filename="$(find irb120_models)/urdf/sensor_and_adapter_assembly.urdf"/>
 
   <joint name="tool0_to_sensor_root" type="fixed">
     <parent link="tool0"/>
@@ -139,10 +139,10 @@
     <!-- Calibration-only terminal attachment. Its mounting plane is the NetFT output face. -->
     <link name="charuco_mount">
       <visual>
-        <geometry><mesh filename="package://irb120_control/meshes/aruco_mount.stl"/></geometry>
+        <geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry>
         <material name="CharucoMount"><color rgba="0.95 0.55 0.05 1.0"/></material>
       </visual>
-      <collision><geometry><mesh filename="package://irb120_control/meshes/aruco_mount.stl"/></geometry></collision>
+      <collision><geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry></collision>
     </link>
     <joint name="sensor_body_to_charuco_mount" type="fixed">
       <parent link="sensor_body"/><child link="charuco_mount"/>
@@ -151,7 +151,7 @@
   </xacro:if>
 
   <xacro:unless value="${use_charuco_mount}">
-    <xacro:include filename="$(find irb120_control)/urdf/finger_assembly.urdf"/>
+    <xacro:include filename="$(find irb120_models)/urdf/finger_assembly.urdf"/>
     <joint name="sensor_body_to_finger_root" type="fixed">
       <parent link="sensor_body"/>
       <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>

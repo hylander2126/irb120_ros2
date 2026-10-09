@@ -23,6 +23,7 @@ def test_home_gates_snapshot_and_stage_success(tmp_path,pause_ok,home_ok):
     node._completed=True;node._pre_squash_pos=[0,0,0];node._arc_center=[0,0,0]
     node._last_joint_goal_verification={'verified':home_ok}
     node._tracking_log=[];node._force_diagnostics=[]
+    node._ft_capture=NS(raw=[], metadata=lambda: {});node._abort_reason=None
     stage=Mock(path=tmp_path);snapshot=Mock()
     env=dict(node=node,stage=stage,episode=Mock(),motion_started=True,home_ok=None,
         rclpy=Mock(),stop_recording=lambda n:order.append('stop_recording'),

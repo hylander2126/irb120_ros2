@@ -1,0 +1,39 @@
+# Ground truth for the Monitor. This file is the source of truth for the object;
+# anything generated from it says so in its header. See irb120_models/README.md.
+name: monitor
+label: Monitor
+status: provisional
+# No CAD mesh yet, so the body frame is the tip-edge frame: origin on the default tip
+# edge at table height, x horizontal toward the CoM, y along the edge, z up. Once a mesh
+# exists, switch to body_frame: cad, re-express com in the CAD frame, and set tip_edges.
+body_frame: tip_edge
+mesh: null
+rest_pose:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: 5.04
+  sigma: null
+  source: "Measured (scale; CoM measured empirically, about +-1 cm). Migrated from object_params.json 2026-10-09."
+com:
+  value: [0.06, 0.0, 0.232]
+  sigma: null
+  source: "Measured (scale; CoM measured empirically, about +-1 cm). Migrated from object_params.json 2026-10-09."
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.0, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded: null
+cad:                         # values from a CAD model, where one exists
+  theta_star_deg: 14.748
+  source: "CAD (per Steven, 2026-10-09). Informational only: ground truth is the measured CoM."
+notes:
+  - "A CAD model exists but its mesh is not in this package yet. Mass and CoM were measured\n    against the tip edge, not a body frame."
+  - "Known press-pull failure case: the finger slips during the arc, so its press-pull fits are
+    poor. This motivates forward tipping (fwd_tip.py) for the monitor."

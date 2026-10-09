@@ -1,0 +1,37 @@
+# Ground truth for the Hollow Acrylic Box. This file is the source of truth for the object;
+# anything generated from it says so in its header. See irb120_models/README.md.
+name: box
+label: Hollow Acrylic Box
+status: provisional
+# No CAD mesh yet, so the body frame is the tip-edge frame: origin on the default tip
+# edge at table height, x horizontal toward the CoM, y along the edge, z up. Once a mesh
+# exists, switch to body_frame: cad, re-express com in the CAD frame, and set tip_edges.
+body_frame: tip_edge
+mesh: null
+rest_pose:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+mass:
+  value: 0.676
+  sigma: null
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+com:
+  value: [0.0500, 0.0, 0.1500]
+  sigma: null
+  source: "Measured (scale; CoM measured empirically). Migrated from object_params.json 2026-10-09."
+inertia:
+  value: null
+  source: null
+tip_edges:
+  default:
+    point: [0.0, 0.0, 0.0]
+    direction: [0.0, 1.0, 0.0]
+friction:
+  table_mu: null
+  source: null
+recorded: null
+cad:                         # values from a CAD model, where one exists
+  theta_star_deg: 17.532
+  source: "CAD (per Steven, 2026-10-09). Informational only: ground truth is the measured CoM."
+notes:
+  - "No CAD mesh. Mass and CoM were measured against the tip edge, not a body frame."

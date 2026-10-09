@@ -246,7 +246,7 @@ def _pack_pc2(pts: np.ndarray, frame_id: str, stamp) -> PointCloud2:
 
 class RobotMaskFilter(Node):
 
-    # Links that have collision STL meshes in the irb120_control package
+    # Links that have collision STL meshes in the irb120_models package
     MESH_LINKS = ['base_link', 'link_1', 'link_2', 'link_3', 'link_4', 'link_5', 'link_6']
 
     # Capsule segments for the end-effector (no simplified collision mesh
@@ -316,7 +316,7 @@ class RobotMaskFilter(Node):
 
         # Load all collision meshes at startup
         mesh_dir = os.path.join(
-            get_package_share_directory('irb120_control'),
+            get_package_share_directory('irb120_models'),
             'meshes', 'irb120_3_58', 'collision')
 
         self._meshes: dict[str, np.ndarray] = {}  # link → verts (N,3,3)

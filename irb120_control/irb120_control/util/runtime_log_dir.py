@@ -7,15 +7,18 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from irb120_models import list_objects, load_object
 import numpy as np
-import rclpy
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
+import rclpy
 from std_srvs.srv import SetBool
+import yaml
 
 
-_OBJECT_PARAMS_PATH = Path(__file__).resolve().parents[1] / "object_params.json"
-VALID_OBJECTS = {"box", "heart", "flashlight", "monitor", "soda"}
+_OBJECT_CONTROL_FILE = "object_control.yaml"
+# Every object with a ground-truth model in irb120_models (objects/<name>/<name>.yaml).
+VALID_OBJECTS = set(list_objects())
 
 # One camera_hull_recorder instance per camera — see bringup_stack.launch.py.
 # All get driven together by start_recording()/stop_recording() below so a
@@ -24,17 +27,44 @@ DEFAULT_RECORDER_NODES = ("camera_hull_recorder", "camera_hull_recorder2", "came
 
 
 def load_object_params(object_name: str) -> dict:
-    """Load and return the params dict for a named object from object_params.json.
+    """Ground truth from irb120_models plus this package's controller settings.
 
-    Raises ValueError for unknown objects, FileNotFoundError if JSON is missing.
+    Keeps the keys the old object_params.json had, so arc_static and the episode
+    records are unchanged: mass_gt, com_gt ([com_x from the tip edge, 0, com_z]),
+    theta_star (derived from the measured CoM: sharp-edge atan(com_x/com_z); CAD
+    values are not ground truth), and force_ref_n when object_control.yaml has one. Values the model doesn't have yet are None. The model's status and where
+    the CoM came from are included so an episode records how provisional they were.
+
+    Raises ValueError for unknown objects.
     """
     if object_name not in VALID_OBJECTS:
         raise ValueError(
             f"Unknown object '{object_name}'. Must be one of {sorted(VALID_OBJECTS)}."
         )
-    with open(_OBJECT_PARAMS_PATH) as f:
-        data = json.load(f)
-    return data["objects"][object_name]
+    model = load_object(object_name)
+    gt = model.ground_truth("default")
+    params = {
+        "mass_gt": gt["mass"],
+        "com_gt": None if gt["com_x"] is None else [gt["com_x"], 0.0, gt["com_z"]],
+        "theta_star": gt["theta_star_deg"],
+        "model_status": model.status,
+        "com_source": gt["source"],
+    }
+    control = _object_control().get(object_name, {})
+    if control.get("force_ref_n") is not None:
+        params["force_ref_n"] = float(control["force_ref_n"])
+    return params
+
+
+def _object_control() -> dict:
+    source = Path(__file__).resolve().parents[2] / "config" / _OBJECT_CONTROL_FILE
+    if source.exists():
+        path = source
+    else:
+        from ament_index_python.packages import get_package_share_directory
+        path = Path(get_package_share_directory("irb120_control")) / "config" / _OBJECT_CONTROL_FILE
+    with open(path) as f:
+        return (yaml.safe_load(f) or {}).get("objects") or {}
 
 
 def resolve_workspace_root() -> Path:
@@ -228,12 +258,15 @@ def save_ft_pose_log(
     Also writes a 'most_recent.npz' in the same directory for easy downstream access.
 
     ft_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz] rows — bias-corrected transformed wrench;
-            optional columns 7-13 are ft_link pose [px, py, pz, qx, qy, qz, qw].
+            optional columns 7-13 are estimator-reference pose [px, py, pz, qx, qy, qz, qw];
+            columns 14/15 are message/TF source stamps in ROS seconds.
     pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (EE pose);
-              optional columns 8, 9, and 10 are arc_angle_rad, wrist_pitch_rad, and controller_state_id.
+              optional columns 8, 9, and 10 are arc_angle_rad, wrist_pitch_rad, and controller_state_id;
+              column 11 is the pose TF source stamp (ROS seconds).
     obj_pose_log: list of [timestamp_s, x, y, z, qx, qy, qz, qw] rows (object pose from detector);
                   optional column 8 is obj_pitch_rad.
-    ft_raw_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz, ft_px, ft_py, ft_pz, ft_qx, ft_qy, ft_qz, ft_qw] rows.
+    ft_raw_log: [receive_time_s, fx, fy, fz, tx, ty, tz, message_stamp_s] rows;
+                legacy 14-column raw rows with sensor pose remain supported.
     command_log: list of [timestamp_s, state_id, arc_angle_rad, f_radial, radial_corr,
                  vx, vy, vz, wy, tangential_speed] rows.
     subdir: subdirectory under runtime_logs/ (e.g. "push").
@@ -244,7 +277,7 @@ def save_ft_pose_log(
 
     Returns the timestamp string used for the filename, or None if nothing was saved.
     """
-    if not ft_log and not pose_log and not obj_pose_log:
+    if not ft_log and not pose_log and not obj_pose_log and not ft_raw_log:
         print(f"[{prefix}] No F/T or pose data collected — skipping npz save")
         return None
 
@@ -253,13 +286,20 @@ def save_ft_pose_log(
     obj_arr = np.array(obj_pose_log, dtype=np.float64) if obj_pose_log else np.empty((0, 8), dtype=np.float64)
     raw_arr = np.array(ft_raw_log, dtype=np.float64) if ft_raw_log else np.empty((0, 14), dtype=np.float64)
     cmd_arr = np.array(command_log, dtype=np.float64) if command_log else np.empty((0, 10), dtype=np.float64)
-    ft_pose_arr = ft_arr if ft_arr.size and ft_arr.shape[1] > 13 else raw_arr
+    ft_pose_arr = (ft_arr if ft_arr.size and ft_arr.shape[1] > 13 else
+                   raw_arr if raw_arr.size and raw_arr.shape[1] >= 14 else
+                   np.empty((0, 14)))
 
     ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = runtime_log_dir(subdir)
     npz_path = log_dir / f"{prefix}_{ts}.npz"
     save_kwargs = dict(
-        # F/T columns — bias-corrected, transformed to world frame
+        log_schema_version=np.array(2),
+        ft_msg_stamp_s=ft_arr[:, 14] if ft_arr.size and ft_arr.shape[1] > 14 else np.array([]),
+        ft_tf_stamp_s=ft_arr[:, 15] if ft_arr.size and ft_arr.shape[1] > 15 else np.array([]),
+        pose_tf_stamp_s=pose_arr[:, 11] if pose_arr.size and pose_arr.shape[1] > 11 else np.array([]),
+        ft_raw_msg_stamp_s=raw_arr[:, 7] if raw_arr.size and raw_arr.shape[1] == 8 else np.array([]),
+        # Wrench axes follow the configured NetFT tool transform, not a world rotation.
         ft_time_s=ft_arr[:, 0] if ft_arr.size else np.array([]),
         fx=ft_arr[:, 1]        if ft_arr.size else np.array([]),
         fy=ft_arr[:, 2]        if ft_arr.size else np.array([]),
@@ -298,7 +338,7 @@ def save_ft_pose_log(
         tx_raw=raw_arr[:, 4]         if raw_arr.size else np.array([]),
         ty_raw=raw_arr[:, 5]         if raw_arr.size else np.array([]),
         tz_raw=raw_arr[:, 6]         if raw_arr.size else np.array([]),
-        # ft_link pose in base/world frame. New logs store this alongside transformed F/T;
+        # Estimator reference pose in base/world frame, NOT the distal wrench origin;
         # legacy logs stored it alongside raw F/T.
         ft_px=ft_pose_arr[:, 7]       if ft_pose_arr.size else np.array([]),
         ft_py=ft_pose_arr[:, 8]       if ft_pose_arr.size else np.array([]),

@@ -9,7 +9,7 @@
         <visual>
             <origin xyz="0 -6.12323e-19 0.01" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/sensor_and_adapter_assembly/adapter_robot.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/sensor_and_adapter_assembly/adapter_robot.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.615686_0.811765_0.929412_0.000000_0.000000">
                 <color rgba="0.615686 0.811765 0.929412 1" />
@@ -25,7 +25,7 @@
         <visual>
             <origin xyz="0 -5.97015e-19 -0.0215" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/sensor_and_adapter_assembly/adapter_sensor.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/sensor_and_adapter_assembly/adapter_sensor.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.874510_0.447059_0.317647_0.000000_0.000000">
                 <color rgba="0.87451 0.447059 0.317647 1" />
@@ -46,7 +46,7 @@
         <visual>
             <origin xyz="-0.0377697 -0.0376899 -0.0286" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/sensor_and_adapter_assembly/sensor_body.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/sensor_and_adapter_assembly/sensor_body.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.498039_0.498039_0.498039_0.000000_0.000000">
                 <color rgba="0.498039 0.498039 0.498039 1" />
@@ -62,7 +62,7 @@
         <visual>
             <origin xyz="-6.62085e-18 -0.000500516 -0.021" rpy="0 -0 0" />
             <geometry>
-                <mesh filename="package://irb120_control/meshes/sensor_and_adapter_assembly/sensor_plate.gltf" scale="1 1 1" />
+                <mesh filename="package://irb120_models/meshes/sensor_and_adapter_assembly/sensor_plate.gltf" scale="1 1 1" />
             </geometry>
             <material name="0.901961_0.901961_0.901961_0.000000_0.000000">
                 <color rgba="0.901961 0.901961 0.901961 1" />

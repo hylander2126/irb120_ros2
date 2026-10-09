@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from irb120_control.util.ft_frames import WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME
 import numpy as np
 import pytest
 
@@ -23,7 +24,8 @@ def methods():
     env = dict(np=np, math=math, time=SimpleNamespace(monotonic=lambda: 1.),
                TransformException=LookupError, WrenchStamped=object,
                BASE_FRAME='world', EE_LINK='finger_ball_center', SENSOR_TIMEOUT_SEC=.3,
-               LINE_TOLERANCE_M=.003, ORIENTATION_TOLERANCE_RAD=math.radians(3.))
+               LINE_TOLERANCE_M=.003, ORIENTATION_TOLERANCE_RAD=math.radians(3.),
+               WRENCH_AXES_FRAME=WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME=WRENCH_HEADER_FRAME)
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(SOURCE), 'exec'), env)
     return env
 
@@ -84,6 +86,8 @@ def test_wrench_is_rotated_from_its_declared_frame_before_projection():
     methods()['_on_wrench'](node, msg)
     np.testing.assert_allclose(node._force, [0., 3., 0.], atol=1e-12)
     np.testing.assert_allclose(node._ft_log[0][4:7], [-2., 0., 0.], atol=1e-12)
+    # The 'ft_link' header label must resolve to the real axes frame, which exists in TF.
+    assert [c.args[0] for c in node._transform.call_args_list] == ['tool0']
     assert node._force_serial == 2
 
 

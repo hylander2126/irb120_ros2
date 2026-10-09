@@ -248,6 +248,7 @@ ros2 run controller_manager spawner joint_trajectory_controller -c /controller_m
 | Package | Purpose |
 |---|---|
 | `irb120_control` | Hardware bringup, controllers, EGM handler, application nodes (keyboard jog, press-pull tip, push, net/ft) |
+| `irb120_models` | Robot description (`urdf/irb120_with_finger.xacro`, ABB/finger/F/T meshes) and ground-truth object models (`objects/<name>/`) |
 | `irb120_moveit_config` | MoveIt config (SRDF, kinematics, OMPL, Servo, joint limits) |
 | `irb120_perception` | Object detection (DBSCAN / SAM2), robot mask filter, perception debugger |
 | `irb120_handeye` | Hand-eye calibration bringup, pose runner, calibration data files, and per-camera bringup (driver + solved TF) for both RealSense cameras |

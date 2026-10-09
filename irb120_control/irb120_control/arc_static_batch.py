@@ -29,10 +29,10 @@ from datetime import datetime
 
 import rclpy
 
+from irb120_control import arc_static
 from irb120_control.arc_static import ArcStatic, run_adaptive_press
 from irb120_control.util.egm_client import deactivate_egm, ensure_egm_active
 from irb120_control.util.episode import Episode
-from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.perception_snapshot import latest_contacts, latest_object_cloud, take_snapshot
 from irb120_control.util.runtime_log_dir import (
     VALID_OBJECTS,
@@ -56,6 +56,8 @@ def main(args=None) -> int:
     parser.add_argument("--quality", choices=["h264", "lossless"], default="h264")
     parser.add_argument("--episode", default="new", metavar="new|last|PATH",
                         help="Episode to record into (default: a new one). See util/episode.py.")
+    parser.add_argument("--tare-at-start", action="store_true",
+                        help="Legacy protocol: tare once before the initial approach.")
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
@@ -74,7 +76,7 @@ def main(args=None) -> int:
         if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
 
-        if not tare_netft(node):
+        if parsed.tare_at_start and not node.tare_with_metadata():
             return 1
         if not ensure_egm_active(node):
             return 1
@@ -86,6 +88,9 @@ def main(args=None) -> int:
         if not node.move_to_pre_squash():
             node.get_logger().error("Initial approach failed. Aborting.")
             return 1
+        if not parsed.tare_at_start:
+            if not node.pause_servo() or not node.tare_with_metadata():
+                return 1
         if not node._operator_confirm(
             f"At pre-squash pose. Confirm clear contact conditions before starting {parsed.trials} trials."
         ):
@@ -98,6 +103,7 @@ def main(args=None) -> int:
             node.get_logger().info(f"=== Batch trial {trial}/{parsed.trials} (starting force {force_ref:.2f} N) ===")
             # Each trial's logs cover only that trial.
             node._ft_transformed_log, node._pose_log, node._obj_pose_log, node._command_log = [], [], [], []
+            node._ft_capture.reset()
             stage = episode.begin_stage("press_pull_tip", trial=trial, trials_total=parsed.trials)
             if not start_recording(node, str(stage.path), quality=parsed.quality):
                 node.get_logger().error(f"Trial {trial}: cameras failed to start recording — aborting batch")
@@ -109,14 +115,19 @@ def main(args=None) -> int:
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_ft_pose_log(node._ft_transformed_log, node._pose_log, str(stage.path), LOG_PREFIX,
-                             node._obj_pose_log, command_log=node._command_log, timestamp=ts,
+                             node._obj_pose_log, ft_raw_log=node._ft_capture.raw,
+                             command_log=node._command_log, timestamp=ts,
                              commanded_pivot=node._arc_center)
             save_run_metadata(str(stage.path), LOG_PREFIX, ts, {
+                **module_constants(vars(arc_static)),
                 **module_constants(globals()),
+                **node._ft_capture.metadata(),
                 "object": node._object, "trial": trial, "trials_total": parsed.trials,
                 "pre_squash": node._pre_squash_pos, "arc_center": node._arc_center,
                 "object_nominal_force_ref_n": nominal_force_ref, "trial_start_force_ref_n": start_force_ref,
                 "trial_converged_force_ref_n": force_ref, "escalation_attempts": attempts,
+                "tare_at_start": parsed.tare_at_start,
+                "tare_events": node._tare_events,
                 "completed": node._completed,
             })
             stage.end("ok" if node._completed else "failed", completed=node._completed, attempts=attempts,
@@ -124,9 +135,12 @@ def main(args=None) -> int:
             stage = None
 
             if trial < parsed.trials:
-                node.pause_servo()
+                if not node.pause_servo():
+                    return 1
                 if not node.move_to_pre_squash():
                     node.get_logger().error(f"Trial {trial}: return to pre-squash failed — aborting batch")
+                    return 1
+                if not parsed.tare_at_start and not node.tare_with_metadata():
                     return 1
                 node.resume_servo()
 
