@@ -6,6 +6,63 @@ cost time to discover and would cost time again.
 
 ---
 
+## 2026-10-09 — RViz hangs on the splash logo: remove `Transformation:` from .rviz files
+
+### Symptom
+
+RViz (from `bringup_stack.launch.py`) shows the splash logo and never opens the main
+window. Intermittent. The last RViz log line is the MoveIt panel's
+`MoveGroup namespace changed: / -> . Reloading params`, which looks like the culprit
+but isn't. 0% CPU; `move_group` is healthy and answers services. RViz may later die
+with exit -11 (segfault).
+
+### Cause (rviz2 Jazzy 14.1.23 / MoveIt 2.12.4)
+
+A deadlock on the main thread while the config is loading, captured by running RViz
+under gdb (`ptrace_scope=1` blocks attaching to a running RViz, but gdb can start it):
+
+    main: VisualizationFrame::loadDisplayConfig → VisualizationManager::load
+          → TransformationManager::load → setTransformer → transformerChanged
+          → (Camera display) message_filters::Signal1<Image>::removeCallback
+          → pthread_mutex_lock   ← blocked forever; no other thread holds it
+    moveit: PlanningSceneDisplay::loadRobotModel → waitForAllMainLoopJobs ← waits on main
+
+The `.rviz` block
+
+      Transformation:
+        Current:
+          Class: rviz_default_plugins/TF
+
+re-selects the default TF transformer, but `TransformationManager::load` runs it
+*after* every display has already subscribed. Each tf-filtered display (Camera,
+PointCloud2, MarkerArray) then detaches its message-filter callback. If data arrives
+on those topics at the wrong moment, that lock never frees. It's a timing race:
+the same config hung on some starts and opened 9/9 on others.
+
+### Fix
+
+Delete that 3-line block. Then `setTransformer` runs only once, in the
+`TransformationManager` constructor, before any display exists (checked with gdb
+breakpoints: 2 calls → 1). Removed from `moveit.rviz`, `moveit_handeye.rviz`,
+`moveit_handeye_NEW.rviz` and `record_depth_both.rviz`.
+
+**RViz's File → Save Config writes the block back.** If the hang returns, check
+first: `grep -n -A2 "Transformation:" */rviz/*.rviz`.
+
+### Debugging tips if it's something else next time
+
+- Don't debug RViz from the VS Code terminal: the snap environment breaks it
+  (`symbol lookup error: /snap/core20/.../libpthread.so.0`). Use a normal terminal.
+- Getting a backtrace of the hang: `gdb -batch -ex run -ex "thread apply all bt"
+  --args rviz2 -d <cfg> --ros-args --params-file <moveit params>`, then send
+  SIGINT to rviz2 once it hangs.
+- To bisect, start only RViz against the live stack with the same MoveIt params as
+  bringup (`MoveItConfigsBuilder(...).to_dict()`). Without `robot_description_semantic`
+  the MoveIt panel never loads the robot and the hang can't happen, so standalone
+  `rviz2 -d moveit.rviz` tests prove nothing.
+
+---
+
 ## 2026-10-09 — Perceive ~55 s → ~15 s; push "EGM bail" was a MoveIt plan failure
 
 ### Perceive time was `check_view`, not the cameras
