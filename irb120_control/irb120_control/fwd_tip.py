@@ -31,7 +31,7 @@ from irb120_control.controllers.moveit_single_shot import (
 from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
-from irb120_control.util.forward_tip_motion import TipConfig, TipMotion, tip_targets
+from irb120_control.util.forward_tip_motion import TIP_STANDOFF, TipConfig, TipMotion, tip_targets
 from irb120_control.util.ft_frames import WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME
 from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.object_obstacle import object_obstacle
@@ -52,7 +52,7 @@ CONTROL_HZ = 100.
 SENSOR_TIMEOUT_SEC = .3
 LINE_TOLERANCE_M = .003
 ORIENTATION_TOLERANCE_RAD = math.radians(3.)
-STANDOFF_M = .02  # ball-centre standoff; tip_targets raises it if needed to clear the padded box
+STANDOFF_M = TIP_STANDOFF
 
 
 def rotate(q, vector):

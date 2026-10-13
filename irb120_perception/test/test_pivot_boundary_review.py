@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from irb120_perception.pivot_boundary_review import intersect_table, lower_boundary
 
@@ -94,25 +95,76 @@ def test_support_rejects_short_span():
         fit_support(np.c_[np.full(30, .6), np.linspace(0, .005, 30), np.zeros(30)], [0, 0, 0])
 
 
-def test_candidate_contacts_replace_only_pivot():
-    from irb120_perception.pivot_boundary_review import contacts_with_candidate_pivot
-    contacts = {'press': {'available': True, 'point': [.61, 0, .1],
-                          'ball_center': [.61, 0, .12],
-                          'geometry': {'pivot': [.59, 0, -.021],
-                                       'axis': [0, 1, 0], 'direction': [-1, 0, 0]}}}
-    report = {'candidate_status': 'reviewable', 'source': 'test',
-              'geometry': {'candidate_pivot_base_m': [.605, .002, -.021]},
-              'evidence': {'support_fit': {'support_type': 'flat_edge'}}}
-    result = contacts_with_candidate_pivot(contacts, report)
-    assert result['press']['geometry']['pivot'] == [.605, .002, -.021]
-    assert result['press']['point'] == contacts['press']['point']
-    assert result['press']['geometry']['axis'] == [0, 1, 0]
-    assert contacts['press']['geometry']['pivot'] == [.59, 0, -.021]
+def test_forward_fit_mirrors_the_press_fit():
+    from irb120_perception.pivot_boundary_review import fit_support
+    y = np.linspace(-.03, .03, 81)
+    plane = [.02, -.01, -.021]
+    for rounded in (False, True):
+        # Far (+X) edge: the support bulges toward +X.
+        x = .7 - (12*y*y if rounded else -.05*y)
+        z = plane[0]*x+plane[1]*y+plane[2]
+        points = np.c_[x, y, z]
+        points[::15, 0] -= .025  # inward outliers
+        result = fit_support(points, plane, outward=1.)
+        assert result['support_type'] == ('rounded_tangent' if rounded else 'flat_edge')
+        np.testing.assert_allclose(result['pivot'][0], .7, atol=.001)
+        np.testing.assert_allclose(result['pivot'][2], plane[0]*result['pivot'][0]+plane[1]*result['pivot'][1]+plane[2])
+        axis = np.asarray(result['axis'])
+        assert abs(axis @ np.array([-plane[0], -plane[1], 1])) < 1e-10
+        if not rounded:
+            assert axis[0]/axis[1] == pytest.approx(.05, abs=1e-3)
 
 
-def test_candidate_contacts_fail_closed():
-    import pytest
-    from irb120_perception.pivot_boundary_review import contacts_with_candidate_pivot
-    with pytest.raises(ValueError, match='not reviewable'):
-        contacts_with_candidate_pivot({}, {'candidate_status': 'rejected',
-                                           'fallback_reason': 'timing'})
+def test_forward_pivot_shape_rules():
+    from irb120_perception.forward_pivot_review import pivot_shape
+    base = dict(support_type='flat_edge', line_rms_mm=1., quadratic_rms_mm=.8)
+    assert pivot_shape(dict(base, line_span_mm=55, band_span_mm=58))[0] == 'straight'
+    # A short chord of a curved base fits a line well but is a point-like contact.
+    assert pivot_shape(dict(base, line_span_mm=25, band_span_mm=25))[0] == 'curved'
+    # A line through only part of the support band.
+    assert pivot_shape(dict(base, line_span_mm=45, band_span_mm=80))[0] == 'curved'
+    assert pivot_shape(dict(base, support_type='rounded_tangent', line_span_mm=55, band_span_mm=55))[0] == 'curved'
+
+
+def forward_contacts():
+    return {'forward_tip': {'available': True, 'point': [.68, 0, .1], 'ball_center': [.667, 0, .1],
+                            'geometry': {'pivot': [.70, 0, -.021], 'axis': [0, 1, 0], 'direction': [1, 0, 0]}}}
+
+
+def forward_report(status='reviewable', pivot=(.695, .003, -.02), shape='straight'):
+    return {'candidate_status': status, 'shape': shape, 'shape_reason': 'test', 'source': 'test',
+            'fallback_reason': 'x', 'geometry': {'candidate_pivot_base_m': list(pivot)},
+            'evidence': {'support_fit': {'support_type': 'flat_edge'}}}
+
+
+def test_forward_pivot_applied_with_shape_and_original_untouched():
+    from irb120_perception.forward_pivot_review import contacts_with_forward_pivot
+    original = forward_contacts()
+    result, applied, reason = contacts_with_forward_pivot(original, forward_report())
+    assert applied and reason is None
+    forward = result['forward_tip']
+    assert forward['geometry']['pivot'] == [.695, .003, -.02]
+    assert forward['geometry']['axis'] == [0, 1, 0] and forward['point'] == [.68, 0, .1]
+    assert forward['pivot_shape']['shape'] == 'straight'
+    assert forward['rgb_pivot']['replaced_cloud_pivot_base_m'] == [.70, 0, -.021]
+    assert original['forward_tip']['geometry']['pivot'] == [.70, 0, -.021]
+
+
+def test_forward_pivot_not_applied_but_shape_recorded():
+    from irb120_perception.forward_pivot_review import contacts_with_forward_pivot
+    for report, apply, why in [(forward_report(), False, 'shadow'),
+                               (forward_report(status='rejected', shape='unknown'), True, 'not reviewable'),
+                               (forward_report(pivot=(.66, 0, -.02)), True, 'not beyond')]:
+        result, applied, reason = contacts_with_forward_pivot(forward_contacts(), report, apply=apply)
+        assert not applied and why in reason
+        assert result['forward_tip']['geometry']['pivot'] == [.70, 0, -.021]
+        assert result['forward_tip']['pivot_shape']['shape'] == report['shape']
+
+
+def test_forward_review_without_mask_is_unknown(tmp_path):
+    import json
+    from irb120_perception.forward_pivot_review import evaluate
+    (tmp_path/'contacts.json').write_text(json.dumps(forward_contacts()))
+    report = evaluate(tmp_path)
+    assert report['shape'] == 'unknown' and 'missing saved cam3 SAM mask' in report['fallback_reason']
+    assert (tmp_path/'forward_pivot_review.json').exists()

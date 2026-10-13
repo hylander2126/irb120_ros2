@@ -2,19 +2,47 @@
 
 import numpy as np
 
-from irb120_control.orchestrator import NOSLIP_TOL_MM, choose_tip, press_pull_slip_mm
+from irb120_control.orchestrator import NOSLIP_TOL_MM, choose_tip, forward_pivot_shape, press_pull_slip_mm
 
 
-def contacts(press=True, forward=True):
-    return {'press': {'available': press, 'reason': 'no top'},
-            'forward_tip': {'available': forward, 'reason': 'no side'}}
+def contacts(press=True, forward=True, shape=None):
+    result = {'press': {'available': press, 'reason': 'no top'},
+              'forward_tip': {'available': forward, 'reason': 'no side'}}
+    if shape is not None:
+        result['forward_tip']['pivot_shape'] = {'shape': shape, 'reason': 'test'}
+    return result
 
 
-def test_first_tip_prefers_press_pull():
-    assert choose_tip(contacts())[0] == 'press_pull_tip'
-    assert choose_tip(contacts(press=False))[0] == 'forward_tip'
+def test_first_tip_prefers_press_pull_when_pivot_unknown_or_curved():
+    for shape in (None, 'unknown', 'curved'):
+        assert choose_tip(contacts(shape=shape))[0] == 'press_pull_tip'
+        assert choose_tip(contacts(press=False, shape=shape))[0] == 'forward_tip'
     # Nothing usable: still press-pull, so the gate reports its missing contact.
     assert choose_tip(contacts(press=False, forward=False))[0] == 'press_pull_tip'
+
+
+def test_first_tip_is_forward_when_pivot_is_straight():
+    kind, reason = choose_tip(contacts(shape='straight'))
+    assert kind == 'forward_tip' and 'straight' in reason
+    kind, reason = choose_tip(contacts(forward=False, shape='straight'))
+    assert kind == 'press_pull_tip' and 'no forward-tip contact' in reason
+
+
+def test_pivot_shape_defaults_to_unknown():
+    assert forward_pivot_shape({})[0] == 'unknown'
+    assert forward_pivot_shape(contacts(shape='bogus'))[0] == 'unknown'
+    assert forward_pivot_shape(contacts(shape='curved')) == ('curved', 'test')
+
+
+def test_press_pull_follows_failed_forward_tip_once():
+    straight = contacts(shape='straight')
+    assert choose_tip(straight, forward_result={'status': 'ok', 'slip_mm': None})[0] is None
+    failed = {'status': 'failed', 'slip_mm': None}
+    assert choose_tip(straight, forward_result=failed)[0] == 'press_pull_tip'
+    kind, reason = choose_tip(contacts(press=False, shape='straight'), forward_result=failed)
+    assert kind is None and 'no press contact' in reason
+    # Both tried: stop, whatever the second one did.
+    assert choose_tip(straight, press_result=failed, forward_result=failed)[0] is None
 
 
 def test_forward_tip_follows_failed_or_slipped_press_pull():
@@ -32,6 +60,7 @@ def test_forced_mode_runs_one_tip():
     assert choose_tip(contacts(), 'press')[0] == 'press_pull_tip'
     failed = {'status': 'failed', 'slip_mm': None}
     assert choose_tip(contacts(), 'press', failed)[0] is None
+    assert choose_tip(contacts(shape='straight'), 'forward', forward_result=failed)[0] is None
 
 
 def _write_log(path, radii, states):

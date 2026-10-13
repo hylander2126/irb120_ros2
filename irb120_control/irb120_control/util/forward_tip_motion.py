@@ -10,6 +10,9 @@ from irb120_control.util.push_geometry import (
 )
 
 
+TIP_STANDOFF = .02  # ball-centre standoff; tip_targets raises it if needed to clear the padded box
+
+
 def tip_targets(contact, xyz, standoff=0.04):
     """Return ball, edge-normal direction, pivot and a box-clearing pre-tip point.
 

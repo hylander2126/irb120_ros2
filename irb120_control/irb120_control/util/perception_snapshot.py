@@ -4,22 +4,37 @@ take_snapshot() saves into <episode>/NN_perceive/:
 
   object_cloud.npz         the object cloud the contacts come from (DBSCAN -> SAM cull), base_link
   object_cloud_dbscan.npz  the raw DBSCAN cloud it was culled from, for comparison
-  contacts.json            full select_contact_points() output for that cloud (base_link)
+  contacts.json            the contacts motion steps use (base_link). Selected once:
+                           forward_tip + planar_push by select_contact_points(), press by
+                           experimental_view_check's top-support rule, both against the
+                           cam1 SAM press pivot when reviewable (pivot_boundary_review.json),
+                           then the forward pivot moved to the cam3 SAM fit when reviewable
+  experimental_view_check.json  press candidates and why each passed or failed
   camN_color.png           one color frame per camera, taken with the cloud
   Aligned depth is used in memory and retained in the bag, not separate images.
   camN_camera_info.json    intrinsics + the camera's pose in base_link
   camN_overlay.png         color frame with the cloud (cyan), the points SAM culled (red)
                            and the contacts projected in
+  camN_contact_review.png  the press contact: pivot, pre-squash and contact fingertip spheres
+  camN_forward_contact_review.png  the same for the forward-tip contact (pre-tip sphere)
+  cam3_sam_mask.png        the culler's cam3 review mask (+ cam3_sam_color, cam3_sam_depth)
+  cam3_forward_pivot_review.png, forward_pivot_review.json
+                           the forward (+X, far-edge) pivot fit from that mask, and whether
+                           the pivot is straight or curved (contacts forward_tip.pivot_shape)
   bag/                     short rosbag of raw camera streams, TF, joint states, detector outputs
-  snapshot.json            summary of the above
+  snapshot.json            summary of the above, including tip_choice: which tip
+                           (press_pull_tip / forward_tip) this snapshot calls for, and why
 
-The bag is ~70 MB (BAG_SECONDS counts from when the recorder is up; it also
-records during its own ~2 s startup). The DBSCAN input clouds aren't bagged
+The bag is ~40-70 MB (BAG_SECONDS counts from when the recorder has subscribed
+to every topic). The DBSCAN input clouds aren't bagged
 (far too big); they can be regenerated from aligned depth + camera_info.
 
 The DBSCAN detector is switched off -> on first so its temporal accumulator
 starts empty (a snapshot after a push must not fuse frames from before it),
 and off again afterwards. The arm must be out of the cameras' view.
+
+All three cameras must deliver color, aligned depth, camera info and TF; if any
+is missing the snapshot fails and no contacts are selected.
 """
 
 from collections import deque
@@ -42,6 +57,7 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from irb120_control.util.episode import write_json_atomic
+from irb120_control.util.tip_choice import choose_tip
 from irb120_perception.contact_point_selector import select_contact_points
 
 CAMERAS = {"cam1": "realsense", "cam2": "realsense2", "cam3": "realsense3"}
@@ -52,11 +68,14 @@ SAM_MASK_TOPIC = "/object_detector_dbscan_sam_cull/sam_mask"
 SAM_COLOR_TOPIC = "/object_detector_dbscan_sam_cull/sam_color"
 SAM_DEPTH_TOPIC = "/object_detector_dbscan_sam_cull/sam_depth"
 SAM_METADATA_TOPIC = "/object_detector_dbscan_sam_cull/sam_metadata"
+REVIEW_TOPICS = {k: f"/object_detector_dbscan_sam_cull/review_sam_{k}" for k in ("mask", "color", "depth", "metadata")}
 DETECTOR_ACTIVE_SERVICE = "/object_detector/set_active"
+DETECTOR_STATUS_TOPIC = "/object_detector/camera_status"  # why the detector is not fusing, if it isn't
 
 SETTLE_CLOUDS = 5          # non-empty DBSCAN clouds to wait for after the accumulator reset
 DBSCAN_TIMEOUT_SEC = 10.0
 CULL_TIMEOUT_SEC = 15.0    # the culler takes ~2 s per pass, with >= 2 s between passes
+REVIEW_TIMEOUT_SEC = 8.0   # cam3 review mask: one more SAM call, after the cull is published
 BAG_SECONDS = 1.0          # 0 = no bag
 BAG_TOPICS = [f"/{ns}/{t}" for ns in CAMERAS.values()
               for t in ("color/image_raw", "color/camera_info",
@@ -86,6 +105,25 @@ def _closest_depth_frame(candidates, target_stamp):
     """
     valid = [m for m in candidates if m is not None]
     return min(valid, key=lambda m: abs(_stamp(m) - target_stamp)) if valid else None
+
+
+def _json_or_empty(msg) -> dict:
+    try:
+        value = json.loads(msg.data)
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _review_match(review, cull_msg):
+    """(mask, color, depth or None, metadata) of the review-camera mask for this cull, else None."""
+    stamp = cull_msg.header.stamp
+    found = [next((m for m in review[k] if m.header.stamp == stamp), None) for k in ("mask", "color", "depth")]
+    metadata = next((m for m in map(_json_or_empty, review["metadata"])
+                     if m.get("cloud_stamp") == [stamp.sec, stamp.nanosec]), None)
+    if found[0] is None or found[1] is None or metadata is None:
+        return None
+    return (*found, metadata)
 
 
 def _xyz(msg: PointCloud2) -> np.ndarray:
@@ -150,17 +188,24 @@ def _set_detector_active(node, active: bool) -> None:
 
 
 def _record_bag(node, out, seconds: float) -> float:
-    """Record BAG_TOPICS for `seconds` after the recorder is up. Returns the bag size in MB."""
+    """Record BAG_TOPICS for `seconds` once the recorder has subscribed to all of them
+    (discovery can take over a second per camera; counting from startup left cam2/cam3
+    with a few frames or none). Returns the bag size in MB."""
     name = f"snapshot_bag_{os.getpid()}"
-    with open(out / "bag_record.log", "w") as log:
-        proc = subprocess.Popen(
-            ["ros2", "bag", "record", "-o", str(out / "bag"), "-s", "mcap", "--storage-preset-profile",
-             "zstd_fast", "--node-name", name, "--disable-keyboard-controls", "--topics", *BAG_TOPICS],
-            stdout=log, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        ["ros2", "bag", "record", "-o", str(out / "bag"), "-s", "mcap", "--storage-preset-profile",
+         "zstd_fast", "--node-name", name, "--disable-keyboard-controls", "--topics", *BAG_TOPICS],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + 10.0
-    while name not in node.get_node_names() and time.monotonic() < deadline and proc.poll() is None:
+    while time.monotonic() < deadline and proc.poll() is None:
+        if name in node.get_node_names():
+            subscribed = {topic for topic, _ in node.get_subscriber_names_and_types_by_node(name, "/")}
+            if subscribed >= set(BAG_TOPICS):
+                break
         rclpy.spin_once(node, timeout_sec=0.1)
-    end = time.monotonic() + 0.5 + seconds  # 0.5 s for topic discovery
+    else:
+        node.get_logger().warn("[snapshot] bag recorder did not subscribe to every topic within 10 s")
+    end = time.monotonic() + seconds
     while time.monotonic() < end and proc.poll() is None:
         rclpy.spin_once(node, timeout_sec=0.05)
     if proc.poll() is None:
@@ -262,6 +307,11 @@ def _final_selection_montage(review_frames, contacts, pivot_record):
                 continue
             point = np.asarray(selected["point"])
             drawing.marker(point, shade)
+            geometry = selected.get("geometry") or {}
+            if mode == "forward_tip" and geometry.get("pivot") is not None:
+                pivot, axis = np.asarray(geometry["pivot"]), np.asarray(geometry["axis"])
+                drawing.line(pivot - .04*axis, pivot + .04*axis, shade)
+                drawing.marker(pivot, shade)
             direction = (selected.get("geometry") or {}).get("direction", selected.get("direction"))
             if direction is not None:
                 drawing.line(point, point+.04*np.asarray(direction), shade, arrow=True)
@@ -286,9 +336,13 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     dbscan, cull = [], []
     sam_masks, sam_colors, sam_depths = deque(maxlen=16), deque(maxlen=16), deque(maxlen=16)
     sam_metadata = deque(maxlen=16)
+    review = {k: deque(maxlen=16) for k in REVIEW_TOPICS}
     cam1_depths = deque(maxlen=90)
+    camera_status = deque(maxlen=1)
     subs = [node.create_subscription(PointCloud2, DBSCAN_TOPIC, dbscan.append, 10),
-            node.create_subscription(PointCloud2, CULL_TOPIC, cull.append, 10)]
+            node.create_subscription(PointCloud2, CULL_TOPIC, cull.append, 10),
+            node.create_subscription(String, DETECTOR_STATUS_TOPIC,
+                                     lambda msg: camera_status.append(msg.data), 10)]
     # rclpy validates callback signatures. deque.append is a builtin whose
     # signature inspect.signature() cannot read, so use ordinary callables.
     subs.extend([node.create_subscription(Image, SAM_MASK_TOPIC,
@@ -305,6 +359,9 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                  node.create_subscription(Image, "/realsense/aligned_depth_to_color/image_raw",
                                           lambda msg: cam1_depths.append(msg),
                                           qos_profile_sensor_data)])
+    subs.extend(node.create_subscription(String if k == "metadata" else Image, topic,
+                                         lambda msg, q=review[k]: q.append(msg), 10)
+                for k, topic in REVIEW_TOPICS.items())
     for cam, ns in CAMERAS.items():
         for key, msg_type, topic in (("color", Image, f"/{ns}/color/image_raw"),
                                      ("depth", Image, f"/{ns}/aligned_depth_to_color/image_raw"),
@@ -348,6 +405,13 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                 if diagnostic_pair and metadata_match:
                     break
                 rclpy.spin_once(node, timeout_sec=0.05)
+            # The culler announces a review-camera mask in its metadata, then sends it after the cull.
+            review_camera = next((m.get('review_camera') for m in map(_json_or_empty, sam_metadata)
+                                  if m.get('cloud_stamp') == [cull_msg.header.stamp.sec,
+                                                              cull_msg.header.stamp.nanosec]), None)
+            deadline = time.monotonic() + REVIEW_TIMEOUT_SEC
+            while review_camera and time.monotonic() < deadline and _review_match(review, cull_msg) is None:
+                rclpy.spin_once(node, timeout_sec=0.05)
         record["wait_s"] = round(time.monotonic() - t0, 1)
 
         if BAG_SECONDS > 0:
@@ -357,7 +421,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             node.destroy_subscription(sub)
         _set_detector_active(node, False)
 
-    # 3. Clouds + contacts.
+    # 3. Clouds.
     raw = _xyz(cloud_msg) if cloud_msg is not None else np.empty((0, 3))
     obj = _xyz(cull_msg) if cull_msg is not None else np.empty((0, 3))
     np.savez_compressed(out / "object_cloud_dbscan.npz", xyz=raw)
@@ -365,21 +429,15 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     record["dbscan_points"], record["points"] = len(raw), len(obj)
     contacts = {}
     if cloud_msg is None:
-        record["error"] = f"no object in the DBSCAN cloud within {DBSCAN_TIMEOUT_SEC:.0f} s"
+        record["error"] = (f"no object in the DBSCAN cloud within {DBSCAN_TIMEOUT_SEC:.0f} s"
+                           + (f" -- detector: {camera_status[-1]}" if camera_status else ""))
     elif cull_msg is None:
         record["error"] = f"no SAM cull output within {CULL_TIMEOUT_SEC:.0f} s -- is the culler running?"
     elif len(obj) < 3:
         record["error"] = "SAM cull removed the whole object"
-    else:
-        try:
-            contacts = _jsonable(select_contact_points(obj, min_ball_center_z=MIN_BALL_CENTER_Z))
-            record["ok"] = True
-        except ValueError as exc:
-            record["error"] = f"contact selection failed: {exc}"
-    write_json_atomic(out / "contacts.json", contacts)
-    record["available"] = {m: (contacts.get(m) or {}).get("available", False) for m in CONTACT_COLORS}
 
-    # 4. Per-camera images, intrinsics, pose, overlay.
+    # 4. Per-camera images, intrinsics and pose. All three cameras must be up, with TF:
+    # no contacts are selected from a snapshot missing one.
     kept = {tuple(p) for p in np.round(obj, 5)}
     culled = np.array([p for p in raw if tuple(np.round(p, 5)) not in kept]).reshape(-1, 3)
     bridge = CvBridge()
@@ -402,156 +460,130 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                     continue
                 if metadata.get('cloud_stamp') == [cull_msg.header.stamp.sec, cull_msg.header.stamp.nanosec]:
                     # Prefer the culler's own depth frame: it grabbed this at the same
-                    # moment as sam_color, before its SAM call, so the skew in
-                    # 'rgb_depth_delta_s' (already computed by the culler) reflects two
-                    # back-to-back topic reads -- not however long that call then took.
+                    # moment as sam_color, before its SAM call, so the two are back-to-back
+                    # topic reads -- not however long that call then took.
                     paired = next((m for m in sam_depths if m.header.stamp == cull_msg.header.stamp), None)
                     closest = paired if paired is not None else _closest_depth_frame(
                         [*cam1_depths, images.get('cam1', {}).get('depth')], metadata['color_stamp'])
-                    if paired is None and closest is not None:
-                        metadata['depth_stamp'] = _stamp(closest)
-                        metadata['rgb_depth_delta_s'] = abs(metadata['depth_stamp']-metadata['color_stamp'])
-                        metadata['depth_source'] = 'perception_snapshot nearest-buffered-frame fallback'
-                    elif paired is not None:
-                        metadata['depth_source'] = 'culler-paired at source'
                     if closest is not None:
                         sam_depth = bridge.imgmsg_to_cv2(closest, desired_encoding="passthrough")
                         if sam_depth.dtype != np.uint16:
                             sam_depth = np.nan_to_num(sam_depth * 1000.0).clip(0, 65535).astype(np.uint16)
                         np.savez_compressed(out / 'cam1_sam_depth.npz', depth_mm=sam_depth,
                                             stamp=_stamp(closest), encoding="16UC1")
-                    write_json_atomic(out / 'cam1_sam_metadata.json', metadata)
                     break
+    record['review_mask'] = {'available': False, 'reason': 'no review-camera mask for this cull'}
+    matched = _review_match(review, cull_msg) if cull_msg is not None else None
+    if matched is not None:
+        mask, rgb, depth_msg, metadata = matched
+        cam = metadata.get('camera', 'cam3')
+        cv2.imwrite(str(out / f'{cam}_sam_mask.png'), bridge.imgmsg_to_cv2(mask, desired_encoding='mono8'))
+        cv2.imwrite(str(out / f'{cam}_sam_color.png'), bridge.imgmsg_to_cv2(rgb, desired_encoding='bgr8'))
+        if depth_msg is not None:
+            sam_depth = bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+            if sam_depth.dtype != np.uint16:
+                sam_depth = np.nan_to_num(sam_depth * 1000.0).clip(0, 65535).astype(np.uint16)
+            np.savez_compressed(out / f'{cam}_sam_depth.npz', depth_mm=sam_depth,
+                                stamp=_stamp(depth_msg), encoding="16UC1")
+        record['review_mask'] = {'available': True, 'camera': cam, 'file': f'{cam}_sam_mask.png'}
     review_frames = {}
-    for cam, m in images.items():
-        if "color" not in m or "info" not in m:
-            record.setdefault("missing_cameras", []).append(cam)
+    camera_errors = []
+    for cam in CAMERAS:
+        m = images[cam]
+        missing = [k for k in ("color", "depth", "info") if k not in m]
+        if missing:
+            camera_errors.append(f"{cam}: no {'/'.join(missing)} received")
             continue
         K, D = np.array(m["info"].k).reshape(3, 3), np.array(m["info"].d)
         color = bridge.imgmsg_to_cv2(m["color"], desired_encoding="bgr8")
-        depth = None
         cv2.imwrite(str(out / f"{cam}_color.png"), color)
-
-        if "depth" in m:
-            depth = bridge.imgmsg_to_cv2(m["depth"], desired_encoding="passthrough")
-            if depth.dtype != np.uint16:  # 32FC1 metres -> mm
-                depth = np.nan_to_num(depth * 1000.0).clip(0, 65535).astype(np.uint16)
-            # Preserve the exact aligned metric frame used by contact validation.
-            # The auxiliary bag may miss late-discovered camera topics if a
-            # driver stalls or restarts during its short recording window.
-            np.savez_compressed(out / f"{cam}_aligned_depth.npz", depth_mm=depth,
-                                stamp=_stamp(m["depth"]), encoding="16UC1")
-            record.setdefault("depth_frames", []).append(cam)
+        depth = bridge.imgmsg_to_cv2(m["depth"], desired_encoding="passthrough")
+        if depth.dtype != np.uint16:  # 32FC1 metres -> mm
+            depth = np.nan_to_num(depth * 1000.0).clip(0, 65535).astype(np.uint16)
+        # Preserve the exact aligned metric frame used by contact validation.
+        np.savez_compressed(out / f"{cam}_aligned_depth.npz", depth_mm=depth,
+                            stamp=_stamp(m["depth"]), encoding="16UC1")
         info = {"frame_id": m["color"].header.frame_id, "K": K.tolist(), "D": D.tolist(),
                 "width": m["info"].width, "height": m["info"].height}
         tf = lookup(node, m["color"].header.frame_id, BASE_FRAME)
-        if tf is not None:
+        if tf is None:
+            camera_errors.append(f"{cam}: no TF {BASE_FRAME} -> {m['color'].header.frame_id}")
+        else:
             R, t = tf
             info["position_in_base"] = (-R.T @ t).tolist()
             info["base_to_optical"] = {"R": R.tolist(), "t": t.tolist()}
-            cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(color, K, D, R, t, obj, culled, contacts, depth))
-        write_json_atomic(out / f"{cam}_camera_info.json", info)
-        if tf is not None:
             review_frames[cam] = (color, depth, info)
+        write_json_atomic(out / f"{cam}_camera_info.json", info)
+    if camera_errors:
+        record["camera_errors"] = camera_errors
+        record.setdefault("error", "camera(s) not available: " + "; ".join(camera_errors))
 
     def refresh_overlays(contacts):
-        """Redraw every camera's overlay.png against a newly-applied `contacts`."""
-        for cam in CAMERAS:
-            info_path = out / f"{cam}_camera_info.json"
-            if not info_path.exists():
-                continue
-            info = json.loads(info_path.read_text())
-            tf = info.get("base_to_optical")
-            if tf is None:
-                continue
-            color = cv2.imread(str(out / f"{cam}_color.png"))
+        """Draw every camera's overlay.png against `contacts`."""
+        for cam, (color, depth, info) in review_frames.items():
+            tf = info["base_to_optical"]
             cv2.imwrite(str(out / f"{cam}_overlay.png"), _overlay(
                 color, np.asarray(info["K"]), np.asarray(info["D"]),
-                np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts,
-                review_frames.get(cam, (None, None, None))[1]))
+                np.asarray(tf["R"]), np.asarray(tf["t"]), obj, culled, contacts, depth))
 
-    # The camera-validated top-support selector is the default press path.
-    # Environment overrides remain as an explicit rollback/debug mechanism:
-    # `off` restores baseline selection and `shadow` records without applying.
-    experiment = os.environ.get("IRB120_EXPERIMENTAL_VIEW_CHECK", "apply")
-    if experiment not in ("off", "shadow", "apply"):
-        raise ValueError("IRB120_EXPERIMENTAL_VIEW_CHECK must be off, shadow, or apply")
-    rule = os.environ.get("IRB120_EXPERIMENTAL_PRESS_RULE", "top_support_v1")
-    # Whatever built contacts['press'] below (the plain selector, or this rule)
-    # is also what the RGB-pivot reseed further down must re-run -- an object
-    # whose only valid press needs the rule's inferred-top-surface candidates
-    # (e.g. a rounded cylinder cap with no clean observed upward normal) has no
-    # press at all under the plain selector, pivot override or not.
-    contacts_baseline_for_reseed = contacts
-    if experiment != "off" and record["ok"]:
-        from irb120_perception.experimental_view_check import evaluate
-        proposed, evidence = evaluate(out, contacts,
-            cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
-                     if depth is not None}, rule=rule)
-        write_json_atomic(out / "contacts_baseline.json", contacts)
-        write_json_atomic(out / "contacts_experimental_view_check.json", proposed)
+    if "error" in record:
+        write_json_atomic(out / "contacts.json", contacts)
+        record["available"] = {m: False for m in CONTACT_COLORS}
+        refresh_overlays(contacts)
+        write_json_atomic(out / "snapshot.json", record)
+        stage.end("failed", **{k: record[k] for k in ("points", "dbscan_points", "available", "bag_mb", "error")
+                               if k in record})
+        node.get_logger().error(f"[snapshot] FAILED, no contacts selected: {record['error']}")
+        return record
+
+    # 5. Press pivot: where the cam1 SAM mask meets the table (pivot_boundary_review).
+    # Press selection uses it whenever the fit is reviewable, else the cloud estimate.
+    from irb120_perception.pivot_boundary_review import evaluate as evaluate_press_pivot
+    pivot_report = evaluate_press_pivot(out, sam_images=sam_images)
+    press_pivot = None
+    if pivot_report.get("candidate_status") == "reviewable":
+        press_pivot = (pivot_report.get("geometry") or {}).get("candidate_pivot_base_m")
+    record["rgb_pivot"] = {"applied": press_pivot is not None,
+                           "candidate_status": pivot_report.get("candidate_status"),
+                           "reason": None if press_pivot is not None else pivot_report.get("fallback_reason")}
+
+    # 6. Contacts, selected once: forward_tip and planar_push by select_contact_points,
+    # press by the top-support rule (experimental_view_check), against that press pivot.
+    from irb120_perception.experimental_view_check import evaluate as evaluate_press
+    cameras = {cam: (depth, info) for cam, (_, depth, info) in review_frames.items()}
+    try:
+        contacts = _jsonable(select_contact_points(obj, min_ball_center_z=MIN_BALL_CENTER_Z,
+                                                   press_pivot_override=press_pivot))
+        contacts, evidence = evaluate_press(out, contacts, cameras=cameras, rule="top_support_v1",
+                                            press_pivot_override=press_pivot)
         write_json_atomic(out / "experimental_view_check.json", evidence)
-        record["experimental_view_check"] = {"mode": experiment, "decision": evidence["decision"]}
-        if experiment == "apply":
-            contacts = proposed
-            write_json_atomic(out / "contacts.json", contacts)
-            record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
-            refresh_overlays(contacts)
+        record["experimental_view_check"] = {"decision": evidence["decision"]}
+        record["ok"] = True
+    except ValueError as exc:
+        record["error"] = f"contact selection failed: {exc}"
 
-    # `apply` is the default: re-seed select_contact_points' press pivot with a
-    # reviewable SAM/RGB boundary fit once it clears the gates in
-    # pivot_boundary_review.evaluate(), moving the selected press point itself
-    # (not just the arc's rotation center). `shadow` records a candidate without
-    # using it (rollback/debug); `off` disables the RGB pivot path entirely.
-    pivot_mode = os.environ.get("IRB120_RGB_PIVOT", "apply")
-    if pivot_mode not in ("off", "shadow", "apply"):
-        raise ValueError("IRB120_RGB_PIVOT must be off, shadow, or apply")
-    if pivot_mode != "off" and record["ok"]:
-        from irb120_perception.pivot_boundary_review import (
-            contacts_with_candidate_pivot, evaluate as evaluate_pivot_boundary)
-        pivot_report = evaluate_pivot_boundary(
-            out, snapshot_record=record, sam_images=sam_images, rule=rule if experiment != 'off' else 'top_support_v1',
-            cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
-                     if depth is not None})
-        pivot_record = {"mode": pivot_mode,
-                        "candidate_status": pivot_report.get("candidate_status"),
-                        "reason": pivot_report.get("fallback_reason"),
-                        "applied": False}
-        try:
-            rgb_contacts = contacts_with_candidate_pivot(contacts, pivot_report)
-            write_json_atomic(out / "contacts_rgb_pivot.json", rgb_contacts)
-        except ValueError as exc:
-            pivot_record["reason"] = str(exc)
-        if pivot_mode == "apply" and pivot_report.get("candidate_status") == "reviewable":
-            pivot = (pivot_report.get("geometry") or {}).get("candidate_pivot_base_m")
-            try:
-                if experiment != "off" and record["ok"]:
-                    from irb120_perception.experimental_view_check import evaluate as evaluate_view_check
-                    reseeded, reseeded_evidence = evaluate_view_check(
-                        out, contacts_baseline_for_reseed,
-                        cameras={cam: (depth, info) for cam, (_, depth, info) in review_frames.items()
-                                 if depth is not None},
-                        rule=rule, render_overlays=True, press_pivot_override=pivot)
-                else:
-                    reseeded = _jsonable(select_contact_points(
-                        obj, min_ball_center_z=MIN_BALL_CENTER_Z, press_pivot_override=pivot))
-                if not (reseeded.get("press") or {}).get("available"):
-                    raise ValueError("press contact unavailable after RGB pivot reseed")
-                write_json_atomic(out / "contacts_pre_rgb_pivot.json", contacts)
-                contacts = reseeded
-                if experiment != "off":
-                    write_json_atomic(out / "experimental_view_check.json", reseeded_evidence)
-                    write_json_atomic(out / "contacts_experimental_view_check.json", contacts)
-                write_json_atomic(out / "contacts_rgb_pivot.json", contacts)
-                write_json_atomic(out / "contacts.json", contacts)
-                record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
-                refresh_overlays(contacts)
-                pivot_record["applied"] = True
-            except ValueError as exc:
-                pivot_record["reason"] = str(exc)
-        record["rgb_pivot"] = pivot_record
+    # 7. Forward-tip pivot from the cam3 mask: records whether it is straight or curved
+    # (choose_tip reads it) and, when reviewable, moves the forward pivot to that fit.
+    if record["ok"]:
+        from irb120_perception.forward_pivot_review import (
+            contacts_with_forward_pivot, evaluate as evaluate_forward_pivot)
+        forward_report = evaluate_forward_pivot(out, contacts)
+        contacts, applied, reason = contacts_with_forward_pivot(contacts, forward_report)
+        record["forward_pivot"] = {"shape": forward_report["shape"],
+                                   "candidate_status": forward_report["candidate_status"],
+                                   "applied": applied, "reason": reason}
+    write_json_atomic(out / "contacts.json", contacts)
+    record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}
+    refresh_overlays(contacts)
 
-    # Cheap visual byproduct only: draw the final selected press, not a new search.
+    # 8. Which tip this snapshot calls for, and why (the same rule run_pipeline uses
+    # for its first tip): forward tip about a straight pivot edge, else press-pull.
+    if record["ok"]:
+        tip, reason = choose_tip(contacts)
+        record["tip_choice"] = {"tip": tip, "reason": reason}
+        node.get_logger().info(f"[snapshot] tip choice: {tip} ({reason})")
+
+    # Cheap visual byproduct only: draw the final selected press and forward contacts, not a new search.
     from irb120_perception.contact_graphics import contact_graphic
     graphics_start = time.monotonic()
     graphics = {"files": [], "style": "flat projection"}
@@ -566,12 +598,31 @@ def take_snapshot(node, episode, label: str = "") -> dict:
         except (ValueError, KeyError, OSError, cv2.error) as exc:
             graphics.setdefault("errors", {})[cam] = str(exc)
             node.get_logger().warn(f"[snapshot] contact graphics: {exc}")
+    forward = contacts.get("forward_tip") or {}
+    if forward.get("available"):
+        from irb120_control.util.forward_tip_motion import TIP_STANDOFF, tip_targets
+        try:
+            pre = tip_targets(forward, obj, TIP_STANDOFF)[3]
+        except ValueError as exc:  # fwd_tip would refuse this contact too; draw without a pre-tip
+            pre = np.asarray(forward["ball_center"])
+            graphics.setdefault("errors", {})["forward_pre_tip"] = str(exc)
+        for cam, (color, depth, info) in review_frames.items():
+            name = f"{cam}_forward_contact_review.png"
+            try:
+                img = contact_graphic(color, depth, info, forward, forward.get("geometry"),
+                                      pre=pre, reference_arrow=False)
+                if not cv2.imwrite(str(out / name), img):
+                    raise OSError(f"could not write {name}")
+                graphics["files"].append(name)
+            except (ValueError, KeyError, OSError, cv2.error) as exc:
+                graphics.setdefault("errors", {})[f"{cam}_forward"] = str(exc)
+                node.get_logger().warn(f"[snapshot] forward contact graphics: {exc}")
     graphics["elapsed_seconds"] = time.monotonic()-graphics_start
     record["contact_graphics"] = graphics
 
     # One multi-camera strip for the combination actually used (SAM pivot +
     # its press point when applied, else the cloud-pivot fallback) -- the
-    # same "trio" treatment press_review.py gives the pointcloud alternatives.
+    # same three-camera view for every contact.
     try:
         montage = _final_selection_montage(review_frames, contacts, record.get("rgb_pivot") or {})
         if montage is not None and cv2.imwrite(str(out / "final_selection.jpg"), montage):
@@ -581,7 +632,9 @@ def take_snapshot(node, episode, label: str = "") -> dict:
 
     write_json_atomic(out / "snapshot.json", record)
     stage.end("ok" if record["ok"] else "failed",
-              **{k: record[k] for k in ("points", "dbscan_points", "available", "bag_mb", "error") if k in record})
+              **{k: record[k] for k in ("points", "dbscan_points", "available", "bag_mb", "error") if k in record},
+              **({"tip": record["tip_choice"]["tip"], "tip_reason": record["tip_choice"]["reason"]}
+                 if "tip_choice" in record else {}))
     if not record["ok"]:
         node.get_logger().error(f"[snapshot] {record['error']}")
     return record

@@ -30,7 +30,8 @@ def test_diagnostics_keep_exact_rgb_and_cloud_association(monkeypatch):
                            base_frame='base_link', tf_buffer=Mock(),
                            _mask_pub=Mock(), _color_pub=Mock(), _depth_pub=Mock(),
                            _metadata_pub=Mock(),
-                           _publish_results=Mock(), get_logger=lambda: Mock())
+                           _publish_results=Mock(), get_logger=lambda: Mock(),
+                           _review_inputs=lambda: None)
 
     def cull(points, rgb, info, tf):
         assert rgb is color
@@ -77,7 +78,8 @@ def test_depth_paired_at_the_same_moment_as_color_not_after_the_sam_call(monkeyp
                            base_frame='base_link', tf_buffer=Mock(),
                            _mask_pub=Mock(), _color_pub=Mock(), _depth_pub=Mock(),
                            _metadata_pub=Mock(),
-                           _publish_results=Mock(), get_logger=lambda: Mock())
+                           _publish_results=Mock(), get_logger=lambda: Mock(),
+                           _review_inputs=lambda: None)
 
     def cull(points, rgb, info, tf):
         node._latest_depth = None  # simulate a stall/drop during the costly SAM call
@@ -93,3 +95,58 @@ def test_depth_paired_at_the_same_moment_as_color_not_after_the_sam_call(monkeyp
     assert metadata['depth_paired_at_source'] is True
     assert metadata['depth_stamp'] == 12 + 100_000_345e-9
     assert metadata['rgb_depth_delta_s'] == pytest.approx(0.1)
+
+
+def test_review_mask_from_dbscan_cloud_with_its_own_predictor(monkeypatch):
+    """The cam3 review mask is prompted by the DBSCAN cloud (not the culled one), with
+    the review camera's own predictor, alongside the cam1 cull; it carries the cloud
+    stamp and cam1's metadata announces it so the snapshot waits."""
+    source = np.array([[0., 0, 1], [.01, 0, 1], [.02, 0, 1], [.5, 0, 1]])
+    monkeypatch.setattr(module, 'pointcloud2_to_xyz', lambda msg: source)
+    color = Image(height=2, width=3, encoding='rgb8', step=9)
+    color.data = bytes(range(18))
+    review_color = Image(height=2, width=3, encoding='rgb8', step=9)
+    review_color.data = bytes(range(1, 19))
+    review_color.header.frame_id = 'cam3_optical'
+    review_color.header.stamp.sec = 13
+    cloud = PointCloud2()
+    cloud.header.frame_id = 'base_link'
+    cloud.header.stamp.sec, cloud.header.stamp.nanosec = 15, 678
+    mask = np.array([[True, False, True], [False, True, False]])
+    review = dict(name='cam3', color=review_color, depth=None, info=object(),
+                  mask_pub=Mock(), color_pub=Mock(), depth_pub=Mock(), metadata_pub=Mock())
+    review_predictor = object()
+    order = []
+    node = SimpleNamespace(_active=True, _predictor=object(), _latest_color=color, _latest_depth=None,
+                           _info=object(), _last_run=None, min_interval=0, _review=review,
+                           _review_predictor=review_predictor,
+                           base_frame='base_link', tf_buffer=Mock(),
+                           _mask_pub=Mock(), _color_pub=Mock(), _depth_pub=Mock(),
+                           _metadata_pub=Mock(), get_logger=lambda: Mock(),
+                           _publish_results=lambda *a: order.append('cull'))
+
+    def cull(points, rgb, info, tf):
+        node._diagnostic_mask = mask
+        return points[:3]
+
+    def box_mask(points, rgb, info, tf, predictor=None):
+        assert rgb is review_color and predictor is review_predictor
+        np.testing.assert_array_equal(points, source)  # DBSCAN cloud, not the culled one
+        return mask, None, None, None
+
+    node._cull = cull
+    node._box_mask = box_mask
+    node._review_inputs = lambda: module.DBSCANSAMCuller._review_inputs(node)
+    node._publish_review_mask = lambda *a: (order.append('review'),
+                                            module.DBSCANSAMCuller._publish_review_mask(node, *a))
+    module.DBSCANSAMCuller._cloud_cb(node, cloud)
+    assert order == ['cull', 'review']
+    assert json.loads(node._metadata_pub.publish.call_args.args[0].data)['review_camera'] == 'cam3'
+    saved_mask = review['mask_pub'].publish.call_args.args[0]
+    saved_rgb = review['color_pub'].publish.call_args.args[0]
+    metadata = json.loads(review['metadata_pub'].publish.call_args.args[0].data)
+    assert saved_mask.header.stamp == cloud.header.stamp == saved_rgb.header.stamp
+    assert saved_rgb.data == review_color.data and review_color.header.stamp.sec == 13
+    assert metadata['camera'] == 'cam3' and metadata['cloud_stamp'] == [15, 678]
+    np.testing.assert_array_equal(np.frombuffer(saved_mask.data, np.uint8).reshape(2, 3), mask*255)
+    review['depth_pub'].publish.assert_not_called()

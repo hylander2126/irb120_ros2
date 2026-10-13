@@ -1023,11 +1023,6 @@ def main(args=None) -> int:
     )
     parser.add_argument("--episode", default="new", metavar="new|last|PATH",
                         help="Episode to record into (default: a new one). See util/episode.py.")
-    parser.add_argument(
-        "--pivot", choices=["cloud", "rgb"], default="cloud",
-        help="Pivot variant from the perception stage (default: cloud). 'rgb' requires a "
-             "reviewable contacts_rgb_pivot.json and changes only the arc center.",
-    )
     parser.add_argument("--tare-at-start", action="store_true",
                         help="Legacy protocol: tare once before the initial approach.")
     parsed = parser.parse_args(raw_args[:ros_args_index])
@@ -1042,15 +1037,11 @@ def main(args=None) -> int:
     motion_started = False
     home_ok = None
     try:
-        contacts_filename = "contacts_rgb_pivot.json" if parsed.pivot == "rgb" else "contacts.json"
-        stage, contacts = begin_motion_stage(
-            node, episode, "press_pull_tip", contacts_filename=contacts_filename)
+        contacts_filename = "contacts.json"
+        stage, contacts = begin_motion_stage(node, episode, "press_pull_tip")
         if stage is None:
-            node.get_logger().error(
-                f"No usable {parsed.pivot} perception contacts -- not moving. "
-                "For RGB, review the preceding pivot_boundary_review.json first.")
+            node.get_logger().error("No usable perception contacts -- not moving.")
             return 1
-        node.get_logger().info(f"Using {parsed.pivot} pivot from {contacts_filename}")
         perceive_stage = next(s for s in reversed(episode.load()['stages'])
                               if s['kind'] == 'perceive' and s['status'] == 'ok')
         node._approach_contacts_file = str(episode.path / perceive_stage['dir'] / contacts_filename)

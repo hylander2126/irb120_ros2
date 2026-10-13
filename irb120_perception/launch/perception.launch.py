@@ -6,7 +6,7 @@ Launches DBSCAN segmentation followed by the SAM cull:
   ros2 launch irb120_perception perception.launch.py
 
   RealSense (cam1) ──┐
-  RealSense (cam2) ──┼──▶ object_detector_dbscan ──▶ object_detector_dbscan_sam_cull (cam1 RGB)
+  RealSense (cam2) ──┼──▶ object_detector_dbscan ──▶ object_detector_dbscan_sam_cull (cam1 RGB; cam3 review mask)
   RealSense (cam3) ──┘      /object_detector/*        /object_detector_dbscan_sam_cull/*
 
 DBSCAN finds the points most likely to be the object; the culler projects
@@ -76,7 +76,15 @@ def generate_launch_description() -> LaunchDescription:
         'max_cluster_pts': 50000,
         'outlier_k':          8,    # neighbours sampled per point for local-density check
         'outlier_std_ratio':  2.0,  # 0 disables; lower = more aggressive stray-point removal
-        'table_plane_distance': 0.008,  # reject tabletop before DBSCAN can bridge through it
+        # Table removal: each camera's fixed view of the table, z = a*x + b*y + c in
+        # base_link, the median depth_plane_audit fit over the 2026-10-13 snapshots
+        # (cam1/cam3 p95 residual 2.2 mm, cam2 5.0 mm). Re-measure after recalibrating a
+        # camera: ros2 run irb120_perception depth_plane_audit SNAPSHOT --camera camN.
+        'table_plane_cam1': [0.0112, -0.0009, -0.0279],
+        'table_plane_cam2': [0.0108, 0.0036, -0.0191],
+        'table_plane_cam3': [0.0039, 0.0006, -0.0208],
+        'table_clearance': 0.006,  # above cam2's 5 mm p95 depth noise on the table
+        'max_camera_age_sec': 1.0,  # every camera's latest cloud must be this recent to fuse
         # Offline contact selection has a stationary scene. Keep a voxel only
         # when it recurs in 12 of the last 20 fused observations: this removes
         # edge flicker and free-space specks that survive one-frame density
@@ -122,6 +130,11 @@ def generate_launch_description() -> LaunchDescription:
             'sam_device': 'cpu',
             'box_padding_px': 12,
             'min_cull_interval_sec': 2.0,
+            # cam3 mask for the forward-tip (far-edge) pivot fit; culls nothing.
+            'review_camera': 'cam3',
+            'review_color_topic': '/realsense3/color/image_raw',
+            'review_depth_topic': '/realsense3/aligned_depth_to_color/image_raw',
+            'review_camera_info_topic': '/realsense3/color/camera_info',
         }],
     )
 

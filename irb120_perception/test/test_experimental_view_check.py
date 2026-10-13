@@ -98,3 +98,18 @@ def test_cropped_neighborhood_matches_full_image():
             if view['usable']:
                 assert abs(abs(np.dot(view['normal'], normal))-1) < 1e-9
     assert checked >= 10
+
+
+def test_no_support_points_near_the_table_does_not_crash(tmp_path):
+    """The box sits above the hard-coded table (z=-0.021), so the cloud pivot estimate
+    fails: no press without a SAM pivot, and the SAM pivot is used when given."""
+    from test_contact_point_selector import box
+    points, _ = box()
+    np.savez(tmp_path/'object_cloud.npz', xyz=points)
+    baseline = dict(press=dict(available=False), planar_push=dict(available=True))
+    result, report = evaluate(tmp_path, baseline, cameras={})
+    assert not result['press']['available'] and 'cloud_pivot_error' in report
+    result, report = evaluate(tmp_path, baseline, cameras={},
+                              press_pivot_override=[.5, 0., 0.])
+    assert report['geometry']['pivot'] == [.5, 0., 0.]
+    assert report['geometry']['pivot_source'] == 'rgb_sam_override'

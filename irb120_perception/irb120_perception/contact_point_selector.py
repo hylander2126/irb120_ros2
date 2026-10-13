@@ -169,6 +169,19 @@ def estimate_pivot(points, preferred_direction, table_z, support_band=0.02,
                     interpretation='observed support envelope; not calibrated pivot confidence'))
 
 
+def pivot_geometry(pivot, preferred_direction):
+    """Pivot geometry around a pivot point known from elsewhere (an RGB/SAM fit), for
+    when the cloud has too few points near the table to estimate one itself: the task
+    direction, its horizontal axis and a 40 mm tangent."""
+    direction = np.asarray(preferred_direction, dtype=float)
+    direction = direction / np.linalg.norm(direction)
+    axis = np.cross([0., 0., 1.], direction)
+    pivot = np.asarray(pivot, dtype=float)
+    return dict(pivot=pivot, axis=axis, direction=direction, kind='isolated_point', edge=None,
+                tangent=np.array([pivot - .04*axis, pivot + .04*axis]),
+                pivot_source='rgb_sam_override')
+
+
 def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance,
                 press_score_fraction):
     """Boolean mask into `ids`: the double-scored press candidate band.
@@ -329,10 +342,12 @@ def select_contact_points(clouds, *, normals=None,
     for mode, preferred in [('forward_tip', [1., 0., 0.]), ('press', [-1., 0., 0.])]:
         try:
             geometry = estimate_pivot(points, preferred, table_z, support_band, min_edge_length)
+            geometry['pivot_source'] = 'cloud_estimate'
         except ValueError as exc:
-            result[mode] = missing(str(exc))
-            continue
-        geometry['pivot_source'] = 'cloud_estimate'
+            if mode != 'press' or press_pivot_override is None:
+                result[mode] = missing(str(exc))
+                continue
+            geometry = pivot_geometry(press_pivot_override, preferred)
         if mode == 'press' and press_pivot_override is not None:
             geometry['pivot'] = press_pivot_override
             geometry['tangent'] = np.array([press_pivot_override - .04*geometry['axis'],

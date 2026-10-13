@@ -141,13 +141,26 @@ higher forward contact would too. If the push slides, though, that says
 nothing about the higher contact, and the sliding force alone can't be turned
 into mu without the mass.
 
-### Which tip: press-pull first, forward tip as the fallback
+### Which tip: decided by the forward pivot's shape
 
-`choose_tip()` in `orchestrator.py` runs press-pull when the snapshot has a press
-contact, and forward tip when it doesn't. Press-pull goes first because it has
-the estimator and a controlled return arc, and its pivot is the near edge, which
-cam1/cam2 see. The forward-tip pivot is the far edge, which only cam3 sees and
-which is unvalidated.
+`choose_tip()` in `orchestrator.py` picks the first tip from the forward-tip
+pivot alone. That pivot is the far (+X) support edge, which only cam3 sees. Each
+snapshot fits it from a cam3 SAM mask (`irb120_perception/forward_pivot_review.py`)
+and records `forward_tip.pivot_shape` in `contacts.json`:
+
+- **straight** (an extended edge; a line fits the support over >= 40 mm and >= 80%
+  of it): forward tip first. Its fixed-pivot push matches that edge.
+- **curved** (a convex tangent, or a straight run too short: a point contact) or
+  **unknown** (no cam3 mask, or no fit): press-pull first. It has the estimator and
+  a controlled return arc, and its pivot is the near edge that cam1/cam2 see.
+
+Either way, the other tip runs first when the preferred one has no contact.
+Every snapshot also makes this first-tip choice itself (`util/tip_choice.py`) and
+records it as `tip_choice` in `snapshot.json`; `episode snapshot` prints it.
+`cam3_forward_pivot_review.png` shows the fit; `camN_forward_contact_review.png`
+shows the forward contact, its pivot, and the pre-tip and contact fingertip spheres.
+The fit always runs; when it is not reviewable the shape is unknown and the forward
+pivot stays the cloud estimate.
 
 Whether press-pull works depends on the mass, which is unknown until it has run:
 the finger slips when the pull needed exceeds mu_finger times the press force
@@ -155,8 +168,10 @@ the finger slips when the pull needed exceeds mu_finger times the press force
 the orchestrator takes the spread of |ball - commanded pivot| over the last
 attempt's ARC/UNARC. Without slip the ball stays on a circle about the pivot. If
 the spread is over 4 mm (`estimate_params.NOSLIP_TOL_MM`), or the press-pull
-failed, it offers a forward tip on the snapshot taken after it. In step mode,
-`s` skips that fallback. `--tip press|forward` forces one tip, with no fallback.
+failed, it offers a forward tip on the snapshot taken after it. A failed forward
+tip is likewise followed by a press-pull. Each tip runs at most once per episode.
+In step mode, `s` skips that fallback. `--tip press|forward` forces one tip, with
+no fallback.
 
 Forward tip does not detect sliding: an object with x_c / h above the table mu
 is pushed up to its 80 mm travel limit.
@@ -221,20 +236,8 @@ Snapshots use the top-support candidate search and individual camera depth
 validation by default. Push and forward-tip contacts remain unchanged. No
 environment variables are required for normal operation.
 
-For rollback/debugging, `IRB120_EXPERIMENTAL_VIEW_CHECK=off` restores baseline
-selection, while `shadow` records the camera-validated result without applying it.
-`IRB120_EXPERIMENTAL_PRESS_RULE=view_check_v2` selects the older camera-only rule.
-
-```bash
-export IRB120_EXPERIMENTAL_VIEW_CHECK=shadow  # optional diagnostic override
-ros2 run irb120_control episode snapshot flashlight
-```
-
-Review `experimental_view_check.json`, `contacts_baseline.json`, and
-`contacts_experimental_view_check.json` in the new perception stage. Baseline
-`contacts.json` is unchanged in shadow mode. In apply mode it contains the gated
-selection, and saved overlays are regenerated accordingly. Overrides affect only
-new snapshots and do not retroactively change an existing episode.
+There are no on/off switches: every snapshot runs this selector. Its evidence is
+in `experimental_view_check.json` (the historical file name).
 
 Gate: valid depth within 5 mm of predicted surface; 12 mm local PCA neighborhood,
 at least 20 samples, surface variation <= .05, and view cosine >= .3. Only usable
@@ -245,8 +248,7 @@ depth is corrected by its locally fitted table plane before the 5 mm comparison.
 Per-camera timestamp agreement is not checked; use a stationary object. Camera
 checks use the saved proposed direction, not a new robot trajectory.
 
-Performance: the view check runs up to three times per snapshot (initial
-selection, the RGB-pivot review's comparison, and the RGB-pivot reseed). Each
+Performance: the view check runs once per snapshot. Each
 `check_view` call back-projects only a pixel window around the candidate's
 projection that provably contains every pixel within 12 mm (plus any table-plane
 correction), instead of the whole depth image. Results are identical to the
@@ -254,7 +256,8 @@ full-image computation. This cut a perceive stage from ~55 s to ~15 s; the
 remainder is mostly DBSCAN settling and the short bag. Derivation and
 measurements: `../NOTES.md` (2026-10-09).
 
-Offline replay (writes only experimental artifacts, not contacts.json):
+Offline replay (writes contacts_experimental_view_check.json and
+experimental_view_check.json, not contacts.json):
 
 ```bash
 python3 -m irb120_perception.experimental_view_check PATH_TO_PERCEIVE_STAGE
@@ -263,37 +266,14 @@ python3 -m irb120_perception.experimental_view_check PATH_TO_PERCEIVE_STAGE
 The files retain their historical `experimental_*` names, but the top-support
 path is now the runtime default. No controller modifications are involved.
 
-## RGB boundary pivot trial
+## RGB boundary pivot (press)
 
-New snapshots run the Cam1 RGB boundary estimator in apply mode by default
-(`IRB120_RGB_PIVOT=apply`). When the RGB candidate is `reviewable`, the press is
-re-selected against that pivot (same candidate pipeline and view check) and
-written to `contacts.json`; the cloud-pivot result is kept in
-`contacts_pre_rgb_pivot.json`. `IRB120_RGB_PIVOT=shadow` records the candidate
-without applying it. The stage contains:
-
-- `pivot_boundary_review.json` — both pivots and all gate evidence;
-- `cam1_pivot_boundary_review.png` — magnified comparison overlay;
-- `contacts_rgb_pivot.json` — the contacts with the RGB pivot (identical to
-  `contacts.json` when applied).
-
-Collect and inspect a motion-free snapshot first:
-
-```bash
-ros2 run irb120_control episode snapshot flashlight
-```
-
-If the review JSON says `candidate_status: reviewable` and the overlay is
-physically sensible, run the tip in that same episode explicitly:
-
-```bash
-ros2 run irb120_control arc_static flashlight --episode last --pivot rgb
-```
-
-The command fails closed before motion if `contacts_rgb_pivot.json` is absent.
-Use `--pivot cloud` (the default) for the original pivot. If the object moves
-after the snapshot, take a new snapshot instead of reusing either contact file.
-Set `IRB120_RGB_PIVOT=off` before a new snapshot to disable these artifacts.
+Every snapshot first fits the press pivot where the cam1 SAM mask meets the table
+(`pivot_boundary_review.json`, `cam1_pivot_boundary_review.png`). When that fit is
+`reviewable`, the press is selected once, against it; otherwise against the cloud
+estimate. `snapshot.json` `rgb_pivot.applied` says which, and the press's
+`geometry.pivot_source` is `rgb_sam_override` or `cloud_estimate`. There is one
+contacts file, `contacts.json`, and `arc_static` / `episode preview` read it.
 
 ### V2 update (supersedes the v1 gate above)
 
@@ -312,8 +292,7 @@ the latest successful saved perception stage to the existing RViz MarkerArray
 Cyan is the pre-press ball (30 mm above the contact ball), magenta is the
 contact ball at its actual radius, yellow is the surface contact, and orange
 is the pivot. The label identifies the episode, stage and contacts file.
-Use `--pivot rgb` if executing `arc_static --pivot rgb`; the default reads
-`contacts.json`, which may already contain an applied SAM pivot. Stop preview
+It reads `contacts.json`, the same file arc uses. Stop preview
 with Ctrl-C before running arc; arc publishes its own transformed command
 targets on the same topic. Markers expire when publication stops.
 

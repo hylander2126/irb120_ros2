@@ -145,7 +145,7 @@ def decide(views):
     return 'pass', 'single-view support' if len(usable) == 1 else 'multi-view agreement'
 
 
-def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_overlays=True,
+def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
             press_pivot_override=None):
     """Return an experimental contacts copy and evidence, preserving baseline.
 
@@ -188,7 +188,7 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
     inferred_tree = None
     if rule == 'top_support_v1':
         from scipy.spatial import cKDTree
-        from .contact_point_selector import estimate_normals, estimate_pivot
+        from .contact_point_selector import estimate_normals, estimate_pivot, pivot_geometry
         from .experimental_top_support import (
             assess, has_upward_upper_surface, infer_horizontal_top,
             tipping_torque_scores,
@@ -206,8 +206,15 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
         report['horizontal_top_inference'] = inference
         tree = cKDTree(clean)
         inferred_tree = cKDTree(inferred) if len(inferred) else None
-        geometry = estimate_pivot(clean, [-1., 0., 0.], -.021)
-        if press_pivot_override is not None:
+        try:
+            geometry = estimate_pivot(clean, [-1., 0., 0.], -.021)
+        except ValueError as exc:
+            # Too few cloud points near the table. With a SAM pivot the press is still
+            # scored against it; without one select_contact_points reports no press.
+            report['cloud_pivot_error'] = str(exc)
+            geometry = (None if press_pivot_override is None
+                        else pivot_geometry(press_pivot_override, [-1., 0., 0.]))
+        if geometry is not None and press_pivot_override is not None:
             geometry['pivot'] = np.asarray(press_pivot_override, dtype=float)
             geometry['tangent'] = np.array([geometry['pivot'] - .04*geometry['axis'],
                                             geometry['pivot'] + .04*geometry['axis']])
@@ -286,9 +293,6 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1', render_
     result = json.loads(json.dumps(result, default=lambda value: value.tolist()))
     result['press']['experimental_view_check'] = dict(
         experiment=report['experiment'], decision=report['decision'], counts=report['counts'])
-    if rule == 'top_support_v1' and render_overlays:
-        from .press_review import write_review
-        write_review(snapshot, report, clean, normals, cameras)
     return result, report
 
 

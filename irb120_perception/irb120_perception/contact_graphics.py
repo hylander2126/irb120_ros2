@@ -91,19 +91,26 @@ class DepthDrawing:
                 cv2.circle(self.image, tuple(p), 1, shade, -1)
 
 
-def contact_graphic(color, depth, info, contact=None, geometry=None, occlusion=False):
+def contact_graphic(color, depth, info, contact=None, geometry=None, occlusion=False,
+                    pre=None, reference_arrow=True):
+    """Pivot, contact and fingertip spheres at the contact and pre-contact centers.
+
+    pre: pre-contact ball center (base_link); default is the press pre-squash center.
+    reference_arrow: the grey -X arrow at the pivot (press-pull's pull direction).
+    """
     drawing = DepthDrawing(color, depth, info, occlusion=occlusion)
     if geometry and geometry.get('pivot') is not None:
         pivot = np.asarray(geometry['pivot']); axis = np.asarray(geometry['axis'])
         drawing.line(pivot-.04*axis, pivot+.04*axis, (0, 165, 255))
-        drawing.line(pivot, pivot+[-.06, 0, 0], (220, 220, 220), arrow=True)
+        if reference_arrow:
+            drawing.line(pivot, pivot+[-.06, 0, 0], (220, 220, 220), arrow=True)
         drawing.line(pivot, pivot+.06*np.asarray(geometry['direction']), (0, 255, 255), arrow=True)
         drawing.marker(pivot, (0, 165, 255))
     if contact and contact.get('point') is not None:
         point = np.asarray(contact['point']); center = np.asarray(contact['ball_center'])
         radius = float(np.linalg.norm(center-point))
         camera = -drawing.R.T @ drawing.t
-        pre_press = pre_press_center(center)
+        pre_press = pre_press_center(center) if pre is None else np.asarray(pre, dtype=float)
         for ring_center, ring_color in [(center, (255, 0, 255)), (pre_press, (255, 255, 0))]:
             delta = camera-ring_center; distance = np.linalg.norm(delta)
             if distance > radius > 0:

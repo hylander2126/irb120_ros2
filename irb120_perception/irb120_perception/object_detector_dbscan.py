@@ -52,12 +52,19 @@ wrongly fuse them into one.
 Multi-camera note: optional `input_cloud_pc2` and `input_cloud_pc3` streams
 are individually transformed and cached here; every arrival is clustered with
 the latest cloud from every enabled camera. This targets a static offline
-scene and intentionally avoids a hardware-sync requirement.
+scene and intentionally avoids a hardware-sync requirement. Every enabled
+camera is required: if one has no cloud yet, its last one is older than
+`max_camera_age_sec`, or its TF lookup fails, nothing is fused or published,
+an error is logged and the reason goes out on `~/camera_status`.
 
-Table removal: the ROI makes a coarse crop, then a dominant near-horizontal
-plane is fitted and removed using `table_plane_distance`.
+Table removal: the table does not move, so each camera's view of it is a fixed
+plane `table_plane_camN` = [a, b, c] (z = a*x + b*y + c in base_link, measured
+once from that camera's aligned depth with depth_plane_audit). Points less than
+`table_clearance` above their own camera's plane are dropped. Per camera,
+because the calibrations put the table at slightly different heights.
 
 Publishes:
+  ~/camera_status  std_msgs/String, why nothing is being fused (only while that is so)
   ~/detections     vision_msgs/Detection3DArray
   ~/markers        visualization_msgs/MarkerArray
   ~/object_points  sensor_msgs/PointCloud2 (x,y,z,label)
@@ -71,16 +78,22 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import String
 
 from sklearn.cluster import DBSCAN
 
 from irb120_perception.perception_common import (
     FrameAccumulator, ObjectDetectorBase, apply_tf, pointcloud2_to_xyz,
-    fit_dominant_horizontal_plane, remove_plane, remove_sparse_outliers, voxel_downsample,
+    remove_sparse_outliers, voxel_downsample,
 )
+
+# After activation, cameras get this long to deliver their first clouds before a
+# missing one is reported as an error.
+CAMERA_WARMUP_SEC = 2.0
 
 
 class DBSCANObjectDetector(ObjectDetectorBase):
@@ -103,7 +116,10 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.declare_parameter('single_object_mode', True)
         self.declare_parameter('outlier_k',         8)    # neighbours sampled per point for local-density check
         self.declare_parameter('outlier_std_ratio', 2.0)  # 0 disables the check
-        self.declare_parameter('table_plane_distance', 0.008)
+        self.declare_parameter('table_clearance', 0.006)
+        self.declare_parameter('max_camera_age_sec', 1.0)
+        for cam in ('cam1', 'cam2', 'cam3'):
+            self.declare_parameter(f'table_plane_{cam}', Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter('accum_frames',   1)  # sliding-window length; 1 = off (single-frame, original behaviour)
         self.declare_parameter('accum_min_hits', 0)  # min distinct frames a voxel must appear in; 0 = auto (~60% of accum_frames)
 
@@ -115,7 +131,19 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         self.single_object_mode = p('single_object_mode').value
         self.outlier_k          = p('outlier_k').value
         self.outlier_std_ratio  = p('outlier_std_ratio').value
-        self.table_plane_distance = p('table_plane_distance').value
+        self.table_clearance    = float(p('table_clearance').value)
+        self.max_camera_age     = float(p('max_camera_age_sec').value)
+        self._cameras = ['cam1'] + [cam for cam, parameter in (('cam2', 'input_cloud_pc2'),
+                                                              ('cam3', 'input_cloud_pc3'))
+                                    if p(parameter).value]
+        self._table_planes = {}
+        for cam in self._cameras:
+            plane = np.asarray(p(f'table_plane_{cam}').value, dtype=float)  # raises if unset
+            if plane.shape != (3,) or not np.isfinite(plane).all():
+                raise ValueError(f'table_plane_{cam} must be [a, b, c] (z = a*x + b*y + c)')
+            self._table_planes[cam] = plane
+        self._status_pub = self.create_publisher(String, '~/camera_status', 10)
+        self._activated_at = time.monotonic()
 
         accum_frames = int(p('accum_frames').value)
         if accum_frames > 1:
@@ -157,6 +185,14 @@ class DBSCANObjectDetector(ObjectDetectorBase):
         if self._accumulator is not None:
             self._accumulator.reset()
         self._camera_clouds.clear()
+        self._activated_at = time.monotonic()
+
+    def _not_fusing(self, reason):
+        """Every camera is required: report why this cycle fuses nothing."""
+        if time.monotonic() - self._activated_at < CAMERA_WARMUP_SEC:
+            return
+        self.get_logger().error(f'NOT fusing: {reason}', throttle_duration_sec=2.0)
+        self._status_pub.publish(String(data=reason))
 
     def _cloud_cb(self, msg: PointCloud2, slot='cam1'):
         """Receives a PointCloud2 (possibly multi-camera fused), transforms to
@@ -178,7 +214,8 @@ class DBSCANObjectDetector(ObjectDetectorBase):
                 rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=0.1))
         except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)
+            self._camera_clouds.pop(slot, None)
+            self._not_fusing(f'{slot}: TF {msg.header.frame_id} -> {self.base_frame} failed ({e})')
             return
 
         # Rotate and translate all points into the robot base_link frame
@@ -191,17 +228,24 @@ class DBSCANObjectDetector(ObjectDetectorBase):
             (pts_base[:,1] >= m['y'][0]) & (pts_base[:,1] <= m['y'][1]) &
             (pts_base[:,2] >= m['z'][0]) & (pts_base[:,2] <= m['z'][1])
         )
-        self._camera_clouds[slot] = pts_base[mask]
+        pts_base = pts_base[mask]
+        # Table removal before downsampling/DBSCAN, so table points cannot chain
+        # a flying-pixel island into a real object cluster.
+        a, b, c = self._table_planes[slot]
+        pts_base = pts_base[pts_base[:, 2] > a*pts_base[:, 0] + b*pts_base[:, 1] + c + self.table_clearance]
+        now = time.monotonic()
+        self._camera_clouds[slot] = (now, pts_base)
         # The scene is static during offline perception, so reusing the most
-        # recent cloud from each camera avoids a hardware-sync requirement.
-        pts_roi = np.concatenate(list(self._camera_clouds.values()), axis=0)
-
-        # Plane rejection happens before downsampling/DBSCAN, so table points
-        # cannot chain a flying-pixel island into a real object cluster.
-        plane = fit_dominant_horizontal_plane(
-            pts_roi, distance=self.table_plane_distance)
-        if plane is not None:
-            pts_roi = remove_plane(pts_roi, plane, self.table_plane_distance)
+        # recent cloud from each camera avoids a hardware-sync requirement --
+        # but only while every camera's latest cloud is recent.
+        problems = [f'{cam}: no cloud since activation' if cam not in self._camera_clouds else
+                    f'{cam}: last cloud {now - self._camera_clouds[cam][0]:.1f} s old'
+                    for cam in self._cameras
+                    if cam not in self._camera_clouds or now - self._camera_clouds[cam][0] > self.max_camera_age]
+        if problems:
+            self._not_fusing('; '.join(problems))
+            return
+        pts_roi = np.concatenate([self._camera_clouds[cam][1] for cam in self._cameras], axis=0)
 
         if self._accumulator is not None:
             fused = self._accumulator.add(pts_roi)

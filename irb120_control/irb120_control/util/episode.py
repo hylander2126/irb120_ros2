@@ -188,8 +188,6 @@ def main() -> None:
                    help="snapshot: object name; note: the text; outcome: " + "/".join(OUTCOMES))
     p.add_argument("--reason", default="", help="outcome reason")
     p.add_argument("--episode", default=None, help="episode folder (default: the most recent one)")
-    p.add_argument("--pivot", choices=["cloud", "rgb"], default="cloud",
-                   help="preview: same contacts-file choice as arc_static")
     args = p.parse_args()
 
     if args.command == "snapshot":
@@ -215,7 +213,7 @@ def main() -> None:
 
     if args.command == "preview":
         from irb120_control.util.press_preview import preview
-        preview(episode, "contacts_rgb_pivot.json" if args.pivot == "rgb" else "contacts.json")
+        preview(episode)
         return
 
     if args.command == "note":

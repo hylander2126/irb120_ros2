@@ -173,4 +173,11 @@ their targets from it, with no hardcoded poses:
 - `arc_static`: approach `SQUASH_STANDOFF` above the `press` ball center; the
   arc is centered on the `press` pivot (transformed to `world`).
 
-The forward-tip contact/pivot is recorded but not used yet.
+- `fwd_tip`: pushes the `forward_tip` contact normal to its pivot axis.
+
+The snapshot re-fits the forward pivot from a cam3 SAM mask
+(`forward_pivot_review.py`, the cam1 press-pivot fit mirrored to the +X edge). It
+moves `forward_tip.geometry.pivot` to that fit and records
+`forward_tip.pivot_shape` (straight / curved / unknown). The orchestrator uses
+that shape to choose the first tip. The cloud classification (`kind`) is
+almost always `isolated_point` here, so it does not separate straight from curved.

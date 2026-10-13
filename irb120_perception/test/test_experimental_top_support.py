@@ -91,7 +91,7 @@ def test_in_memory_camera_path_needs_no_depth_png(tmp_path, monkeypatch):
     baseline={'press':{'available':False}}
     depth=np.ones((10,10),dtype=np.uint16)
     result,report=module.evaluate(tmp_path,baseline,cameras={'cam':(depth,{})},
-                                  rule='top_support_v1',render_overlays=False)
+                                  rule='top_support_v1')
     assert calls and all(d is depth for d in calls)
     assert result['press']['available']
     assert not baseline['press']['available']
@@ -127,7 +127,7 @@ def test_t_shape_with_missing_top_samples_uses_camera_validated_inference(tmp_pa
         dict(usable=True,normal=[0.,0.,1.],normal_dot_pull=0.,count=100,depth_residual_mm=0.))
     result,report=module.evaluate(tmp_path,{'press':{'available':False}},
         cameras={'cam':(np.ones((2,2),dtype=np.uint16),{})},
-        rule='top_support_v1',render_overlays=False)
+        rule='top_support_v1')
     assert report['horizontal_top_inference']['available']
     assert result['press']['available']
     assert result['press']['normal']==[0.,0.,1.]
@@ -150,8 +150,7 @@ def test_rejected_observed_top_retries_inference_with_camera_validation(tmp_path
     monkeypatch.setattr(support, 'assess', reject_observed)
     monkeypatch.setattr(module, 'check_view', lambda *a, **kw:
                         dict(usable=True, normal=[0., 0., 1.], normal_dot_pull=0.))
-    kwargs = dict(cameras={'cam': (np.ones((2, 2), dtype=np.uint16), {})},
-                  render_overlays=False, press_pivot_override=[.51, .01, -.021])
+    kwargs = dict(cameras={'cam': (np.ones((2, 2), dtype=np.uint16), {})}, press_pivot_override=[.51, .01, -.021])
     result, report = module.evaluate(tmp_path, {}, **kwargs)
     assert result['press']['available']
     assert report['horizontal_top_inference']['trigger'] == 'no validated observed press contact'

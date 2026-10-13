@@ -35,3 +35,13 @@ def test_graphic_handles_unavailable_contact_without_modifying_color():
     img = contact_graphic(color, depth, info, {'available': False})
     assert img.shape == color.shape
     assert not color.any()
+
+
+def test_graphic_uses_given_pre_contact_center():
+    color, depth, info = fixture()
+    contact = {'point': [0, 0, .5], 'ball_center': [0, 0, .49]}
+    default = contact_graphic(color, depth, info, contact)
+    forward = contact_graphic(color, depth, info, contact, pre=[-.1, 0, .49])
+    assert not np.array_equal(default, forward)
+    # The pre-contact marker lands at the projected pre center, (50 - 100*.1/.49, 50).
+    assert forward[50, 29:32].any() and not default[50, 29:32].any()

@@ -79,6 +79,13 @@ It publishes on `/object_detector_dbscan_sam_cull/*` and leaves
 snapshots save both clouds). It cannot remove a bad depth point that falls
 inside the object's visible 2-D silhouette from cam1.
 
+After each cull it also box-prompts a cam3 mask from the culled cloud
+(`review_*` parameters; about one more SAM call). That mask culls nothing. It is
+published on `~/review_sam_{mask,color,depth,metadata}` with the cloud's stamp.
+The perception snapshot saves it as `cam3_sam_mask.png` and fits the forward-tip
+(far-edge) pivot from it with `forward_pivot_review.py`. Set
+`review_color_topic:=''` to disable it.
+
 SAM variants require pip packages not declared in `package.xml` (not rosdep-known) and a
 downloaded checkpoint — see that module's docstring for exact commands
 before trying to run it.
@@ -250,7 +257,9 @@ in a reasonable time, which is exactly what happened with the old default.
 | `single_object_mode` | `True` | Union every surviving cluster into one object. For a single rigid item that comes back as multiple disconnected clusters (e.g. a monitor's base+screen, joined only at a rear seam no camera can see). Only safe if the workspace holds one physical item per detection cycle — otherwise this wrongly fuses genuinely separate objects. |
 | `outlier_k`        | `8`     | Neighbours sampled per point for the local-density check, run before clustering. Strips depth-camera "flying pixel" noise trails that DBSCAN's single-linkage chaining would otherwise absorb into a real object's cluster. See [contact_point_selector](CONTACT_SELECTION.md) — this is what was throwing off downstream contact selection. |
 | `outlier_std_ratio` | `2.0`  | How many std-devs above the mean k-NN distance counts as "sparse" and gets dropped. Lower = more aggressive removal (risks trimming real sparse object edges); `0` disables the check entirely. |
-| `table_plane_distance` | `0.008` | Distance from the fitted horizontal tabletop plane (m) considered table and removed before clustering. |
+| `table_plane_cam1/2/3` | measured `[a, b, c]` | Each camera's fixed view of the table, z = a*x + b*y + c in base_link (measured once with `depth_plane_audit`; re-measure after recalibrating that camera). Required. |
+| `table_clearance` | `0.006` | Points less than this above their own camera's table plane (m) are removed before DBSCAN. |
+| `max_camera_age_sec` | `1.0` | Every enabled camera's latest cloud must be this recent, with a working TF, or nothing is fused or published (`~/camera_status` says why). |
 | `smooth_alpha`     | `0.3`   | EMA weight for temporal smoothing. `0` = frozen (previous frame), `1` = raw (no smoothing). Lower values reduce jitter but add lag. |
 
 ---
@@ -397,7 +406,7 @@ the perception-side safeguards.
 
 **Table not fully excluded:**
 → The fitted table-plane rejection is enabled by default. Tune
-  `table_plane_distance` before raising `roi_z_min`, which can trim an
+  `table_clearance` before raising `roi_z_min`, which can trim an
   object's base.
 
 **After enabling multi-camera fusion — visible seam/ghosting where clouds overlap:**

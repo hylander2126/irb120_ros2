@@ -306,3 +306,17 @@ def test_experimental_filter_precedes_scoring_and_cannot_fallback():
         experimental_press_filter=lambda p,d: np.zeros(len(p),dtype=bool))
     assert not rejected['press']['available']
     assert 'camera_agreement' in rejected['press']['reason']
+
+
+def test_press_pivot_override_without_cloud_support():
+    """No cloud points near the table (cropped away): press is still scored against a
+    SAM pivot when there is one; forward_tip, which has none, says why it is missing."""
+    points, normals = box()
+    high = points[:, 2] > .03
+    result = select_contact_points(points[high], normals=normals[high], table_z=0.,
+                                   press_pivot_override=[0.5, 0., 0.])
+    press = result['press']
+    assert press['available'] and press['geometry']['pivot_source'] == 'rgb_sam_override'
+    np.testing.assert_allclose(press['geometry']['axis'], [0., -1., 0.])
+    assert result['forward_tip']['reason'] == 'Not enough observed support points near the table'
+    assert not select_contact_points(points[high], normals=normals[high], table_z=0.)['press']['available']
