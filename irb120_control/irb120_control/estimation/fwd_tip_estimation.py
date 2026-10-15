@@ -48,13 +48,13 @@ _LPF_CUTOFF_HZ = 6.0
 
 # Ground truth for the forward-tip suite. com_obj is (x, z) in the object's own frame:
 # origin at the base's near-bottom edge, +x along the push, +z up. The far base edge at
-# x = base_w is the pivot, so the CoM sits base_w - x behind it. Mass was not weighed.
+# x = base_w is the pivot, so the CoM sits base_w - x behind it. Mass weighed 2026-10-15.
 FWD_TIP_GROUND_TRUTH = {
-    "tipT_a": {"mass": None, "com_obj": (0.030, 0.08467), "base_w": 0.060},
-    "tipT_b": {"mass": None, "com_obj": (0.030, 0.1016), "base_w": 0.060},
-    "tipT_c": {"mass": None, "com_obj": (0.030, 0.1242), "base_w": 0.060},
-    "tipT_d": {"mass": None, "com_obj": (0.0074, 0.1242), "base_w": 0.060},
-    "tipT_e": {"mass": None, "com_obj": (0.0526, 0.1242), "base_w": 0.060},
+    "tipT_a": {"mass": 0.403, "com_obj": (0.030, 0.08467), "base_w": 0.060},
+    "tipT_b": {"mass": 0.403, "com_obj": (0.030, 0.1016), "base_w": 0.060},
+    "tipT_c": {"mass": 0.403, "com_obj": (0.030, 0.1242), "base_w": 0.060},
+    "tipT_d": {"mass": 0.403, "com_obj": (0.0074, 0.1242), "base_w": 0.060},
+    "tipT_e": {"mass": 0.403, "com_obj": (0.0526, 0.1242), "base_w": 0.060},
 }
 for _gt in FWD_TIP_GROUND_TRUTH.values():
     _x, _z = _gt["com_obj"]
@@ -114,10 +114,14 @@ def load_fwd_tip(path: str) -> TipLog:
     q_tool = interp(np.c_[d["ft_qx"], d["ft_qy"], d["ft_qz"], d["ft_qw"]])
     q_tool /= np.linalg.norm(q_tool, axis=1, keepdims=True)
     R_tool = rotvec_to_rot(quat_to_rotvec(q_tool))
-    # fwd_tip logs the wrench rotated into world axes (fwd_tip._on_wrench); the adjoint wants
-    # it in the sensor frame, so rotate it back.
-    f_S = np.einsum("nji,nj->ni", R_tool, f_w)
-    tau_S = np.einsum("nji,nj->ni", R_tool, tau_w)
+    # The adjoint wants the wrench in the sensor frame. Older fwd_tip logs (metadata
+    # 'pose_and_wrench_frame') hold it rotated into world axes, so rotate those back; newer
+    # ones ('wrench_axes_frame') log it as received, in sensor axes.
+    if meta.get("pose_and_wrench_frame"):
+        f_S = np.einsum("nji,nj->ni", R_tool, f_w)
+        tau_S = np.einsum("nji,nj->ni", R_tool, tau_w)
+    else:
+        f_S, tau_S = f_w, tau_w
     p_S = p_tool + np.einsum("nij,j->ni", R_tool, np.array([FT_WRENCH_ORIGIN_OFFSET_X, 0.0, 0.0]))
 
     mt = np.array([r["time_s"] for r in motion])
