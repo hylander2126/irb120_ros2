@@ -1,8 +1,10 @@
-"""Tip choice (press-pull vs forward tip) and the press-pull slip check, without hardware."""
+"""First-tip choice (press-pull vs forward tip) and the press-pull slip check, without hardware.
+What follows a failed tip: test_tip_cascade.py."""
 
 import numpy as np
 
-from irb120_control.orchestrator import NOSLIP_TOL_MM, choose_tip, forward_pivot_shape, press_pull_slip_mm
+from irb120_control.orchestrator import press_pull_slip_mm
+from irb120_control.util.tip_choice import choose_tip, forward_pivot_shape
 
 
 def contacts(press=True, forward=True, shape=None):
@@ -34,33 +36,9 @@ def test_pivot_shape_defaults_to_unknown():
     assert forward_pivot_shape(contacts(shape='curved')) == ('curved', 'test')
 
 
-def test_press_pull_follows_failed_forward_tip_once():
-    straight = contacts(shape='straight')
-    assert choose_tip(straight, forward_result={'status': 'ok', 'slip_mm': None})[0] is None
-    failed = {'status': 'failed', 'slip_mm': None}
-    assert choose_tip(straight, forward_result=failed)[0] == 'press_pull_tip'
-    kind, reason = choose_tip(contacts(press=False, shape='straight'), forward_result=failed)
-    assert kind is None and 'no press contact' in reason
-    # Both tried: stop, whatever the second one did.
-    assert choose_tip(straight, press_result=failed, forward_result=failed)[0] is None
-
-
-def test_forward_tip_follows_failed_or_slipped_press_pull():
-    assert choose_tip(contacts(), press_result={'status': 'ok', 'slip_mm': 1.0})[0] is None
-    assert choose_tip(contacts(), press_result={'status': 'ok', 'slip_mm': None})[0] is None
-    slipped = {'status': 'ok', 'slip_mm': NOSLIP_TOL_MM + 0.1}
-    assert choose_tip(contacts(), press_result=slipped)[0] == 'forward_tip'
-    assert choose_tip(contacts(), press_result={'status': 'failed', 'slip_mm': None})[0] == 'forward_tip'
-    kind, reason = choose_tip(contacts(forward=False), press_result=slipped)
-    assert kind is None and 'no forward-tip contact' in reason
-
-
-def test_forced_mode_runs_one_tip():
+def test_forced_mode_picks_that_tip():
     assert choose_tip(contacts(), 'forward')[0] == 'forward_tip'
-    assert choose_tip(contacts(), 'press')[0] == 'press_pull_tip'
-    failed = {'status': 'failed', 'slip_mm': None}
-    assert choose_tip(contacts(), 'press', failed)[0] is None
-    assert choose_tip(contacts(shape='straight'), 'forward', forward_result=failed)[0] is None
+    assert choose_tip(contacts(shape='straight'), 'press')[0] == 'press_pull_tip'
 
 
 def _write_log(path, radii, states):

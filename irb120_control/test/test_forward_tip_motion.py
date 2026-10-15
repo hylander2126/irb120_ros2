@@ -141,7 +141,49 @@ def test_return_timeout_and_nonfinite_feedback_stop():
 
 @pytest.mark.parametrize('kwargs', [dict(reverse_fraction=0.), dict(reverse_fraction=1.),
                                    dict(speed=-1.), dict(speed=float('nan')),
-                                   dict(force_limit=.1), dict(max_travel=.001)])
+                                   dict(force_limit=.1), dict(max_travel=.001),
+                                   dict(tip_force=.01), dict(probe_travel=.1),
+                                   dict(probe_distance=.02), dict(follow_fraction=1.)])
 def test_bad_configuration_rejected(kwargs):
     with pytest.raises(ValueError):
         TipConfig(**kwargs)
+
+
+def seek(motion, forces, start=.0395, step=.0001, t0=0.):
+    for i, force in enumerate(forces):
+        motion.step(t0 + .01 * i, start + step * i, force, abs(force))
+
+
+def test_light_contact_backs_off_as_too_easy():
+    motion = TipMotion(TipConfig(), .04, 0.)
+    seek(motion, [.09] * 30)  # 3 mm at under tip_force
+    assert motion.state == 'RETURN' and motion.failure_reason == 'too_easy'
+    assert motion.contact_force == pytest.approx(.09)
+    assert motion.contact_progress == pytest.approx(.0399)
+
+
+def test_brief_touch_under_noise_is_not_too_easy():
+    motion = TipMotion(TipConfig(), .04, 0.)
+    seek(motion, [.06] * 5 + [0.] * 25)
+    assert motion.state == 'SEEK' and motion.failure_reason is None
+    seek(motion, [2.] * 5, start=.043, t0=1.)
+    assert motion.state == 'TIP' and motion.contact_progress == pytest.approx(.0432)  # median: 3rd of 5
+
+
+@pytest.mark.parametrize('held,outcome', [(5., 'TIP'), (.01, 'RETURN')])
+def test_probe_backs_off_once_and_judges_by_the_force_left(held, outcome):
+    motion = armed()
+    progress = .0404 + .010
+    assert motion.step(.1, progress, 9., 9.) < 0 and motion.state == 'PROBE'
+    for i in range(30):
+        progress -= .0001
+        speed = motion.step(.2 + .01 * i, progress, held, held)
+        if motion.state != 'PROBE':
+            break
+    assert motion.state == outcome and motion.probe['followed'] == (outcome == 'TIP')
+    if outcome == 'TIP':
+        assert speed > 0
+        assert motion.step(1., .0404 + .02, 9., 9.) > 0 and motion.state == 'TIP'  # only once
+    else:
+        assert motion.failure_reason == 'slide'
+        assert motion.slide_force == pytest.approx(9.) and motion.slide_travel == pytest.approx(.010)

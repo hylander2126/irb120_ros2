@@ -5,6 +5,12 @@ Seek contact, push until axial force falls to 10% of its experienced peak,
 then reverse along the same line to the pre-tip pose. Gravity supplies the
 restoring object motion; this primitive does not verify that the object untips.
 
+It also backs off early when the push will not give a usable tip
+(util/forward_tip_motion.py): 'too_easy' when the contact force stays under
+TipConfig.tip_force (the object is close to toppling, or too light to see the
+force drop), and 'slide' when, after probe_travel, the object does not follow
+the finger back (it slid instead of tilting; the slide force is kept).
+
     ros2 run irb120_control fwd_tip monitor --episode last
 """
 
@@ -18,10 +24,12 @@ import time
 
 import numpy as np
 import rclpy
+from control_msgs.msg import JointTrajectoryControllerState
 from geometry_msgs.msg import WrenchStamped
 from moveit_msgs.action import MoveGroup
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -32,6 +40,7 @@ from irb120_control.controllers.servo_command_publisher import ServoCommandPubli
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode
 from irb120_control.util.forward_tip_motion import TIP_STANDOFF, TipConfig, TipMotion, tip_targets
+from irb120_control.util.ft_capture import FTCapture
 from irb120_control.util.ft_frames import WRENCH_AXES_FRAME, WRENCH_HEADER_FRAME
 from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.object_obstacle import object_obstacle
@@ -79,9 +88,19 @@ class ForwardTip(Node):
         self._force_serial = 0
         self._used_serial = 0
         self.motion = None
-        self._ft_log = []
+        self._ft_log = []  # [time_s, f(3), tau(3) in sensor axes, tool0 pose(7), msg stamp, TF stamp]
         self._pose_log = []
         self._motion_log = []
+        # Same proprioception as arc_static: raw F/T for the whole run, and joint
+        # states + controller state tagged with the phase (approach / tip / home).
+        self._ft_capture = FTCapture(self, self._now_s)
+        self._tracking_log = []
+        self._phase = 'approach'
+        self._last_tf_stamp = float('nan')
+        self.create_subscription(JointState, '/joint_states', self._record_joints, 10)
+        self.create_subscription(JointTrajectoryControllerState,
+                                 '/joint_trajectory_controller/controller_state',
+                                 self._record_controller, 10)
         self._recording = False
         self._pre = self._ball = self._pivot = self._direction = None
         self._object_xyz = None
@@ -96,11 +115,30 @@ class ForwardTip(Node):
     def _now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
+    def _motion_state(self):
+        return self.motion.state if self.motion is not None else None
+
+    def _record_joints(self, msg):
+        self._tracking_log.append(dict(time=self._now_s(), source='joint_states',
+            stamp=msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            phase=self._phase, state=self._motion_state(), names=list(msg.name),
+            positions=list(msg.position), velocities=list(msg.velocity)))
+
+    def _record_controller(self, msg):
+        row = dict(time=self._now_s(), source='controller_state',
+            stamp=msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            phase=self._phase, state=self._motion_state(), names=list(msg.joint_names))
+        for name in ('reference', 'feedback', 'error', 'output'):
+            value = getattr(msg, name)
+            row[name] = dict(positions=list(value.positions), velocities=list(value.velocities))
+        self._tracking_log.append(row)
+
     def _transform(self, source):
         tf = self._tf_buffer.lookup_transform(BASE_FRAME, source, rclpy.time.Time())
         stamp = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
         if stamp and abs(self._now_s() - stamp) > SENSOR_TIMEOUT_SEC:
             raise ValueError(f'Stale TF for {source}')
+        self._last_tf_stamp = stamp
         tr, q = tf.transform.translation, tf.transform.rotation
         pose = np.array([tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w])
         if not np.isfinite(pose).all() or abs(np.linalg.norm(pose[3:]) - 1.) > .01:
@@ -117,10 +155,14 @@ class ForwardTip(Node):
             f, t = msg.wrench.force, msg.wrench.torque
             force = np.array([f.x, f.y, f.z])
             torque = np.array([t.x, t.y, t.z])
+            # Logged as received (sensor axes, tool0) with tool0's pose, as arc_static logs
+            # it and estimate_params expects; only the controller uses the rotated force.
+            logged = np.r_[force, torque]
             # The preprocessor labels its output 'ft_link', a frame the URDF no longer has;
             # the axes are tool0's (util/ft_frames.py). Looking up 'ft_link' dropped every
             # sample, so the freshness watchdog stopped every run with stale_force.
             ft_pose = self._transform(WRENCH_AXES_FRAME)
+            tf_stamp = self._last_tf_stamp
             if msg.header.frame_id != BASE_FRAME:
                 axes = (WRENCH_AXES_FRAME if msg.header.frame_id == WRENCH_HEADER_FRAME
                         else msg.header.frame_id)
@@ -139,7 +181,7 @@ class ForwardTip(Node):
         self._force_received = time.monotonic()
         self._force_serial += 1
         if self._recording:
-            self._ft_log.append([self._now_s(), *force, *torque, *ft_pose])
+            self._ft_log.append([self._now_s(), *logged, *ft_pose, stamp, tf_stamp])
 
     def set_targets(self, contacts, cloud):
         ball, direction, pivot, pre = tip_targets(contacts.get('forward_tip') or {}, cloud, STANDOFF_M)
@@ -236,6 +278,11 @@ class ForwardTip(Node):
             progress_m=progress, axial_force_n=axial, peak_force_n=self.motion.peak_force,
             speed_m_s=speed, height_error_m=float(delta[2]),
             line_error_m=float(line_error), orientation_error_rad=angle_error))
+        if before == 'PROBE' and self.motion.state != 'PROBE':
+            p = self.motion.probe
+            self.get_logger().warn(
+                f"Slide probe: {p['held']:.2f} N of {p['before']:.2f} N stayed on backing off -> "
+                + ('tilted, tipping on' if p['followed'] else 'the object SLID, returning'))
         if before != self.motion.state or now - self._last_report >= 1.:
             self._last_report = now
             self.get_logger().info(
@@ -253,6 +300,7 @@ class ForwardTip(Node):
         expected = float((self._ball - self._start_pose[:3]) @ self._direction)
         self.motion = TipMotion(self.config, expected, time.monotonic())
         self._used_serial = self._force_serial  # only post-tare, fresh samples arm contact
+        self._phase = 'tip'
         self._recording = True
         self._stall_guard.reset()
         timer = self.create_timer(1. / CONTROL_HZ, self._tick)
@@ -309,10 +357,13 @@ def main(args=None):
     parser.add_argument('--max-travel', type=float, default=.080, help='Travel cap after contact, metres')
     parser.add_argument('--reverse-fraction', type=float, default=.10, help='Fraction of peak axial force')
     parser.add_argument('--force-limit', type=float, default=20., help='Resultant force stop limit, N')
+    parser.add_argument('--tip-force', type=float, default=.30,
+                        help="Weakest contact force worth tipping on; below it back off as 'too_easy', N")
     parsed = parser.parse_args(raw[:ros_index])
     try:
         config = TipConfig(speed=parsed.speed, max_travel=parsed.max_travel,
-                           reverse_fraction=parsed.reverse_fraction, force_limit=parsed.force_limit)
+                           reverse_fraction=parsed.reverse_fraction, force_limit=parsed.force_limit,
+                           tip_force=parsed.tip_force)
     except ValueError as exc:
         parser.error(str(exc))
     rclpy.init(args=raw[ros_index:])
@@ -342,6 +393,7 @@ def main(args=None):
                 # Never plan home from unresolved contact or a failed approach.
                 clear_to_home = node.pre_ready and (node.motion is None or node.motion.returned)
                 if paused and clear_to_home:
+                    node._phase = 'home'
                     home_ok = node.home()
                 else:
                     node.get_logger().warn('Home skipped: return to pre-tip not verified or Servo pause failed.')
@@ -366,18 +418,26 @@ def main(args=None):
                     failure_reason=node.failure_reason or (node.motion.failure_reason if node.motion else None),
                     reversal_reason=node.motion.reversal_reason if node.motion else None,
                     peak_axial_force_n=node.motion.peak_force if node.motion else 0.,
+                    contact_force_n=node.motion.contact_force if node.motion else None,
+                    slide_force_n=node.motion.slide_force if node.motion else None,
+                    slide_travel_m=node.motion.slide_travel if node.motion else None,
+                    slide_probe=node.motion.probe if node.motion else None,
                     pre_tip=vector(node._pre), direction=vector(node._direction),
                     commanded_pivot=vector(node._pivot),
                     home_verification=getattr(node, '_last_joint_goal_verification', None))
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 try:
                     save_ft_pose_log(node._ft_log, node._pose_log, str(stage.path), 'fwd_tip',
+                                     ft_raw_log=node._ft_capture.raw,
                                      timestamp=ts, commanded_pivot=node._pivot)
                     (stage.path / f'fwd_tip_motion_{ts}.json').write_text(
                         json.dumps(node._motion_log, indent=2) + '\n')
+                    (stage.path / f'fwd_tip_diagnostics_{ts}.json').write_text(
+                        json.dumps(dict(tracking=node._tracking_log), separators=(',', ':')) + '\n')
                     save_run_metadata(str(stage.path), 'fwd_tip', ts, {
                         **module_constants(globals()), **asdict(config), **result,
-                        'object': parsed.object, 'pose_and_wrench_frame': BASE_FRAME,
+                        **node._ft_capture.metadata(),
+                        'object': parsed.object, 'pose_frame': BASE_FRAME,
                         'completion_means': 'force-drop reversal and finger return; object restoration unverified',
                     })
                 except Exception as exc:

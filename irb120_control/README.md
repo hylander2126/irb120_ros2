@@ -54,6 +54,21 @@ Uses the saved `forward_tip` contact and pushes horizontally normal to its
 pivot edge, with fixed finger height and orientation. After confirmed contact,
 it reverses when the absolute force along the push direction falls to **10% of
 its running peak** for five fresh samples, after at least 2 mm of tipping travel.
+
+It tells a tip from a slide or a near-topple from force against travel
+(`util/forward_tip_motion.py`, closed-loop checks in `test/test_forward_tip_physics.py`):
+
+- **Contact** is the median of five fresh samples at 0.05 N (noise is ~0.012 N).
+  The force must then reach `--tip-force` (0.3 N) within 1.5 mm. If it holds a
+  real but smaller force, the object is close to toppling forward (or too light
+  for the force drop to stand out of the noise): it backs off as `too_easy`.
+  tipT_e toppled under 0.09 N; the replay backs off about 2 mm before it fell.
+- **Slide probe**: at 10 mm of travel it backs off 2 mm once. A tilted object
+  rests on its edge and follows the finger back under gravity (tipT_c kept ~60%
+  of its force on the way back). A slid one stays put and the force vanishes
+  within 0.2 mm (tipT_d). Under 30% left: `slide`, and the median force while
+  sliding is saved as `slide_force_n` (the friction sample) with `slide_travel_m`.
+  A slow tip (balance far away) looks flat at first but passes the probe.
 It returns along the same line to the measured pre-tip pose, then goes home.
 Gravity must restore the object; completing the finger return does not prove
 that an object which slid or passed its balance point has untipped.
@@ -61,7 +76,6 @@ that an object which slid or passed its balance point has untipped.
 Defaults: 5 mm/s, 80 mm maximum travel after contact, 20 N resultant force limit.
 Options: `--speed` (m/s), `--max-travel` (m), `--reverse-fraction`, `--force-limit`
 (N), `--episode new|last|PATH`, and `--quality h264|lossless`.
-The initial 0.5 N contact threshold arms reversal; unloaded noise cannot trigger it.
 The normal pre-motion confirmation and unloaded F/T tare run at the pre-tip pose.
 
 Travel/forward-time limits reverse and mark the attempt failed. Excess force,
@@ -167,14 +181,29 @@ the finger slips when the pull needed exceeds mu_finger times the press force
 (the monitor). So slip is detected afterwards, not predicted. After a press-pull,
 the orchestrator takes the spread of |ball - commanded pivot| over the last
 attempt's ARC/UNARC. Without slip the ball stays on a circle about the pivot. If
-the spread is over 4 mm (`estimate_params.NOSLIP_TOL_MM`), or the press-pull
-failed, it offers a forward tip on the snapshot taken after it. A failed forward
-tip is likewise followed by a press-pull. Each tip runs at most once per episode.
-In step mode, `s` skips that fallback. `--tip press|forward` forces one tip, with
-no fallback.
+the spread is over 4 mm (`estimate_params.NOSLIP_TOL_MM`), that counts as a slip.
 
-Forward tip does not detect sliding: an object with x_c / h above the table mu
-is pushed up to its 80 mm travel limit.
+After a failed tip, the tip cascade (`util/tip_cascade.py`; design notes in
+`runtime_logs/ADAPTIVE_PRESS_IDEAS.md`) picks the next attempt from why it failed,
+each on the snapshot taken after the one before, up to 4 attempts:
+
+- press-pull slipped (lost contact at the 13 N cap, or spread > 4 mm) or failed:
+  a riskier press contact from the snapshot's `press_alternatives` (more torque per
+  pull, at most 15 mm sideways), starting at the force the slipping attempt ended
+  on; then a forward tip (also on a curved pivot); then stop.
+- forward tip hit its force limit, drifted, pushed its full travel without tipping,
+  slid the object (`slid`), was `too_easy`, or failed: press-pull, conservative
+  contact first, then riskier ones; then stop. A slid forward tip is the episode's
+  slide interaction (event `slide interaction: <stage>`); the push phase is then
+  skipped under `--auto`, or offered as skippable (`s`) in step mode. A full-travel
+  push after which the upright object shifted more than 10 mm also counts as `slid`.
+- contact missed: the same attempt once more. Sensor fault: the same attempt again.
+- object moved more than 10 mm (other than a forward-tip slide) or its top height
+  changed more than 10 mm: stop.
+
+The arc limit reached before the tangent-force flip counts as a tip. In step mode
+only the first attempt waits at the gate. `--tip press|forward` keeps the cascade
+to that tip. `arc_static --press-candidate K` runs the K-th press alternative.
 
 `estimate_params` reads episode logs as well as the older
 `<object>/push` and `<object>/arc_squash` folders.

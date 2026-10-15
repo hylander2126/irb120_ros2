@@ -18,20 +18,24 @@ Enter runs the step, 'r' re-perceives (e.g. after nudging the object), 'q'
 stops the episode. --auto skips these waits and stops at the first failed step.
 
 A step stopped by a sensor fault (stale F/T or pose; SENSOR_FAULTS) is not
-treated as a tip failure. A single interactive trial asks: retry the step,
-fall back to the other tip, or stop. With --trials > 1 or
---auto the trial is ended as aborted ("sensor fault: ...") and the next one starts.
-Each step's result is also written to episode.json's `events`.
+treated as an object failure: the tip cascade runs it again, and a push ends the
+episode as aborted if no snapshot follows it. Each step's result is also written
+to episode.json's `events`.
 
 Ctrl-C during a motion step is passed to that step, and this script waits for
 it to finish its own cleanup (stop, home, save logs) before stopping.
 
 Which tip: forward tip first when its pivot (the far edge, fitted in cam3) is a
-straight edge, press-pull first when it is curved (a point contact) or unknown.
-A failed forward tip is followed by a press-pull; a press-pull that fails, or
-whose ball leaves its circle about the pivot (the finger slipped on the object,
-as on the monitor), by a forward tip -- each on the snapshot taken after it,
-and at most one of each. --tip press|forward forces one. See choose_tip().
+straight edge, press-pull first when it is curved (a point contact) or unknown;
+press-pull starts on its conservative contact (directly above the pivot). If that
+fails, the tip cascade (util/tip_cascade.py) picks the next attempt from why it
+failed -- riskier press contacts, more press force, the other tip -- each on the
+snapshot taken after the one before, up to MAX_ATTEMPTS. Only the first attempt
+waits at the gate in step mode. --tip press|forward keeps the cascade to that tip.
+A forward tip that slid the object instead of tipping it (its slide probe, or a
+full-travel push that shifted the upright object) is the episode's slide
+interaction: press-pull follows, and the push phase is skipped (--auto) or
+offered as skippable.
 
 Usage:
     ros2 run irb120_control run_pipeline heart_a
@@ -52,9 +56,13 @@ import rclpy
 
 from irb120_control.push import PUSH_DISTANCE, PUSH_STANDOFF
 from irb120_control.util.episode import OUTCOMES, Episode
-from irb120_control.util.perception_snapshot import take_snapshot
+from irb120_control.util.perception_snapshot import latest_object_cloud, take_snapshot
 from irb120_control.util.push_geometry import push_approach
-from irb120_control.util.tip_choice import NOSLIP_TOL_MM, TIP_MODES, choose_tip, forward_pivot_shape  # noqa: F401
+from irb120_control.util.tip_cascade import (
+    MAX_ATTEMPTS, PRESS, SENSOR_FAULTS, classify, describe, first_attempt, next_attempt,
+    object_change, press_contact,
+)
+from irb120_control.util.tip_choice import TIP_MODES, forward_pivot_shape
 from irb120_perception.press_targets import PRESS_STANDOFF
 
 DEFAULT_FORCE_REF_N = 5.0
@@ -68,9 +76,6 @@ STEPS = {
     "forward_tip": ("forward_tip", "forward tip"),
     "push": ("planar_push", "push"),
 }
-# Step stops caused by the rig, not the object (arc_static abort_reason, fwd_tip failure_reason).
-# They say nothing about the object, so they never trigger the forward-tip fallback.
-SENSOR_FAULTS = {"ft_stale", "stale_force", "missing_or_stale_pose", "nonfinite_wrench"}
 
 
 def press_pull_slip_mm(stage_dir: Path) -> float | None:
@@ -97,9 +102,11 @@ def press_pull_slip_mm(stage_dir: Path) -> float | None:
     return float(np.ptp(radius) * 1000)
 
 
-def step_command(kind: str, args) -> list:
+def step_command(kind: str, args, plan: dict | None = None) -> list:
+    """The motion script for a step; `plan` (a tip_cascade attempt) for the tips."""
     if kind == "press_pull_tip":
-        return ["arc_static", args.object, "--force-ref", str(args.force_ref), "--quality", args.quality]
+        return ["arc_static", args.object, "--force-ref", f"{plan['force_ref']:.3f}",
+                "--press-candidate", str(plan["press_candidate"]), "--quality", args.quality]
     if kind == "forward_tip":
         return ["fwd_tip", args.object, "--quality", args.quality]
     if kind == "push":
@@ -151,6 +158,10 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
         print(f"  press        contact {_mm(press['point'])}   pivot {_mm(pivot)} [{g.get('pivot_source', '?')}]")
         print(f"               pre-squash ball {_mm(ball + [0, 0, PRESS_STANDOFF])}"
               f"   arc radius {1000 * radius:.0f} mm   pull dir {np.round(g['direction'], 2).tolist()}")
+        for alternative in contacts.get("press_alternatives") or []:
+            print(f"               riskier #{alternative['rank']}: contact {_mm(alternative['point'])}"
+                  f"   +{1000 * alternative['torque_gain']:.1f} mm torque/pull"
+                  f"   {1000 * alternative['lateral_offset_m']:+.0f} mm sideways")
     else:
         print(f"  press        NONE: {press.get('reason')}")
 
@@ -191,23 +202,6 @@ def sensor_fault(stage: dict | None) -> str | None:
     results = (stage or {}).get("results", {})
     reason = results.get("abort_reason") or results.get("failure_reason")
     return reason if reason in SENSOR_FAULTS else None
-
-
-def fault_gate(label: str, fault: str, fallback_label: str | None) -> str:
-    """After a sensor fault: 'retry', 'fallback' (to `fallback_label`, if given) or 'q'."""
-    can_fall_back = fallback_label is not None
-    fallback = f", f = {fallback_label} instead" if can_fall_back else ""
-    while True:
-        try:
-            answer = input(f"[pipeline] Enter = retry {label}{fallback}, q = stop episode: ").strip().lower()
-        except EOFError:
-            return "q"
-        if answer == "":
-            return "retry"
-        if answer == "f" and can_fall_back:
-            return "fallback"
-        if answer == "q":
-            return answer
 
 
 def gate(label: str, ready: bool, auto: bool, skippable: bool = False) -> str:
@@ -261,16 +255,11 @@ def run_episode(node, args, note: str) -> Episode:
                       f"{'auto' if args.auto else 'step'} mode")
     take_snapshot(node, episode, label="initial")
 
+    slides = []  # forward tips that slid the object: each is a slide interaction already
     for phase in args.order.split("-"):
-        tried = {}  # tip kind -> dict(status, slip_mm)
-        while True:  # one step; a tip phase may add the other tip after the first
-            outcome = run_phase_step(node, episode, args, phase, tried)
-            if outcome == "retry":
-                continue  # same choice again, on the snapshot taken after the faulted step
-            if outcome is None or isinstance(outcome, Episode):
-                break
-            tried[outcome.pop("kind")] = outcome
-        if isinstance(outcome, Episode):
+        ended = (run_tip_cascade(node, episode, args, slides) if phase == "tip"
+                 else run_push(node, episode, args, slides[-1] if slides else None))
+        if ended is not None:
             return episode
 
     show_snapshot(episode, args.open_images)
@@ -281,82 +270,112 @@ def run_episode(node, args, note: str) -> Episode:
     return episode
 
 
-def run_phase_step(node, episode: Episode, args, phase: str, tried: dict):
-    """Run the phase's next step. `tried`: the tips already run in this phase, kind ->
-    dict(status, slip_mm). Returns the episode if it ended (outcome set), a tip's
-    result dict(kind, status, slip_mm) if another tip may follow it, "retry" to run
-    the same step again after a sensor fault, else None (phase done)."""
+def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
+    """The tip phase: attempts chosen by util/tip_cascade.py, each on the snapshot taken
+    after the one before, until one tips the object or none is left. In step mode only
+    the first attempt waits at the gate. A forward tip that slid the object is recorded
+    as the episode's slide interaction (its stage dir appended to `slides`). Returns the
+    episode if it ended, else None."""
+    history = []
+    while True:
+        contacts = show_snapshot(episode, args.open_images) or {}
+        plan, reason = (next_attempt(history, contacts, args.tip, args.force_ref) if history
+                        else first_attempt(contacts, args.tip, args.force_ref))
+        if plan is None:
+            print(f"\n[pipeline] tip cascade done after {len(history)} attempt(s): {reason}")
+            episode.add_event(f"tip cascade done: {reason}")
+            if history[-1]["outcome"] == "moved":
+                print("[pipeline] !!! The object moved or fell: check it before going on.")
+            if history[-1]["outcome"] != "success":
+                episode.add_note(f"tip failed: {reason}")
+                if args.auto:
+                    episode.set_outcome("aborted", reason)
+                    return episode
+            return None
+        kind, label = plan["kind"], describe(plan)
+        contact = press_contact(contacts, plan) if kind == PRESS else contacts.get("forward_tip") or {}
+        ready = bool(contact.get("available"))
+        print(f"\n[pipeline] tip attempt {len(history) + 1}/{MAX_ATTEMPTS}: {label} ({reason})")
+        if not history:
+            answer = gate(label, ready, args.auto)
+            if answer == "r":
+                take_snapshot(node, episode, label="retake")
+                continue
+            if answer == "q":
+                episode.set_outcome("aborted", f"stopped before {label}"
+                                    + ("" if ready else f": no usable {STEPS[kind][0]} contact"))
+                return episode
+        elif not ready:  # a retry whose contact is gone from the new snapshot
+            history.append(dict(attempt=plan, outcome="failed", stage=None, press_point=None,
+                                final_force=None, why=f"no usable {STEPS[kind][0]} contact on this snapshot"))
+            continue
+        episode.add_event(f"tip attempt {len(history) + 1}: {label} ({reason})")
+
+        before = latest_object_cloud(episode)
+        stage, snapshot_ok = run_step(episode, kind, step_command(kind, args, plan))
+        results = None if stage is None else dict(stage.get("results", {}), status=stage["status"])
+        slip = press_pull_slip_mm(episode.path / stage["dir"]) if kind == PRESS and stage else None
+        change = object_change(before, latest_object_cloud(episode)) if snapshot_ok else None
+        outcome, why = classify(kind, results, slip, change)
+        history.append(dict(attempt=plan, outcome=outcome, why=why, stage=stage and stage["dir"],
+                            press_point=contact.get("point") if kind == PRESS else None,
+                            final_force=(results or {}).get("final_force_ref_n")))
+        short = {k: v for k, v in (results or {}).items() if not isinstance(v, (dict, list))}
+        print(f"\n[pipeline] {label}: {outcome.upper()} -- {why}\n           {short}"
+              + ("" if change is None else
+                 f"\n           object shift {change['shift_mm']:.1f} mm, "
+                 f"top height change {change['height_change_mm']:+.1f} mm"))
+        episode.add_event(f"tip attempt {len(history)}: {outcome} ({why})")
+        if outcome == "slid" and stage:
+            if slides is not None:
+                slides.append(stage["dir"])
+            episode.add_event(f"slide interaction: {stage['dir']} (the forward tip slid the object; "
+                              f"slide_force_n {(results or {}).get('slide_force_n')})")
+        if not snapshot_ok:
+            episode.set_outcome("aborted", f"{label}: {outcome} ({why}), no usable snapshot after it")
+            return episode
+
+
+def run_push(node, episode: Episode, args, slide: str | None = None):
+    """The push phase. `slide`: the stage of a forward tip that already slid the object;
+    then the push is skipped in --auto mode and offered as skippable in step mode.
+    Returns the episode if it ended, else None."""
+    if slide and args.auto:
+        print(f"\n[pipeline] push skipped: the forward tip in {slide} already slid the object")
+        episode.add_event(f"push: skipped, {slide} is the slide interaction")
+        return None
     while True:
         contacts = show_snapshot(episode, args.open_images)
-        if phase == "tip":
-            kind, reason = choose_tip(contacts or {}, args.tip, tried.get("press_pull_tip"),
-                                      tried.get("forward_tip"))
-            if kind is None:
-                if tried:
-                    episode.add_event(f"tip choice: {reason}")
-                    if args.auto and all(r["status"] != "ok" for r in tried.values()):
-                        episode.set_outcome("aborted", reason)
-                        return episode
-                return None
-            print(f"\n[pipeline] tip choice: {STEPS[kind][1]} ({reason})")
-        else:
-            kind, reason = "push", None
-        needed, label = STEPS[kind]
-        ready = contacts is not None and (contacts.get(needed) or {}).get("available", False)
-        answer = gate(label, ready, args.auto, skippable=bool(tried))
-        if answer == "s":
-            episode.add_event(f"tip choice: {reason}; skipped by operator")
-            return None
-        if answer == "r":
-            take_snapshot(node, episode, label="retake")
-            continue
-        break
+        ready = contacts is not None and (contacts.get("planar_push") or {}).get("available", False)
+        if slide:
+            print(f"\n[pipeline] the forward tip in {slide} already slid the object: s skips the push")
+        answer = gate("push", ready, args.auto, skippable=bool(slide))
+        if answer != "r":
+            break
+        take_snapshot(node, episode, label="retake")
+    if answer == "s":
+        episode.add_event(f"push: skipped by the operator, {slide} is the slide interaction")
+        return None
     if answer == "q":
-        episode.set_outcome("aborted", f"stopped before {label}"
-                            + ("" if ready else f": no usable {needed} contact"))
+        episode.set_outcome("aborted", "stopped before push" + ("" if ready else ": no usable planar_push contact"))
         return episode
-    if reason is not None:
-        episode.add_event(f"tip choice: {label} ({reason})")
-
-    stage, snapshot_ok = run_step(episode, kind, step_command(kind, args))
+    stage, snapshot_ok = run_step(episode, "push", step_command("push", args))
     status = stage["status"] if stage else "missing"
     results = {k: v for k, v in (stage or {}).get("results", {}).items() if not isinstance(v, (dict, list))}
-    slip = press_pull_slip_mm(episode.path / stage["dir"]) if kind == "press_pull_tip" and stage else None
-    print(f"\n[pipeline] {label}: {status}  {results}"
-          + ("" if slip is None else f"  slip {slip:.1f} mm (tolerance {NOSLIP_TOL_MM:.0f} mm)"))
-    if slip is not None:
-        episode.add_event(f"{label}: ball-to-pivot spread {slip:.1f} mm over the arc")
+    print(f"\n[pipeline] push: {status}  {results}")
     fault = sensor_fault(stage)
     if fault:
-        print(f"\n[pipeline] !!! {label} stopped by a SENSOR FAULT ({fault}), not by the object."
-              f"\n[pipeline] !!! Says nothing about this object; see {stage['dir']}.")
-        episode.add_event(f"{label}: sensor fault {fault}")
+        print(f"\n[pipeline] !!! push stopped by a SENSOR FAULT ({fault}), not by the object.")
+        episode.add_event(f"push: sensor fault {fault}")
     if not snapshot_ok:
-        episode.set_outcome("aborted", (f"sensor fault: {fault} during {label}" if fault else f"{label} {status}")
+        episode.set_outcome("aborted", (f"sensor fault: {fault} during push" if fault else f"push {status}")
                             + ", no usable snapshot after it")
         return episode
-    if fault:
-        if args.auto or args.trials > 1:
-            print("[pipeline] !!! Ending this trial as aborted and moving on.")
-            episode.set_outcome("aborted", f"sensor fault: {fault} during {label}")
-            return episode
-        other = "forward_tip" if kind == "press_pull_tip" else "press_pull_tip"
-        answer = fault_gate(label, fault, STEPS[other][1]
-                            if kind in TIP_MODES.values() and other not in tried else None)
-        if answer == "q":
-            episode.set_outcome("aborted", f"sensor fault: {fault} during {label}; stopped by operator")
-            return episode
-        if answer == "retry":
-            episode.add_event(f"{label}: retrying after sensor fault")
-            return "retry"
-        episode.add_event(f"{label}: falling back to {STEPS[other][1]} after sensor fault")
     if status != "ok":
-        episode.add_note(f"{label} {status}")
-    if kind in TIP_MODES.values():
-        return dict(kind=kind, status=status, slip_mm=slip)  # choose_tip decides on the other tip
-    if status != "ok" and args.auto:
-        episode.set_outcome("aborted", f"{label} {status}")
-        return episode
+        episode.add_note(f"push {status}")
+        if args.auto:
+            episode.set_outcome("aborted", f"push {status}")
+            return episode
     return None
 
 
@@ -371,7 +390,8 @@ def main(args=None) -> int:
                         help=f"press-pull initial press force (default {DEFAULT_FORCE_REF_N} N)")
     parser.add_argument("--tip", choices=["auto", *TIP_MODES], default="auto",
                         help="auto: forward tip first if its pivot is a straight edge, else press-pull; "
-                             "then the other tip if the first failed (or press-pull slipped) (default)")
+                             "after a failure, riskier press contacts and the other tip "
+                             "(util/tip_cascade.py) (default). press|forward: that tip only")
     parser.add_argument("--quality", choices=["h264", "lossless"], default="h264", help="tip video quality")
     parser.add_argument("--auto", action="store_true",
                         help="don't wait between steps; stop the episode at the first failed step")

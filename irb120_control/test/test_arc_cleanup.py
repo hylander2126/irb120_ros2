@@ -29,7 +29,8 @@ def test_home_gates_snapshot_and_stage_success(tmp_path,pause_ok,home_ok):
         rclpy=Mock(),stop_recording=lambda n:order.append('stop_recording'),
         save_ft_pose_log=Mock(),save_run_metadata=Mock(),module_constants=lambda g:{},
         datetime=datetime,Path=Path,json=json,force_ref=5.,attempt=1,
-        deactivate_egm=Mock(),take_snapshot=snapshot)
+        deactivate_egm=Mock(),take_snapshot=snapshot,
+        parsed=NS(press_candidate=0,tare_at_start=False))
     exec(compile(module,str(source),'exec'),env);env['cleanup']()
     assert stage.end.call_args.args[0]==('ok' if pause_ok and home_ok else 'failed')
     assert snapshot.call_count==int(pause_ok and home_ok)

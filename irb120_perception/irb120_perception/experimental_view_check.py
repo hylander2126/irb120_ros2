@@ -145,6 +145,47 @@ def decide(views):
     return 'pass', 'single-view support' if len(usable) == 1 else 'multi-view agreement'
 
 
+ALTERNATIVE_SPACING_M = .01   # press alternatives this far from the chosen press and each other
+ALTERNATIVE_LATERAL_M = .015  # and at most this far sideways (along the pivot axis) from it
+MAX_ALTERNATIVES = 3
+
+
+def press_alternatives(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M,
+                       lateral=ALTERNATIVE_LATERAL_M, limit=MAX_ALTERNATIVES):
+    """The riskier press contacts run_pipeline's tip cascade tries after the chosen
+    (conservative) one fails: candidates that passed the camera check with MORE tipping
+    torque per unit pull than the chosen press, at most `lateral` sideways from it (a
+    sideways offset yaws the object), at least `spacing` from it and from one another;
+    most torque first."""
+    primary = np.asarray(press['point'], dtype=float)
+    axis = np.asarray(press['geometry']['axis'], dtype=float)
+    radius = float(np.linalg.norm(np.asarray(press['ball_center']) - primary))
+    scored = [c for c in candidates if c['decision'] == 'pass' and 'torque_per_pull_N_m' in c]
+    primary_torque = max((c['torque_per_pull_N_m'] for c in scored
+                          if np.allclose(c['point'], primary)), default=-np.inf)
+    taken = [primary]
+    result = []
+    for candidate in sorted(scored, key=lambda c: -c['torque_per_pull_N_m']):
+        point = np.asarray(candidate['point'], dtype=float)
+        if (candidate['torque_per_pull_N_m'] <= primary_torque
+                or abs((point - primary) @ axis) > lateral
+                or min(np.linalg.norm(point - other) for other in taken) < spacing):
+            continue
+        normal = np.asarray(normal_at(point), dtype=float)
+        if not np.isfinite(normal).all():
+            normal = np.array([0., 0., 1.])  # as the selector's topmost fallback assumes
+        result.append(dict(available=True, rank=len(result) + 1, point=point, normal=normal,
+                           ball_center=point + radius * normal,
+                           torque_per_pull_N_m=candidate['torque_per_pull_N_m'],
+                           torque_gain=candidate['torque_per_pull_N_m'] - primary_torque,
+                           lateral_offset_m=float((point - primary) @ axis),
+                           geometry=press['geometry']))
+        taken.append(point)
+        if len(result) == limit:
+            break
+    return result
+
+
 def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
             press_pivot_override=None):
     """Return an experimental contacts copy and evidence, preserving baseline.
@@ -289,6 +330,9 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
     report['selected_point'] = result['press'].get('point')
     if report['selected_point'] is not None:
         report['selected_point'] = report['selected_point'].tolist()
+    if rule == 'top_support_v1' and result['press'].get('available'):
+        result['press_alternatives'] = press_alternatives(
+            report['candidates'], result['press'], lambda point: normals[tree.query(point)[1]])
     # JSON-friendly output, including newly selected numpy geometry.
     result = json.loads(json.dumps(result, default=lambda value: value.tolist()))
     result['press']['experimental_view_check'] = dict(

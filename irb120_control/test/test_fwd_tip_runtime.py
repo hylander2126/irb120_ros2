@@ -21,7 +21,8 @@ def methods():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'ForwardTip')
     keep = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'rotate']
     keep += [n for n in cls.body if isinstance(n, ast.FunctionDef)
-             and n.name in ('_tick', '_on_wrench', '_hold_after_stall')]
+             and n.name in ('_tick', '_on_wrench', '_hold_after_stall', '_motion_state',
+                            '_record_joints', '_record_controller')]
     env = dict(np=np, math=math, time=SimpleNamespace(monotonic=lambda: 1.),
                TransformException=LookupError, WrenchStamped=object, StallGuard=StallGuard,
                BASE_FRAME='world', EE_LINK='finger_ball_center', SENSOR_TIMEOUT_SEC=.3,
@@ -111,10 +112,14 @@ def test_wrench_is_rotated_from_its_declared_frame_before_projection():
         wrench=SimpleNamespace(force=vec(3., 0., 0.), torque=vec(0., 2., 0.)))
     methods()['_on_wrench'](node, msg)
     np.testing.assert_allclose(node._force, [0., 3., 0.], atol=1e-12)
-    np.testing.assert_allclose(node._ft_log[0][4:7], [-2., 0., 0.], atol=1e-12)
+    # The log keeps the sensor-axes wrench (as arc_static logs it); only control uses the rotated one.
+    np.testing.assert_allclose(node._ft_log[0][1:7], [3., 0., 0., 0., 2., 0.], atol=1e-12)
     # The 'ft_link' header label must resolve to the real axes frame, which exists in TF.
     assert [c.args[0] for c in node._transform.call_args_list] == ['tool0']
     assert node._force_serial == 2
+    node._last_tf_stamp = .5
+    methods()['_on_wrench'](node, msg)
+    assert node._ft_log[-1][14:] == [1., .5]  # message and TF stamps, as in arc_static's log
 
 
 @pytest.mark.parametrize('returned,paused,home_result', [(True, True, True), (False, True, True),
@@ -143,3 +148,21 @@ def test_cleanup_requires_verified_return_and_pause_before_home(returned, paused
     assert node.home.call_count == int(returned and paused)
     stop_egm.assert_called_once_with(node)
     node._servo_cmd.close.assert_called_once()
+
+
+def test_joint_and_controller_tracking_is_tagged_with_phase_and_state():
+    node = fake_node()
+    node._tracking_log = []
+    node._phase = 'tip'
+    node._motion_state = lambda: methods()['_motion_state'](node)
+    stamp = SimpleNamespace(sec=2, nanosec=0)
+    methods()['_record_joints'](node, SimpleNamespace(
+        header=SimpleNamespace(stamp=stamp), name=['joint_1'], position=[.1], velocity=[.2]))
+    point = SimpleNamespace(positions=[.1], velocities=[0.])
+    methods()['_record_controller'](node, SimpleNamespace(
+        header=SimpleNamespace(stamp=stamp), joint_names=['joint_1'],
+        reference=point, feedback=point, error=point, output=point))
+    joints, controller = node._tracking_log
+    assert joints['source'] == 'joint_states' and joints['phase'] == 'tip'
+    assert joints['state'] == node.motion.state and joints['positions'] == [.1]
+    assert controller['source'] == 'controller_state' and controller['feedback']['positions'] == [.1]

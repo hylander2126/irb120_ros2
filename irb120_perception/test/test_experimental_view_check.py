@@ -1,5 +1,6 @@
 """Temporary camera agreement experiment checks; no ROS required."""
 import numpy as np
+import pytest
 from irb120_perception.experimental_view_check import check_view, decide, evaluate
 
 
@@ -113,3 +114,22 @@ def test_no_support_points_near_the_table_does_not_crash(tmp_path):
                               press_pivot_override=[.5, 0., 0.])
     assert report['geometry']['pivot'] == [.5, 0., 0.]
     assert report['geometry']['pivot_source'] == 'rgb_sam_override'
+
+
+def test_press_alternatives_need_more_torque_little_sideways_and_spacing():
+    from irb120_perception.experimental_view_check import press_alternatives
+    press = dict(point=[.6, 0., .1], ball_center=[.6, 0., .11],
+                 geometry=dict(axis=[0., -1., 0.], pivot=[.65, 0., 0.]))
+    rows = [dict(point=[.6, 0., .1], decision='pass', torque_per_pull_N_m=.10),     # the press itself
+            dict(point=[.59, 0., .1], decision='pass', torque_per_pull_N_m=.12),    # kept, best
+            dict(point=[.585, 0., .1], decision='pass', torque_per_pull_N_m=.115),  # too close to it
+            dict(point=[.57, .005, .1], decision='pass', torque_per_pull_N_m=.11),  # kept
+            dict(point=[.59, .03, .1], decision='pass', torque_per_pull_N_m=.13),   # 30 mm sideways
+            dict(point=[.55, 0., .1], decision='reject', torque_per_pull_N_m=.2),   # failed the check
+            dict(point=[.61, 0., .1], decision='pass', torque_per_pull_N_m=.09)]    # less torque
+    alternatives = press_alternatives(rows, press, lambda p: [0., 0., 1.])
+    assert [a['point'].tolist() for a in alternatives] == [[.59, 0., .1], [.57, .005, .1]]
+    assert [a['rank'] for a in alternatives] == [1, 2]
+    np.testing.assert_allclose(alternatives[0]['ball_center'], [.59, 0., .11])
+    assert alternatives[0]['torque_gain'] == pytest.approx(.02)
+    assert alternatives[1]['lateral_offset_m'] == pytest.approx(-.005)

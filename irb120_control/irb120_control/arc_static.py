@@ -233,6 +233,10 @@ class ArcStatic(Node):
         self._done = False
         self._completed = False
         self._retry_requested = False
+        # Why the run ended, for run_pipeline's tip cascade (util/tip_cascade.py).
+        self._contact_missed = False     # no press force within the extra descent
+        self._balance_reached = False    # tangent force flipped sign during ARC
+        self._force_cap_reached = False  # lost contact again with no force step left
         self._contact_count = 0
         self._force_x = 0.0
         self._force_z = 0.0
@@ -778,6 +782,7 @@ class ArcStatic(Node):
                     f"No expected press force within {SQUASH_EXTRA_DESCENT_M*1000:.0f} mm "
                     "below predicted contact height -- retracting without retry")
                 self._retry_requested = False
+                self._contact_missed = True
                 self._servo_cmd.publish_zero(self._state, self._force_z)
                 self._transition("RETRACT")
                 return
@@ -868,6 +873,7 @@ class ArcStatic(Node):
                 self._arc_fx_low_count = 0
 
             if self._arc_fx_flipped(angle):
+                self._balance_reached = True
                 self._lull_next = "UNARC"
                 self.get_logger().info(
                     f"tangent force sign flip reached: f_tangent={self._tangent_force(angle):.2f} N "
@@ -923,6 +929,8 @@ class ArcStatic(Node):
         self._done = False
         self._completed = False
         self._retry_requested = False
+        self._contact_missed = False
+        self._balance_reached = False
         self._contact_count = 0
         self._contact_felt = False
         self._lost_contact_count = 0
@@ -988,6 +996,7 @@ def run_adaptive_press(node: "ArcStatic", force_ref: float, log_prefix: str = "A
                 f"Retry would require {next_force:.2f} N, above the "
                 f"{ADAPTIVE_FORCE_MAX_N:.2f} N adaptive ceiling — aborting"
             )
+            node._force_cap_reached = True
             return False, force_ref, attempt
 
         force_ref = next_force
@@ -1025,6 +1034,9 @@ def main(args=None) -> int:
                         help="Episode to record into (default: a new one). See util/episode.py.")
     parser.add_argument("--tare-at-start", action="store_true",
                         help="Legacy protocol: tare once before the initial approach.")
+    parser.add_argument("--press-candidate", type=int, default=0, metavar="K",
+                        help="0 = the snapshot's press contact (default); K >= 1 = its K-th "
+                             "press_alternatives entry (more tipping moment, less conservative).")
     parsed = parser.parse_args(raw_args[:ros_args_index])
 
     rclpy.init(args=raw_args[ros_args_index:])
@@ -1042,6 +1054,16 @@ def main(args=None) -> int:
         if stage is None:
             node.get_logger().error("No usable perception contacts -- not moving.")
             return 1
+        if parsed.press_candidate:
+            alternatives = contacts.get("press_alternatives") or []
+            if parsed.press_candidate > len(alternatives):
+                node.get_logger().error(
+                    f"--press-candidate {parsed.press_candidate}: the snapshot has only "
+                    f"{len(alternatives)} press alternative(s) -- not moving.")
+                return 1
+            contacts = dict(contacts, press=alternatives[parsed.press_candidate - 1])
+            node.get_logger().info(f"Using press alternative {parsed.press_candidate}: "
+                                   f"contact {contacts['press']['point']}")
         perceive_stage = next(s for s in reversed(episode.load()['stages'])
                               if s['kind'] == 'perceive' and s['status'] == 'ok')
         node._approach_contacts_file = str(episode.path / perceive_stage['dir'] / contacts_filename)
@@ -1163,7 +1185,9 @@ def main(args=None) -> int:
             stage.end("ok" if node._completed and home_ok else "failed" if motion_started else "aborted",
                       completed=node._completed, first_attempt_completed=node._completed and attempt == 1,
                       attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
-                      abort_reason=node._abort_reason,
+                      abort_reason=node._abort_reason, press_candidate=parsed.press_candidate,
+                      contact_missed=node._contact_missed, balance_reached=node._balance_reached,
+                      force_cap_reached=node._force_cap_reached,
                       home_verification=getattr(node, "_last_joint_goal_verification", None),
                       pre_squash=node._pre_squash_pos, arc_center=node._arc_center)
             if home_ok and rclpy.ok():
