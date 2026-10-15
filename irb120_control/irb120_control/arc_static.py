@@ -61,7 +61,7 @@ from irb120_control.util.motion_geometry import (
     quat_to_pitch,
     radial_force_xz,
 )
-from irb120_control.util.stall_guard import StallGuard
+from irb120_control.util.stall_guard import StallGuard, gc_paused
 from irb120_control.util.runtime_log_dir import (
     load_object_params,
     module_constants,
@@ -957,8 +957,9 @@ class ArcStatic(Node):
         self._stall_guard.reset()
         timer = self.create_timer(1.0 / CONTROL_HZ, self._tick)
         try:
-            while rclpy.ok() and not self._done:
-                rclpy.spin_once(self, timeout_sec=0.05)
+            with gc_paused():
+                while rclpy.ok() and not self._done:
+                    rclpy.spin_once(self, timeout_sec=0.05)
         finally:
             timer.cancel()
             self.destroy_timer(timer)

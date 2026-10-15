@@ -82,9 +82,9 @@ def test_tick_stops_on_stale_data_or_pose_drift(failure):
 def test_late_tick_holds_one_tick_instead_of_stopping(failure):
     """A tick that ran late means this process froze; its queued data isn't judged stale."""
     node = fake_node()
-    node._stall_guard.tick = lambda: True
+    node._stall_guard.tick = lambda: .45
     if failure == 'force':
-        node._force_received = .6  # 0.4 s old: stale, but within the defer cap
+        node._force_received = .6  # 0.4 s old: stale, but fresh when the freeze began
     else:
         node._transform.side_effect = LookupError('stale')
     methods()['_tick'](node)
@@ -95,10 +95,20 @@ def test_late_tick_holds_one_tick_instead_of_stopping(failure):
 
 def test_late_tick_still_stops_on_force_older_than_the_defer_cap():
     node = fake_node()
-    node._stall_guard.tick = lambda: True
-    node._force_received = 1. - .6
+    node._stall_guard.tick = lambda: .06
+    node._force_received = 1. - .6  # already 0.54 s old when the 60 ms freeze began
     methods()['_tick'](node)
     node._stop.assert_called_once_with('stale_force')
+
+
+def test_late_tick_holds_when_the_freeze_alone_aged_the_force_past_the_cap():
+    """2026-10-15: a 514 ms freeze (GC) left a sample 507 ms old; it was fresh before."""
+    node = fake_node()
+    node._stall_guard.tick = lambda: .514
+    node._force_received = 1. - .507
+    methods()['_tick'](node)
+    node._stop.assert_not_called()
+    node._servo_cmd.publish_zero.assert_called_once()
 
 
 def test_wrench_is_rotated_from_its_declared_frame_before_projection():

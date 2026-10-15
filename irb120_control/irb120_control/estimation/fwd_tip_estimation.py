@@ -48,13 +48,15 @@ _LPF_CUTOFF_HZ = 6.0
 
 # Ground truth for the forward-tip suite. com_obj is (x, z) in the object's own frame:
 # origin at the base's near-bottom edge, +x along the push, +z up. The far base edge at
-# x = base_w is the pivot, so the CoM sits base_w - x behind it. Mass weighed 2026-10-15.
+# x = base_w is the pivot, so the CoM sits base_w - x behind it. Onshape, with the printed
+# body's mass properties overridden by measurement (2026-10-15: body 0.290 kg, its CoM
+# z 2.2 mm lower than uniform density gave) plus three 0.038 kg slugs; total weighed 0.404 kg.
 FWD_TIP_GROUND_TRUTH = {
-    "tipT_a": {"mass": 0.403, "com_obj": (0.030, 0.08467), "base_w": 0.060},
-    "tipT_b": {"mass": 0.403, "com_obj": (0.030, 0.1016), "base_w": 0.060},
-    "tipT_c": {"mass": 0.403, "com_obj": (0.030, 0.1242), "base_w": 0.060},
-    "tipT_d": {"mass": 0.403, "com_obj": (0.0074, 0.1242), "base_w": 0.060},
-    "tipT_e": {"mass": 0.403, "com_obj": (0.0526, 0.1242), "base_w": 0.060},
+    "tipT_a": {"mass": 0.404, "com_obj": (0.030, 0.08247), "base_w": 0.060},
+    "tipT_b": {"mass": 0.404, "com_obj": (0.030, 0.0994), "base_w": 0.060},
+    "tipT_c": {"mass": 0.404, "com_obj": (0.030, 0.1220), "base_w": 0.060},
+    "tipT_d": {"mass": 0.404, "com_obj": (0.0074, 0.1220), "base_w": 0.060},
+    "tipT_e": {"mass": 0.404, "com_obj": (0.0526, 0.1220), "base_w": 0.060},
 }
 for _gt in FWD_TIP_GROUND_TRUTH.values():
     _x, _z = _gt["com_obj"]
@@ -87,6 +89,29 @@ def _lowpass(t, x):
     fs = 1.0 / float(np.median(np.diff(t)))
     b, a = butter(4, _LPF_CUTOFF_HZ, fs=fs, btype="low")
     return filtfilt(b, a, x, axis=0)
+
+
+def _mark_probe_readvance(states, progress):
+    """Relabel the TIP rows after a slide probe that only re-cover the backed-off ground
+    as PROBE. The probe is a 2 mm reversal inside the push; until the finger is back where
+    it backed off from it is retracing the probe, not tipping further."""
+    states = states.astype("<U8")
+    k = np.where(states == "PROBE")[0]
+    if not len(k) or progress[k[0]] is None:
+        return states
+    start = progress[k[0]]
+    for i in range(k[-1] + 1, len(states)):
+        if states[i] != "TIP" or progress[i] is None or progress[i] >= start:
+            break
+        states[i] = "PROBE"
+    return states
+
+
+def controller_outcome(log: TipLog):
+    """The controller's own label: 'slide' (probe saw the object stay put), 'too_easy',
+    'force_drop' (tipped), ... or None for logs that predate the probe controller."""
+    meta = log.extra["meta"]
+    return meta.get("reversal_reason") or meta.get("failure_reason")
 
 
 def load_fwd_tip(path: str) -> TipLog:
@@ -126,10 +151,12 @@ def load_fwd_tip(path: str) -> TipLog:
 
     mt = np.array([r["time_s"] for r in motion])
     ms = np.array([r["state"] for r in motion])
+    ms = _mark_probe_readvance(ms, [r.get("progress_m") for r in motion])
     state = ms[np.clip(np.searchsorted(mt, time, side="right") - 1, 0, len(ms) - 1)]
     branch = np.full(len(time), "", dtype="<U6")
     branch[state == "SEEK"] = "seek"
-    branch[state == "TIP"] = "tip"
+    branch[np.isin(state, ("LOAD", "TIP"))] = "tip"   # LOAD: touch to tip_force, still the push
+    branch[state == "PROBE"] = "probe"                 # slide probe: its own branch, never fitted
     branch[state == "RETURN"] = "return"
 
     direction = np.asarray(meta.get("direction", [1.0, 0.0, 0.0]), float)
@@ -190,6 +217,9 @@ def friction_from_fwd_tip(log: TipLog, onset, mass):
     Slid: mu_s from the breakaway peak (first ~3 mm of contact), mu_k from the slide plateau.
     Did not slide: the largest tangential/normal ratio reached is a LOWER BOUND on mu_s.
     The finger's vertical force adds to (or relieves) the table normal load.
+    A push the slide probe labelled 'slide' is a free friction sample: the probe samples
+    (branch 'probe') are left out, and the controller's own median slide force is kept
+    as mu_k_probe, a cross-check without the normal-load correction.
     """
     if not onset.get("contact") or mass is None:
         return {}
@@ -198,12 +228,15 @@ def friction_from_fwd_tip(log: TipLog, onset, mass):
     fx = log.f_push
     normal = mass * G + log.extra["f_w"][:, 2]      # sensor +z reaction = object pushed down
     out = {}
-    slid = onset.get("slide_m", 0.0) > 0 or not onset.get("rocking", False)
+    probe_slid = controller_outcome(log) == "slide"
+    slid = probe_slid or onset.get("slide_m", 0.0) > 0 or not onset.get("rocking", False)
+    if probe_slid and log.extra["meta"].get("slide_force_n"):
+        out["mu_k_probe"] = float(log.extra["meta"]["slide_force_n"] / (mass * G))
     if slid:
         brk = tip & (x - x[i0] < 0.003)
         k = np.where(brk)[0][np.argmax(fx[brk])] if brk.any() else onset.get("i_on", i0)
         out["mu_s"] = float(fx[k] / normal[k])
-        end = onset.get("i_on") if onset.get("rocking") else np.where(tip)[0][-1]
+        end = onset.get("i_on") if onset.get("rocking") and not probe_slid else np.where(tip)[0][-1]
         plateau = tip & (x - x[i0] > 0.005) & (np.arange(len(x)) < end - 25)
         if plateau.sum() > 20:
             out["mu_k"] = float(np.median(fx[plateau] / normal[plateau]))
@@ -268,7 +301,7 @@ def contact_mechanics(path, obj, mass, mu_t, gt=None):
     else:
         brk = log.contact & (log.branch == "tip") & (x - x[i0] < 0.003)
         k = int(np.where(brk)[0][np.argmax(fpush[brk])]) if brk.any() else i0
-        outcome, pivot = "slid", log.pivot
+        outcome, pivot = "slid" + (" (probe)" if controller_outcome(log) == "slide" else ""), log.pivot
     win = slice(max(k - 5, 0), k + 6)   # ±50 ms: a breakaway peak is sharp
     fx = float(np.mean(fpush[win]))
     mu_f = float(np.mean(log.extra["f_w"][win, 2]) / fx)    # sensor +z = object pushed down
@@ -307,6 +340,11 @@ def run_fwd_tip_estimation(obj, path, gt=None, verbose=True, pivot_offset=None,
     """
     gt = gt or FWD_TIP_GROUND_TRUTH[obj]
     log = load_fwd_tip(path)
+    outcome = controller_outcome(log)
+    if outcome == "slide":
+        raise ValueError("slide probe: the object slid, not tipped (friction sample, not fitted)")
+    if outcome == "too_easy":
+        raise ValueError("too_easy: under tip_force after touch, CoM near the pivot (not fitted)")
     if ft_bias_n:
         # A stale tare is a constant force offset in the sensor frame.
         log.f_S = log.f_S + np.array([ft_bias_n, 0.0, 0.0])
@@ -420,6 +458,7 @@ def run_fwd_tip_object(obj, root, verbose_trials=False, vision=False):
         name = os.path.basename(path)
         rec = {"obj": obj, "trial": name, "path": path}
         try:
+            rec["controller_outcome"] = controller_outcome(load_fwd_tip(path))
             r = run_fwd_tip_estimation(obj, path, verbose=verbose_trials or vision, vision=vision)
         except (KeyError, ValueError, IndexError) as exc:
             rec["skipped"] = str(exc).split("\n")[0][:90]
@@ -456,7 +495,8 @@ def _vision_outcome(path):
 
 
 def add_friction(all_results, all_outcomes, mass):
-    """Static/kinetic friction per log, from the forward tip itself and the episode's planar push."""
+    """Static/kinetic friction per log, from the forward tip itself and the episode's planar push.
+    mu_est per object is the planar-push mu_k, or failing that the forward-tip slides."""
     rows = []
     for rec in all_outcomes:
         log = load_fwd_tip(rec["path"])
@@ -469,7 +509,8 @@ def add_friction(all_results, all_outcomes, mass):
             rows.append({"obj": rec["obj"], "trial": os.path.basename(p), "source": "planar_push",
                          **friction_from_push(p, mass)})
     for r in all_results:
-        mus = [x["mu_k"] for x in rows if x["obj"] == r["obj"] and x["source"] == "planar_push" and "mu_k" in x]
+        own = [x for x in rows if x["obj"] == r["obj"] and "mu_k" in x]
+        mus = [x["mu_k"] for x in own if x["source"] == "planar_push"] or [x["mu_k"] for x in own]
         r["mu_est"] = float(np.mean(mus)) if mus else None
     return rows
 
@@ -496,7 +537,8 @@ def print_fwd_tip_report(all_results, outcomes, friction_rows, mass):
     for x in friction_rows:
         parts = [f"mu_s={x['mu_s']:.3f}" if "mu_s" in x else "",
                  f"mu_k={x['mu_k']:.3f}" if "mu_k" in x else "",
-                 f"mu_s>={x['mu_s_lower_bound']:.3f}" if "mu_s_lower_bound" in x else ""]
+                 f"mu_s>={x['mu_s_lower_bound']:.3f}" if "mu_s_lower_bound" in x else "",
+                 f"mu_k(probe)={x['mu_k_probe']:.3f}" if "mu_k_probe" in x else ""]
         print(f"  {x['obj']:<10}{x['source']:<13}{'  '.join(p for p in parts if p)}")
 
     mus_s = [x["mu_s"] for x in friction_rows if "mu_s" in x]

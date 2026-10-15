@@ -47,7 +47,7 @@ from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.perception_snapshot import (
     begin_motion_stage, latest_object_cloud, lookup, take_snapshot,
 )
-from irb120_control.util.stall_guard import StallGuard
+from irb120_control.util.stall_guard import StallGuard, gc_paused
 from irb120_control.util.runtime_log_dir import (
     module_constants, save_ft_pose_log, save_run_metadata, start_recording, stop_recording,
 )
@@ -305,8 +305,9 @@ class ForwardTip(Node):
         self._stall_guard.reset()
         timer = self.create_timer(1. / CONTROL_HZ, self._tick)
         try:
-            while rclpy.ok() and not self.motion.done:
-                rclpy.spin_once(self, timeout_sec=.05)
+            with gc_paused():
+                while rclpy.ok() and not self.motion.done:
+                    rclpy.spin_once(self, timeout_sec=.05)
         finally:
             self.destroy_timer(timer)
             self._servo_cmd.publish_zero()

@@ -4,16 +4,22 @@ import numpy as np
 import pytest
 
 from irb120_control.estimation.fwd_tip_estimation import (
-    BALL_RADIUS, FT_WRENCH_ORIGIN_OFFSET_X, run_fwd_tip_estimation, tilt_from_sliding_contact,
-    tip_slide_margin)
+    BALL_RADIUS, FT_WRENCH_ORIGIN_OFFSET_X, friction_from_fwd_tip, load_fwd_tip,
+    run_fwd_tip_estimation, tilt_from_sliding_contact, tip_slide_margin)
+from irb120_control.estimation.tip_core import detect_onset
 
 G = 9.81
 EE_TO_SENSOR = FT_WRENCH_ORIGIN_OFFSET_X + 0.0866512
 
 
 def _synthetic_episode(tmp_path, m=0.38, cx=0.030, cz=0.110, slide=0.010, mu_f=0.2,
-                       rock=True):
-    """A forward tip with known physics: optional pre-slide, rocking to near theta*, return."""
+                       rock=True, probe=False):
+    """A forward tip with known physics: optional pre-slide, rocking to near theta*, return.
+
+    probe  the controller's slide probe 10 mm into the push: back off 2 mm, then re-advance.
+           Rocking, the object follows the finger back holding only part of its force
+           (pivot stiction; the controller needs just follow_fraction of it); sliding, it stays put, the force vanishes and the push ends ('slide').
+    """
     pivot0 = np.array([0.67, 0.0, 0.003])
     zb, d0 = 0.175, 0.120 + BALL_RADIUS
     theta_star = np.arctan2(cx, cz)
@@ -34,9 +40,22 @@ def _synthetic_episode(tmp_path, m=0.38, cx=0.030, cz=0.110, slide=0.010, mu_f=0
     pivot1 = pivot0[0] + slide
     phis = np.linspace(0.0, theta_star - np.radians(1.5) if rock else 0.0, 600)
     xs = pivot1 - (d0 - zb * np.sin(phis)) / np.cos(phis)
-    if rock:
+    if rock and probe:
+        j = 200
+        k = int(np.where(xs[j] - xs[:j] >= 0.002)[0][-1])
+        seg("TIP", j, xs[:j], phis[:j], pivot1, 1)
+        seg("PROBE", j - k, xs[j:k:-1], phis[j:k:-1], pivot1, -3)
+        seg("TIP", j - k, xs[k:j], phis[k:j], pivot1, 1)     # re-advance over the same ground
+        seg("TIP", 600 - j, xs[j:], phis[j:], pivot1, 1)
+        seg("RETURN", 600, xs[::-1], phis[::-1], pivot1, -1)
+    elif rock:
         seg("TIP", 600, xs, phis, pivot1, 1)
         seg("RETURN", 600, xs[::-1], phis[::-1], pivot1, -1)
+    elif probe:
+        x1 = x_contact + slide + 0.010
+        seg("TIP", 200, np.linspace(x_contact + slide, x1, 200), 0.0,
+            pivot1 + np.linspace(0, 0.010, 200), 2)
+        seg("PROBE", 40, np.linspace(x1, x1 - 0.002, 40), 0.0, rows[-1][3], 0)
     else:
         seg("TIP", 600, x_contact + slide + np.linspace(0, 0.03, 600), 0.0,
             pivot1 + np.linspace(0, 0.03, 600), 2)
@@ -62,11 +81,12 @@ def _synthetic_episode(tmp_path, m=0.38, cx=0.030, cz=0.110, slide=0.010, mu_f=0
         if sign[i] == 2:                     # sliding: pure push below the tipping torque
             F[i] = [0.5, 0.0, 0.0]
             continue
-        u = n_in[i] - sign[i] * mu_f * t_up[i]
+        held = 0.4 if sign[i] == -3 else 1.0
+        u = n_in[i] - np.sign(sign[i]) * mu_f * t_up[i]
         r = contact[i] - np.array([px[i], 0.0, pivot0[2]])
         tau_unit = r[2] * u[0] - r[0] * u[2]
         tau_req = m * G * (cx * np.cos(phi[i]) - cz * np.sin(phi[i]))
-        F[i] = u * tau_req / tau_unit
+        F[i] = held * u * tau_req / tau_unit
     p_tool = ball - np.array([EE_TO_SENSOR, 0.0, 0.0])
     p_S = p_tool + np.array([FT_WRENCH_ORIGIN_OFFSET_X, 0.0, 0.0])
     f_meas = -F
@@ -84,10 +104,15 @@ def _synthetic_episode(tmp_path, m=0.38, cx=0.030, cz=0.110, slide=0.010, mu_f=0
              ft_px=p_tool[:, 0], ft_py=p_tool[:, 1], ft_pz=p_tool[:, 2],
              ft_qx=quat[:, 0], ft_qy=quat[:, 1], ft_qz=quat[:, 2], ft_qw=quat[:, 3],
              commanded_pivot=pivot0)
-    (ep / f"fwd_tip_{ts}.json").write_text(json.dumps(
-        {"timestamp": ts, "commanded_pivot": pivot0.tolist(), "direction": [1.0, 0.0, 0.0]}))
+    meta = {"timestamp": ts, "commanded_pivot": pivot0.tolist(), "direction": [1.0, 0.0, 0.0]}
+    if probe:
+        meta["reversal_reason"] = "force_drop" if rock else "slide"
+        if not rock:
+            meta.update(failure_reason="slide", slide_force_n=0.5)
+    (ep / f"fwd_tip_{ts}.json").write_text(json.dumps(meta))
     (ep / f"fwd_tip_motion_{ts}.json").write_text(json.dumps(
-        [{"time_s": float(ti), "state": s} for ti, s in zip(t, state)]))
+        [{"time_s": float(ti), "state": s, "progress_m": float(x - bx[0])}
+         for ti, s, x in zip(t, state, bx)]))
     gt = {"mass": m, "com": np.array([cx, 0.0, cz]), "theta_deg": float(np.degrees(theta_star))}
     return str(ep / f"fwd_tip_{ts}.npz"), gt
 
@@ -124,3 +149,32 @@ def test_tip_slide_margin_reduces_to_classic_cost_without_finger_friction():
     # Finger friction down the face costs tipping moment AND loads the table: both terms.
     assert tip_slide_margin(0.5, 0.3, 0.3, 0.1, 0.05) == pytest.approx(
         0.5 * (0.3 - 0.3 * 0.1) / (0.05 * (1 - 0.5 * 0.3)))
+
+
+def test_probe_is_its_own_branch_and_stays_out_of_the_fit(tmp_path):
+    path, gt = _synthetic_episode(tmp_path, slide=0.0, probe=True)
+    log = load_fwd_tip(path)
+    probe = np.where(log.branch == "probe")[0]
+    # The back-off and the re-advance over the same 2 mm, one contiguous block.
+    assert len(probe) > 0 and np.all(np.diff(probe) == 1)
+    assert np.ptp(log.p_ball[probe, 0]) == pytest.approx(0.002, abs=2e-4)
+    assert log.branch[probe[-1] + 1] == "tip"
+    r = run_fwd_tip_estimation("synthetic", path, gt=gt, verbose=False)
+    # Same estimate as the push without a probe: fitting the probe (the object holds only
+    # part of its force backing off) would pull z_c ~4 mm low.
+    ref_path, _ = _synthetic_episode(tmp_path / "ref", slide=0.0)
+    ref = run_fwd_tip_estimation("synthetic", ref_path, gt=gt, verbose=False)
+    assert r["mass_est"] == pytest.approx(ref["mass_est"], rel=0.005)
+    assert abs(r["com_z_est"] - ref["com_z_est"]) < 0.0005
+    assert abs(r["theta_est_deg"] - ref["theta_est_deg"]) < 0.1
+
+
+def test_probe_slide_is_skipped_but_kept_as_a_friction_sample(tmp_path):
+    m = 0.38
+    path, gt = _synthetic_episode(tmp_path, m=m, rock=False, probe=True)
+    with pytest.raises(ValueError, match="slide probe"):
+        run_fwd_tip_estimation("synthetic", path, gt=gt, verbose=False)
+    log = load_fwd_tip(path)
+    mu = friction_from_fwd_tip(log, detect_onset(log, log.pivot), m)
+    assert mu["mu_k"] == pytest.approx(0.5 / (m * G), rel=0.02)
+    assert mu["mu_k_probe"] == pytest.approx(0.5 / (m * G))
