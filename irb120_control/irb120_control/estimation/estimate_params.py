@@ -20,6 +20,8 @@ if __package__ in (None, ""):
 from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, construct_T, rotvec_between
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
+from irb120_control.estimation.tip_core import (TipLog, branch_mean, detect_onset, estimate_with_vision,
+                                                fit_track, print_vision_report, tilt_noslip)
 
 ALL_OBJECTS = ["box", "heart", "flashlight", "soda", "monitor"]
 PLOT_PER_OBJECT = False  # set True to show individual estimation figures per object
@@ -191,6 +193,27 @@ def load_and_preprocess(filepath):
     return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id, logged_sensor_pose
 
 
+def tiplog_from_press_pull(path: str, loaded=None) -> TipLog:
+    """A press-pull (arc_squash) log as a tip_core.TipLog: ARC is the tip branch, UNARC the
+    return, and contact is the controller's LULL..RETRACT window. The object tips toward the
+    robot: a negative rotation about world y, with the finger moving along -x."""
+    if loaded is None:
+        time, f_S, tau_S, p_S, q_S, p_ee, _qo, state_id, _ls = load_and_preprocess(path)
+    else:
+        time, f_S, tau_S, p_S, q_S, p_ee, state_id = loaded
+    branch = np.full(len(time), "", dtype="<U6")
+    branch[state_id == STATE_ARC] = "tip"
+    branch[state_id == STATE_UNARC] = "return"
+    stage = Path(path).parent
+    episode = stage.parent if stage.name.endswith("_press_pull_tip") else None
+    return TipLog(primitive="press_pull", path=path, t_epoch=time, f_S=f_S, tau_S=tau_S, p_S=p_S,
+                  q_S=q_S, p_ball=p_ee, branch=branch,
+                  contact=np.isin(state_id, [STATE_LULL, STATE_ARC, STATE_UNARC, STATE_RETRACT]),
+                  pivot=commanded_pivot_from_log(path), tilt_dir=np.array([0.0, -1.0, 0.0]),
+                  push_dir=np.array([-1.0, 0.0, 0.0]), a_signal="gx", episode_dir=episode,
+                  tip_stage=stage.name)
+
+
 def estimate_friction(push_log_path: str, mass_est: float, mass_gt: float) -> tuple:
     """
     Estimate mu_t from slip-onset tangential force in the push log.
@@ -269,7 +292,7 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
                     verbose: bool = True, trial_label: str | None = None,
                     free_com_x: bool = False, pivot_mode: str = "fixed",
                     tilt_offset_rad: float = 0.0, ft_bias_n: float = 0.0,
-                    pivot_override: np.ndarray | None = None) -> dict | None:
+                    pivot_override: np.ndarray | None = None, vision: bool = False) -> dict | None:
     """Estimate (m, z_c, theta*, mu_t) from ONE arc_squash trial log.
 
     `verbose=False` silences the per-trial diagnostic prints, which is what the
@@ -282,6 +305,8 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
                   recovers pivot x per trial from the EE arc (see pivot_from_trajectory).
     pivot_override — explicit pivot for this trial, used by pivot_mode="relative"
                   (the caller needs all trials to compute the per-object mean first).
+    vision      — also estimate from the camera tilt track (episode logs only) and report
+                  tip-vs-slide; stored under "vision", the primary result is unchanged.
     """
     def _say(msg):
         if verbose:
@@ -330,135 +355,87 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
                      f"(circle residual {pivot_fit_resid*1000:.3f} mm, no-slip dev {noslip_dev_mm:.2f} mm)")
 
     # Bootstrap from controller state timing rather than inferring contact/release.
-    in_contact = np.isin(state_id, [STATE_LULL, STATE_ARC, STATE_UNARC, STATE_RETRACT])
+    log = tiplog_from_press_pull(squash_file, loaded=(time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, state_id))
     _say(f"[{obj}] Using controller_state_id for contact/phase segmentation.")
     if not logged_sensor_pose:
         _say(f"[{obj}] ft_link TF absent from log — sensor pose reconstructed from EE pose.")
-    r_t = p_ee_B - p_pivot_B
-    r0  = r_t[np.argmax(in_contact)]
 
-    _say(f"[{obj}] p_pivot_B: {p_pivot_B}, p_ee_B[contact]: {np.round(p_ee_B[np.argmax(in_contact)], 3)}, r0: {np.round(r0, 3)}")
-    rot_vec_obj = rotvec_between(r0, r_t)  # (N, 3) object rotation vector in {B} on unified time grid
-    rot_vec_obj[~in_contact] = 0.0         # Keep only the contact window; zero outside
+    # Proprioceptive tilt: the no-slip finger is a material point of the object.
+    track = tilt_noslip(log, p_pivot_B)
+    r0 = track.info["r0"]
+    _say(f"[{obj}] p_pivot_B: {p_pivot_B}, p_ee_B[contact]: {np.round(p_ee_B[np.argmax(log.contact)], 3)}, r0: {np.round(r0, 3)}")
 
     # Deliberate perturbation of the tilt reference, used only by uncertainty_budget().
     # Applied about the tipping (y) axis, which is where the theta*/z_c degeneracy lives.
     if tilt_offset_rad:
-        rot_vec_obj[in_contact, 1] -= tilt_offset_rad
+        track.rotvec[log.contact, 1] -= tilt_offset_rad
 
-    # Contact mask: within the force window and past the small-angle deadband. (Y neg as obj tips)
-    contact_mask = np.isin(state_id, [STATE_ARC, STATE_UNARC]) & (rot_vec_obj[:, 1] < -np.deg2rad(1.0))
-
-    # Build batched (N,4,4) homogeneous transforms for sensor and object frames
-    T_B_sensor = construct_T(p_ft_B, quat=Q_ft)
-    T_B_obj    = construct_T(np.tile(p_pivot_B, (len(time), 1)), rv=rot_vec_obj) # const pos
-    w_meas_S = np.hstack((t_meas_S, f_meas_S))  # (N,6) [tau, f] convention (Modern Robotics)
-    w_app_O = model_bkwd_wrench(w_meas_S[contact_mask],
-                                T_B_sensor[contact_mask],
-                                T_B_obj[contact_mask])
-
-    ## ======== One figure per object: 3 subplots side-by-side =========
-    if PLOT_PER_OBJECT:
-        fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
-        fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
-        time_plot = time[contact_mask] - time[contact_mask][0]
-        # plot_raw_forces(time_plot, f_meas_S[contact_mask], title="Measured Force (Sensor Frame)", show=False) # On it's own
-        plot_wrench_and_tipping(time_plot, w_app_O[:, 3:], w_app_O[:, :3],
-                                ax=axes_obj[0],
-                                pitch_rad=rot_vec_obj[contact_mask, 1], torque_label="τ",
-                                contact_time=0.0, title=f"Applied Wrench (Object Frame)", show=False)
-
-    ## Trim to contact window and then separate tipping from retract phase
-    rot_vec_during_contact      = rot_vec_obj[contact_mask]    # (N_c, 3) full rotation vectors during contact
-    y_pitch_during_contact = rot_vec_during_contact[:, 1] # (N_c,)   y-axis pitch for phase/threshold logic (plot only)
-    state_contact               = state_id[contact_mask]
-
-    # Trim ~1.6° from each phase boundary using controller state labels directly.
-    trim = 0.0 #np.deg2rad(1.6)
-    arc_phase = state_contact == STATE_ARC
-    unarc_phase = state_contact == STATE_UNARC
-
-    def _trim_phase(phase_mask, pitch_signal):
-        if not np.any(phase_mask):
-            return np.zeros_like(phase_mask, dtype=bool)
-        phase_min = pitch_signal[phase_mask].min()
-        return phase_mask & (pitch_signal < -trim) & (pitch_signal > phase_min + trim)
-
-    arc_phase_trimmed    = _trim_phase(arc_phase, y_pitch_during_contact)
-    unarc_phase_trimmed  = _trim_phase(unarc_phase, y_pitch_during_contact)
-    tip_sel = arc_phase_trimmed | unarc_phase_trimmed
-
-    TIP_AXIS = rot_vec_during_contact.mean(0) / np.linalg.norm(rot_vec_during_contact.mean(0))
+    onset = detect_onset(log, p_pivot_B)
+    fit = fit_track(log, track, COM_GT[0], x0=(MASS_GT, COM_GT[2]), free_com_x=free_com_x,
+                    onset=onset, pivot=p_pivot_B, trim_deg=0.0)
+    contact_mask = fit["contact_mask"]
+    TIP_AXIS = fit["tip_axis"]
     _say(f"\n[{obj}] FORCING TIP AXIS TO: {np.round(TIP_AXIS, 2)}")
     _say(f"[{obj}] And testing p_pivot_B at: {p_pivot_B}\n")
-
-    theta_gt_deg = -THETA_GT_DEG #np.degrees(np.arctan2(COM_GT[0], COM_GT[2]))
-
-    # --- Two estimation methods per phase ---
-    # A: f_x zero-crossing → z_c fixed, mass-only torque fit
-    # B: joint (mass, z_c) fit from torque balance directly
-    def _fit_phase(phase_sel, label, COM_GT):
-        y_pitch_deg = np.rad2deg(y_pitch_during_contact[phase_sel])
-        rv_ph = rot_vec_during_contact[phase_sel]
-        tau_meas = w_app_O[phase_sel, :3] @ TIP_AXIS
-
-        # Method A — use torque-corrected signal: g_x = f_x - (r0_x/r0_z)*f_z
-        # This zeros at theta* for any contact geometry, not just r0_x=0
-        gx = w_app_O[phase_sel, 3] - (r0[0] / r0[2]) * w_app_O[phase_sel, 5]
-        fx_coeffs = np.polyfit(y_pitch_deg, gx, 1)
-        theta_fx_deg = -fx_coeffs[1] / fx_coeffs[0]
-        com_z_fx = COM_GT[0] / np.tan(np.deg2rad(abs(theta_fx_deg)))
-        mass_fx = least_squares(
-            lambda p: ((model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, com_z_fx]), p[0])[:, :3] @ TIP_AXIS) - tau_meas).ravel(),
-            x0=[MASS_GT], bounds=([1e-6], [np.inf]), method='trf').x[0]
-        _say(f"  [{obj}] {label:>7s} [A: f_x→θ*] theta*={theta_fx_deg:.2f}°  z_c={com_z_fx:.4f}m  m={mass_fx:.4f}kg")
-
-        # Method B — joint (mass, z_c) [, com_x] fit from torque balance.
-        # With free_com_x the third parameter is solved for instead of being taken from
-        # ground truth. Note only the AMPLITUDE m*|r_com| and the PHASE theta* are truly
-        # identifiable from tau(theta); fixing com_x is what breaks that tie. Freeing it
-        # trades a GT input for a weaker separation of m from z_c.
-        if free_com_x:
-            res_tau = least_squares(
-                lambda p: ((model_fwd_wrench(rv_ph, np.array([p[2], 0.0, p[1]]), p[0])[:, :3] @ TIP_AXIS) - tau_meas).ravel(),
-                x0=[MASS_GT, COM_GT[2], COM_GT[0]],
-                bounds=([1e-6, 1e-3, -0.2], [np.inf, np.inf, 0.2]), method='trf')
-            mass_tau, com_z_tau, com_x_tau = res_tau.x
-        else:
-            res_tau = least_squares(
-                lambda p: ((model_fwd_wrench(rv_ph, np.array([COM_GT[0], 0.0, p[1]]), p[0])[:, :3] @ TIP_AXIS) - tau_meas).ravel(),
-                x0=[MASS_GT, COM_GT[2]], bounds=([1e-6, 1e-3], [np.inf, np.inf]), method='trf')
-            mass_tau, com_z_tau = res_tau.x
-            com_x_tau = COM_GT[0]
-        theta_tau_deg = -np.degrees(np.arctan2(com_x_tau, com_z_tau))
-        _say(f"  [{obj}] {label:>7s} [B: τ jnt ] theta*={theta_tau_deg:.2f}°  z_c={com_z_tau:.4f}m  "
-             f"m={mass_tau:.4f}kg  com_x={com_x_tau:.4f}m{' (fit)' if free_com_x else ' (GT)'}")
-
-        estimates = {
-            "A": {"m": mass_fx,  "zc": com_z_fx,  "theta": theta_fx_deg, "cx": COM_GT[0]},
-            "B": {"m": mass_tau, "zc": com_z_tau, "theta": theta_tau_deg, "cx": com_x_tau},
-        }
-        return com_z_fx, mass_fx, theta_fx_deg, fx_coeffs, com_z_tau, mass_tau, theta_tau_deg, estimates
-
+    theta_gt_deg = -THETA_GT_DEG
 
     _say(f"\n--- [{obj}] PHASE ESTIMATES ---")
-    com_z_push,    mass_push,    theta_fx_push_deg,    fx_coeffs_push,    com_z_tau_push,    mass_tau_push,    theta_tau_push_deg,    est_arc   = _fit_phase(arc_phase_trimmed,   "ARC",   COM_GT)
-    com_z_retract, mass_retract, theta_fx_retract_deg, fx_coeffs_retract, com_z_tau_retract, mass_tau_retract, theta_tau_retract_deg, est_unarc = _fit_phase(unarc_phase_trimmed, "UNARC", COM_GT)
+    est = {}
+    for name, label in (("tip", "ARC"), ("return", "UNARC")):
+        f = fit["branches"][name]
+        est[name] = f
+        _say(f"  [{obj}] {label:>7s} [A: f_x→θ*] theta*={f['A']['theta_signed']:.2f}°  z_c={f['A']['zc']:.4f}m  m={f['A']['m']:.4f}kg")
+        _say(f"  [{obj}] {label:>7s} [B: τ jnt ] theta*={-f['B']['theta']:.2f}°  z_c={f['B']['zc']:.4f}m  "
+             f"m={f['B']['m']:.4f}kg  com_x={f['B']['cx']:.4f}m{' (fit)' if free_com_x else ' (GT)'}")
+        if "D" in f:
+            _say(f"  [{obj}] {label:>7s} [D: onset] theta*={-f['D']['theta']:.2f}°  z_c={f['D']['zc']:.4f}m  "
+                 f"m={f['D']['m']:.4f}kg  off={f['D']['offset_deg']:+.2f}°")
+    est_arc, est_unarc = est["tip"], est["return"]
     _say(f"  [{obj}] Ground truth — COM_z={COM_GT[2]:.4f} m  Mass={MASS_GT:.4f} kg  theta*={theta_gt_deg:.1f}deg")
 
     # Average push/retract Method B estimates (hysteresis cancellation)
-    mass_est      = 0.5 * (mass_tau_push      + mass_tau_retract)
-    com_z_est     = 0.5 * (com_z_tau_push     + com_z_tau_retract)
-    theta_est_deg = 0.5 * (theta_tau_push_deg + theta_tau_retract_deg)
-    com_x_est     = 0.5 * (est_arc["B"]["cx"] + est_unarc["B"]["cx"])
+    mean_B = branch_mean(fit, "B")
+    mass_est, com_z_est, com_x_est = mean_B["m"], mean_B["zc"], mean_B["cx"]
+    theta_est_deg = mean_B["theta"]
 
     # Tipping moment m*|r_com| (kg·m). tau(theta) = m*g*|r_com|*sin(theta* - theta), so the
     # curve's AMPLITUDE fixes m*|r_com| and its PHASE fixes theta*. Those two are what the
     # data actually identifies; splitting m from z_c needs the extra com_x assumption and
     # is the ill-conditioned step. m*|r_com| is therefore the robust reported quantity —
     # it is invariant to the tilt-reference error that dominates everything else.
-    mgr_est = mass_est * np.hypot(com_x_est, com_z_est)
+    mgr_est = mean_B["mgr"]
     mgr_gt  = MASS_GT * np.hypot(COM_GT[0], COM_GT[2])
+    mean_D = branch_mean(fit, "D")
+
+    # Second, independent tilt source: the episode's cameras. Slower and noisier, but it
+    # sees the object, so it separates tipping from sliding (incl. finger slip on the object).
+    vision_res = None
+    if vision:
+        vision_res = estimate_with_vision(log, track, COM_GT[0], (MASS_GT, COM_GT[2]), onset,
+                                          p_pivot_B, verbose=verbose, label=obj, trim_deg=0.0)
+        vision_res.pop("_track", None)
+        vision_res.pop("fit", None)
+
+    # Per-sample views used by the optional per-object figure below.
+    rot_vec_obj = track.rotvec
+    w_app_O = fit["w_app"][contact_mask]
+    rot_vec_during_contact = rot_vec_obj[contact_mask]
+    y_pitch_during_contact = rot_vec_during_contact[:, 1]
+    arc_phase = log.branch[contact_mask] == "tip"
+    tip_sel = (est_arc["sel"] | est_unarc["sel"])[contact_mask]
+    fx_coeffs_push, fx_coeffs_retract = est_arc["A"]["coeffs"], est_unarc["A"]["coeffs"]
+    theta_fx_push_deg, theta_fx_retract_deg = est_arc["A"]["theta_signed"], est_unarc["A"]["theta_signed"]
+    theta_tau_push_deg, theta_tau_retract_deg = -est_arc["B"]["theta"], -est_unarc["B"]["theta"]
+    mass_tau_push, com_z_tau_push = est_arc["B"]["m"], est_arc["B"]["zc"]
+    mass_tau_retract, com_z_tau_retract = est_unarc["B"]["m"], est_unarc["B"]["zc"]
+    if PLOT_PER_OBJECT:
+        fig_obj, axes_obj = plt.subplots(1, 3, figsize=(24, 6))
+        fig_obj.suptitle(f"[{obj}]", fontsize=14, fontweight="bold")
+        time_plot = time[contact_mask] - time[contact_mask][0]
+        plot_wrench_and_tipping(time_plot, w_app_O[:, 3:], w_app_O[:, :3],
+                                ax=axes_obj[0],
+                                pitch_rad=rot_vec_obj[contact_mask, 1], torque_label="τ",
+                                contact_time=0.0, title=f"Applied Wrench (Object Frame)", show=False)
     tau_pred_arc   = model_fwd_wrench(rot_vec_during_contact[tip_sel], np.array([COM_GT[0], 0.0, com_z_tau_push]),    mass_tau_push)[:, 1]
     tau_pred_unarc = model_fwd_wrench(rot_vec_during_contact[tip_sel], np.array([COM_GT[0], 0.0, com_z_tau_retract]), mass_tau_retract)[:, 1]
 
@@ -532,6 +509,10 @@ def _run_estimation(obj: str, base_dir: str, squash_file: str, push_file: str | 
         "commanded_pivot_xyz": commanded_pivot.tolist(),
         "pivot_fit_resid_mm": pivot_fit_resid * 1000 if np.isfinite(pivot_fit_resid) else np.nan,
         "noslip_dev_mm": noslip_dev_mm,
+        "method": "B",
+        "method_D": mean_D,
+        "tau_onset": fit["tau_onset"],
+        "vision": vision_res,
         "phase_estimates": {
             "arc_A":   {"m": est_arc["A"]["m"],   "zc": est_arc["A"]["zc"],   "theta": abs(est_arc["A"]["theta"])},
             "arc_B":   {"m": est_arc["B"]["m"],   "zc": est_arc["B"]["zc"],   "theta": abs(est_arc["B"]["theta"])},
@@ -1570,7 +1551,8 @@ def _relative_pivots(obj: str, trial_files: list, verbose: bool = True) -> dict:
 
 
 def run_object(obj: str, workspace_root: str, verbose_trials: bool = False,
-               free_com_x: bool = False, pivot_mode: str = "trajectory") -> dict | None:
+               free_com_x: bool = False, pivot_mode: str = "trajectory",
+               vision: bool = False) -> dict | None:
     """Run every recorded trial for `obj` and return the aggregated record."""
     trial_files = find_trial_logs(obj, workspace_root)
     push_file   = find_push_log(obj, workspace_root)
@@ -1588,7 +1570,7 @@ def run_object(obj: str, workspace_root: str, verbose_trials: bool = False,
             r = _run_estimation(obj, base_dir, path, push_file,
                                 verbose=verbose_trials, trial_label=name,
                                 free_com_x=free_com_x, pivot_mode=pivot_mode,
-                                pivot_override=rel_pivots.get(idx))
+                                pivot_override=rel_pivots.get(idx), vision=vision)
         except (KeyError, ValueError, IndexError) as exc:
             skipped.append((name, str(exc).split("\n")[0][:90]))
             continue
@@ -1603,6 +1585,8 @@ def run_object(obj: str, workspace_root: str, verbose_trials: bool = False,
         return None
 
     print(f"  → {len(trial_results)} usable trial(s), {len(skipped)} skipped.")
+    if vision:
+        print_vision_report([{"obj": r["trial"][-25:], "vision": r["vision"]} for r in trial_results])
     return aggregate_trials(obj, trial_results)
 
 
@@ -1619,6 +1603,10 @@ def write_per_trial_csv(results: list, save_dir: str) -> None:
                     "tipping_moment_est_kgm", "tipping_moment_gt_kgm",
                     "mu_est", "mu_gt",
                     "pivot_x_m", "pivot_fit_resid_mm", "noslip_dev_mm", "com_x_est_m"])
+        def _g(x):
+            # Forward-tip objects have no weighed mass, so m and m|r_com| have no GT.
+            return "" if x is None else f"{x:.6f}"
+
         for r in results:
             sp = r["spread"]
             for i in range(r["n_trials"]):
@@ -1629,10 +1617,10 @@ def write_per_trial_csv(results: list, save_dir: str) -> None:
                     vals = r["diag"][key]["values"]
                     return f"{vals[i]:.6f}" if i < len(vals) else ""
                 w.writerow([r["obj"], i + 1, r["trials"][i],
-                            _v("mass"),  f"{r['mass_gt']:.6f}",
-                            _v("com_z"), f"{r['com_z_gt']:.6f}",
-                            _v("theta"), f"{r['theta_gt_deg']:.6f}",
-                            _v("mgr"),   f"{r['mgr_gt']:.6f}",
+                            _v("mass"),  _g(r["mass_gt"]),
+                            _v("com_z"), _g(r["com_z_gt"]),
+                            _v("theta"), _g(r["theta_gt_deg"]),
+                            _v("mgr"),   _g(r["mgr_gt"]),
                             _v("mu"),    "" if r["mu_gt"] is None else f"{r['mu_gt']:.6f}",
                             _d("pivot_x"), _d("pivot_fit_resid_mm"),
                             _d("noslip_dev_mm"), _d("com_x_est")])
@@ -1746,13 +1734,24 @@ def _output_dir(workspace_root: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--object", type=str, default=None, choices=ALL_OBJECTS)
+    parser.add_argument("--primitive", choices=["press_pull", "fwd_tip"], default="press_pull",
+                        help="'press_pull' runs the arc_squash logs (default). 'fwd_tip' runs "
+                             "forward-tip episodes through fwd_tip_estimation (method D).")
+    parser.add_argument("--object", type=str, default=None,
+                        help=f"press_pull: one of {ALL_OBJECTS}; fwd_tip: a FWD_TIP_GROUND_TRUTH key.")
     parser.add_argument("--workspace", type=str, default=None)
+    parser.add_argument("--logs-root", type=str, default=None,
+                        help="fwd_tip only: directory holding <object>/episodes/ (a copied suite) "
+                             "or runtime_logs/<object>/episodes/. Defaults to the workspace.")
     parser.add_argument("--verbose-trials", action="store_true",
                         help="Print the full per-trial fit diagnostics (very noisy with 10 trials/object).")
     parser.add_argument("--free-com-x", action="store_true",
                         help="Fit com_x instead of taking it from GROUND_TRUTH (ablation: "
                              "shows the result does not depend on knowing the CoM x offset).")
+    parser.add_argument("--vision", action="store_true",
+                        help="Also track the object's tilt and slide in the episode videos "
+                             "(tilt_vision): reports tip vs slide and a second, vision-tilt "
+                             "estimate. Needs episode logs (perceive stage + camera videos).")
     parser.add_argument("--uncertainty-budget", action="store_true",
                         help="Attribute the residual error to individually measured input "
                              "uncertainties (pivot creep, pivot height, F/T zero drift).")
@@ -1769,11 +1768,24 @@ def main():
     args = parser.parse_args()
 
     workspace_root = args.workspace or _find_workspace_root()
+    if args.primitive == "fwd_tip":
+        from irb120_control.estimation.fwd_tip_estimation import FWD_TIP_OBJECTS, main_fwd_tip
+        root = args.logs_root or workspace_root
+        objects = [args.object] if args.object else list(FWD_TIP_OBJECTS)
+        unknown = [o for o in objects if o not in FWD_TIP_OBJECTS]
+        if unknown:
+            parser.error(f"no forward-tip ground truth for {unknown}; add it to FWD_TIP_GROUND_TRUTH")
+        out_dir = os.path.join(root, "estimation_fwd_tip")
+        main_fwd_tip(objects, root, out_dir, verbose_trials=args.verbose_trials,
+                     uncertainty=args.uncertainty_budget, vision=args.vision)
+        return
+    if args.object is not None and args.object not in ALL_OBJECTS:
+        parser.error(f"--object must be one of {ALL_OBJECTS} for press_pull")
     out_dir = _output_dir(workspace_root)
     results = []
     for obj in ([args.object] if args.object else ALL_OBJECTS):
         r = run_object(obj, workspace_root, verbose_trials=args.verbose_trials,
-                       free_com_x=args.free_com_x, pivot_mode=args.pivot)
+                       free_com_x=args.free_com_x, pivot_mode=args.pivot, vision=args.vision)
         if r is not None:
             results.append(r)
 
