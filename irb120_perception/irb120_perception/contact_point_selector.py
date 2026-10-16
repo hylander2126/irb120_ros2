@@ -217,7 +217,6 @@ def select_contact_points(clouds, *, normals=None,
                           table_buffer=0.003,
                           min_ball_center_z=None, 
                           push_min_ball_center_z=None,
-                          y_band=0.005,
                           support_band=0.02, 
                           min_edge_length=0.03,
                           press_inset=0.0, # 0.005 was reasonable but failed for flashlight.
@@ -227,6 +226,7 @@ def select_contact_points(clouds, *, normals=None,
                           press_pivot_weight=1.0,
                           press_score_fraction=0.0,
                           push_max_normal_angle_deg=20.0,
+                          push_height_band=0.010,
                           experimental_press_filter=None,
                           press_pivot_override=None):
     """Return three independent selections and their estimated pivot geometry.
@@ -241,7 +241,9 @@ def select_contact_points(clouds, *, normals=None,
     finger, so its tool stack clears the table lower down); None keeps it.
 
     push_max_normal_angle_deg: maximum inward-normal deviation from the
-    executable +X push direction. Prefer alignment within the lowest height band.
+    executable +X push direction. Search the whole object without a lateral
+    position limit. Within push_height_band of the lowest eligible point,
+    prefer a line through the footprint center, then normal alignment.
 
     press_pivot_weight: weight (metres of pull-moment-arm per metre of
     horizontal pivot-distance) applied to the press mode's double-scoring —
@@ -258,10 +260,10 @@ def select_contact_points(clouds, *, normals=None,
     forward_tip/planar_push are untouched. This moves the SELECTED press
     point itself, not just a downstream rotation center.
     """
-    scalars = [table_z, finger_radius, table_buffer, y_band, support_band,
+    scalars = [table_z, finger_radius, table_buffer, support_band,
                min_edge_length, press_inset, score_tolerance,
                pull_normal_epsilon, normal_radius, press_pivot_weight,
-               press_score_fraction, push_max_normal_angle_deg]
+               press_score_fraction, push_max_normal_angle_deg, push_height_band]
     if not np.isfinite(scalars).all():
         raise ValueError('All parameters must be finite')
     if press_pivot_override is not None:
@@ -269,8 +271,8 @@ def select_contact_points(clouds, *, normals=None,
         if press_pivot_override.shape != (3,) or not np.isfinite(press_pivot_override).all():
             raise ValueError('press_pivot_override must be a finite (3,) point')
     if (finger_radius <= 0 or normal_radius <= 0 or support_band <= 0
-            or min_edge_length <= 0 or min(table_buffer, y_band, press_inset,
-                                          score_tolerance) < 0
+            or min_edge_length <= 0 or min(table_buffer, press_inset,
+                                          score_tolerance, push_height_band) < 0
             or not 0 <= pull_normal_epsilon <= 1 or press_pivot_weight < 0
             or not 0 <= press_score_fraction < 1
             or not 0 <= push_max_normal_angle_deg < 90):
@@ -323,21 +325,31 @@ def select_contact_points(clouds, *, normals=None,
                     ball_center=centers[i].copy(), score=float(score))
 
     result = dict(point_count=len(points), normal_count=int(np.isfinite(normals).all(axis=1).sum()))
-    # Planar sliding stays along +X and close to y=0. Restrict to an actually
+    # Planar sliding stays along +X at the lowest usable height, at any y.
+    # Restrict to an actually
     # inward-facing side; a tangential top normal is not a useful push contact.
     ids = np.flatnonzero(push_clear & (normals[:, 0] <= -np.cos(np.radians(push_max_normal_angle_deg)))
-                         & (np.abs(normals[:, 2]) <= 0.5)
-                         & (np.abs(points[:, 1]) <= y_band))
+                         & (np.abs(normals[:, 2]) <= 0.5))
     if len(ids):
-        ids = ids[points[ids, 2] <= points[ids, 2].min() + score_tolerance]
-        i = ids[np.lexsort((points[ids, 0], np.abs(points[ids, 1]), normals[ids, 0]))[0]]
+        ids = ids[points[ids, 2] <= points[ids, 2].min() + push_height_band]
+        # Prefer a line of action through the observed footprint center, rather
+        # than a world-y centerline. Keep height as the first selection gate.
+        center = (points[:, :2].min(axis=0) + points[:, :2].max(axis=0)) / 2
+        inward = -normals[ids, :2]
+        inward /= np.linalg.norm(inward, axis=1)[:, None]
+        to_center = center - points[ids, :2]
+        miss = np.abs(inward[:, 0]*to_center[:, 1] - inward[:, 1]*to_center[:, 0])
+        best = np.lexsort((points[ids, 0], np.abs(points[ids, 1] - center[1]),
+                           normals[ids, 0], miss))[0]
+        i = ids[best]
         result['planar_push'] = contact(i, -(points[i, 2] - table_z))
-        result['planar_push']['direction'] = np.array([1., 0., 0.])
+        result['planar_push']['direction'] = np.r_[inward[best], 0.]
+        result['planar_push']['center_line_offset_m'] = float(miss[best])
         result['planar_push']['normal_angle_deg'] = float(
             np.degrees(np.arccos(np.clip(-normals[i, 0], -1., 1.))))
     else:
         result['planar_push'] = missing(f'No contact within {push_max_normal_angle_deg:g} deg of +X inward normal '
-                                         'near y=0 with fingertip clearance; reposition object and resnapshot')
+                                         'with fingertip clearance; reposition object and resnapshot')
 
     def inset_top(ids):
         try:

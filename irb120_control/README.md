@@ -108,8 +108,8 @@ after returning home. `push` pushes at the detected `planar_push` contact;
 `arc_static` squashes at the detected `press` contact and arcs about its pivot.
 The approach moves plan around the detected object (its padded bounding box is
 a MoveIt collision object during the approach only; `util/object_obstacle.py`).
-The move home plans around the same box (stretched `PUSH_DISTANCE` in +X after a
-push). The push pre-pose clears the padded box by only 10 mm, so OMPL's
+The move home plans around the same box swept along the horizontal push vector.
+The push pre-pose clears the padded box by only 10 mm, so OMPL's
 collision-check spacing (`longest_valid_segment_fraction` in
 `irb120_moveit_config/config/ompl_planning.yaml`, 0.001 ≈ 6 mm of finger travel)
 must stay well below that; at the old 0.005 (~30 mm) paths clipped the box and
@@ -238,8 +238,29 @@ point cloud. `report.json` records filter counts and final watertightness.
 
 ## Flashlight MVP rerun
 
-Push remains along +X. Candidates must have inward normals within 20 degrees
-of +X; among candidates in the lowest 3 mm height band, prefer alignment.
+Push follows the selected normal's horizontal inward direction at constant height;
+the tool yaw follows that direction while preserving table-clearance pitch.
+Candidates must have inward normals within 20 degrees of +X, at any y; among
+candidates in the lowest 10 mm height band, prefer a line through the observed
+footprint center. There is no force steering. After the operator confirms the
+unloaded pre-pose, session tare must succeed. Fresh tool0-axis forces are rotated
+to base_link. The push is continuous, with a rolling 0.1 s force window checked
+while moving. At least 0.3 N horizontally and within 45 degrees opposite the
+fixed push vector validates initial contact. Missing/stale force or TF, a 20 N
+mean load before validation, misaligned reaction, or reaching 5 mm past predicted
+contact without validation cancels the trajectory. Cancellation must reach a
+terminal result before retreat; if stopping cannot be confirmed, EGM is stopped
+and no further motion is commanded. There is no force steering or ongoing force
+limit after initial validation. These thresholds still need live validation.
+The return targets the original pre-pose even after a partial push or failure.
+
+All pushes require the bottom of the ball at least 10 mm above the physical
+table (previously 5 mm), with the original 25 mm stack/wrist clearance target.
+No extra table collision cap is added. The free-space approach ends 80 mm above
+the low pre-pose, then descends vertically at a 5 mm/s Cartesian ceiling.
+Approach joint speed scaling is reduced from 0.1 to 0.05. Saved contacts below
+the new height floor are refused; take a fresh snapshot. This adds planning
+margin, not a guarantee against physical tracking overshoot.
 A missing candidate means reposition and take a new snapshot. Saved contacts
 are checked again before motion. This reduces oblique pushing but does not
 guarantee zero yaw. Return-arc augmentation is disabled; the ordinary radial

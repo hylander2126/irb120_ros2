@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Straight-ahead Cartesian push controller for the IRB120.
+"""Normal-directed Cartesian push controller for the IRB120.
 
 All motion is planned with MoveIt's ComputeCartesianPath, which enforces a
 straight-line EE path in Cartesian space — no Z drift.
@@ -7,9 +7,9 @@ straight-line EE path in Cartesian space — no Z drift.
 Runs as the 'push' stage of an episode (util/episode.py):
   1. Perception snapshot (skipped if the episode's last stage already is one).
   2. MoveIt approach to the pre-push pose: the detected planar_push contact's
-     finger-ball center, PUSH_STANDOFF back in -X.
+     finger-ball center, PUSH_STANDOFF back along the horizontal inward normal.
   3. Operator confirmation, F/T tare.
-  4. Cartesian push: straight +X for PUSH_DISTANCE at PUSH_MAX_CARTESIAN_SPEED.
+  4. Continuous horizontal push with initial reaction-force validation.
   5. Cartesian return, then home, then a second snapshot of the pushed object.
 
 F/T + pose from step 4, metadata and videos go into the stage folder.
@@ -21,6 +21,8 @@ Usage:
 
 import argparse
 import sys
+import time
+from collections import deque
 from datetime import datetime
 
 import numpy as np
@@ -38,7 +40,8 @@ from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode, write_json_atomic
 from irb120_control.util.object_obstacle import TABLE_Z, object_obstacle
-from irb120_control.util.push_geometry import min_push_pitch, push_approach
+from irb120_control.util.push_geometry import (
+    min_push_pitch, push_approach, horizontal_push_direction, push_orientation, force_push_check)
 from irb120_control.util.perception_snapshot import (
     PUSH_MIN_BALL_CENTER_Z, begin_motion_stage, latest_object_cloud, take_snapshot)
 from irb120_control.util.ft_capture import FTCapture, stamp_s
@@ -57,7 +60,7 @@ EE_LINK    = "finger_ball_center"
 GROUP_NAME = "manipulator"
 
 PUSH_DISTANCE            = 0.080   # m
-PUSH_STANDOFF            = 0.040   # m, pre-push ball center sits this far behind (-X) the detected contact (~14 mm clear of the object's collision box)
+PUSH_STANDOFF            = 0.040   # m, pre-push ball center sits this far behind the detected contact (~14 mm clear of the object's collision box)
 # Finger pitched tip-down about base +Y. Horizontal (0 deg), the 90 mm F/T stack hangs 45 mm
 # below the shaft and hits the table, which forced ball centres >= 81 mm above it
 # (perception_snapshot.MIN_BALL_CENTER_Z). The pitch is the smallest that keeps the stack and
@@ -77,8 +80,11 @@ PUSH_MAX_CARTESIAN_SPEED = 0.010   # m/s hard ceiling — secondary safety cap
 CARTESIAN_MAX_STEP       = 0.001   # m — IK resolution along the path
 CARTESIAN_JUMP_THRESH    = 0.0     # disabled
 
-APPROACH_VELOCITY_SCALE  = 0.1     # speed for MoveIt approach and return moves
-RETURN_VELOCITY_SCALE    = 0.05    # slower return after push
+APPROACH_VELOCITY_SCALE  = 0.05     # speed for MoveIt approach and return moves
+RETURN_VELOCITY_SCALE    = 0.03    # slower return after push
+
+PUSH_APPROACH_LIFT = 0.080  # m: finish free-space planning above the low pre-push pose
+PUSH_DESCENT_SPEED = 0.005  # m/s: straight, collision-checked descent outside the object
 
 HOME_JOINT_POSITIONS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # retreat here before the post-push snapshot
 
@@ -94,6 +100,14 @@ TARE_WAIT_SEC = 3.0   # netft_preprocessor accumulates TARE_SAMPLES=200 asynchro
                        # after the service call returns; this is a generous fixed wait
                        # rather than a completion signal (none is exposed).
 
+# Validate contact during continuous motion, without changing the push direction.
+# Stop if no reaction is confirmed by 5 mm past the predicted contact.
+PUSH_CONTACT_FORCE_N = 0.3
+PUSH_FORCE_ANGLE_DEG = 45.0
+PUSH_FORCE_LIMIT_N = 20.0
+PUSH_CONTACT_MARGIN = 0.005
+PUSH_FORCE_WINDOW_SEC = 0.10
+
 PUSH_VIDEO_QUALITY = "h264"   # camera_hull_recorder's "h264" mode now encodes via a
                                # direct ffmpeg/libx264 CRF pipe (see _FfmpegH264Writer),
                                # not cv2.VideoWriter's own ineffective h264 backend —
@@ -105,6 +119,11 @@ class Push(Node):
         super().__init__("push")
         self._object = object_name
         self._pre_push_pos = None  # set from the detected planar_push contact in main()
+        self._push_direction = np.array([1., 0., 0.])
+        self._push_orientation = np.asarray(PUSH_ORIENTATION)
+        self._force_samples = deque(maxlen=1000)
+        self._force_check = {"status": "not_checked"}
+        self._motion_uncertain = False
         self._approach_diag = {}   # MoveIt request/result of the approach, saved even on abort
         self._object_xyz = None    # detected object cloud (base_link), avoided on the approach
         self._tf_buffer         = Buffer()
@@ -159,6 +178,19 @@ class Push(Node):
         t = msg.wrench.torque
         self._wrench = (f.x, f.y, f.z, t.x, t.y, t.z)
         self._have_force = True
+        # The historical message header says ft_link; processed forces use tool0 axes.
+        try:
+            from scipy.spatial.transform import Rotation
+            tf = self._tf_buffer.lookup_transform(BASE_FRAME, ESTIMATOR_POSE_FRAME, rclpy.time.Time())
+            q = tf.transform.rotation
+            age = self.get_clock().now().nanoseconds * 1e-9 - stamp_s(msg.header.stamp)
+            tf_age = self.get_clock().now().nanoseconds * 1e-9 - stamp_s(tf.header.stamp)
+            if 0 <= age <= .5 and 0 <= tf_age <= .5:
+                base_force = Rotation.from_quat([q.x, q.y, q.z, q.w]).apply([f.x, f.y, f.z])
+                if np.isfinite(base_force).all():
+                    self._force_samples.append((time.monotonic(), base_force))
+        except (TransformException, ValueError):
+            pass
         if self._recording_ft:
             now_s = self.get_clock().now().nanoseconds * 1e-9
             if self._log_start_s is None:
@@ -234,24 +266,25 @@ class Push(Node):
     # ------------------------------------------------------------------ MoveIt helpers
 
     def move_to_pre_push(self, velocity_scale: float = APPROACH_VELOCITY_SCALE) -> bool:
-        """Plan around the detected object (a collision box only for this move)."""
+        """Plan to a raised pre-pose, then descend slowly outside the object box."""
+        high = np.asarray(self._pre_push_pos) + [0., 0., PUSH_APPROACH_LIFT]
         try:
             with object_obstacle(self, self._object_xyz):
                 ok = plan_and_execute_pose_goal(
-                    self,
-                    self._move_group_client,
-                    base_frame=BASE_FRAME,
-                    target_position=self._pre_push_pos,
-                    target_orientation=PUSH_ORIENTATION,
-                    velocity_scale=velocity_scale,
-                    diagnostics=self._approach_diag,
-                )
+                    self, self._move_group_client, base_frame=BASE_FRAME,
+                    target_position=high, target_orientation=self._push_orientation,
+                    velocity_scale=velocity_scale, diagnostics=self._approach_diag)
+                if not ok or not self._arrived(high):
+                    return False
+                if not self._cartesian_move(0., velocity_scale,
+                        target_position=self._pre_push_pos, max_speed=PUSH_DESCENT_SPEED):
+                    return False
         except RuntimeError as exc:
             self.get_logger().error(str(exc))
             return False
-        return ok and self._arrived()
+        return self._arrived()
 
-    def _arrived(self) -> bool:
+    def _arrived(self, target_position=None) -> bool:
         """MoveIt can report a goal reached without the arm getting there (2026-10-16: a
         'successful' approach that never moved). Check the measured EE pose itself."""
         for _ in range(20):  # let TF catch up with the last joint states
@@ -260,10 +293,11 @@ class Push(Node):
         if pose is None:
             self.get_logger().error("Cannot look up EE pose after the approach")
             return False
+        target_position = self._pre_push_pos if target_position is None else target_position
         q = np.array([pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
         err_mm = 1000 * float(np.linalg.norm(np.array([pose.position.x, pose.position.y, pose.position.z])
-                                             - np.asarray(self._pre_push_pos)))
-        err_deg = float(np.degrees(2 * np.arccos(np.clip(abs(q @ np.asarray(PUSH_ORIENTATION)), 0., 1.))))
+                                             - np.asarray(target_position)))
+        err_deg = float(np.degrees(2 * np.arccos(np.clip(abs(q @ self._push_orientation), 0., 1.))))
         self._approach_diag["arrival"] = dict(position_error_mm=err_mm, orientation_error_deg=err_deg)
         if err_mm > ARRIVAL_TOL_MM or err_deg > ARRIVAL_TOL_DEG:
             self.get_logger().error(
@@ -273,46 +307,100 @@ class Push(Node):
             return False
         return True
 
-    def _cartesian_move(self, x_distance: float, velocity_scale: float) -> bool:
-        """Move the EE straight in X by x_distance (signed) at the given velocity scale."""
+    def _cartesian_move(self, distance: float, velocity_scale: float, *, target_position=None,
+                        max_speed=PUSH_MAX_CARTESIAN_SPEED, execution_check=None) -> bool:
+        """Move along the fixed push vector, or retrace to an explicit position."""
         start_pose = self._lookup_ee_pose()
         if start_pose is None:
             self.get_logger().error("Cannot look up EE pose — aborting move")
             return False
 
+        start = np.array([start_pose.position.x, start_pose.position.y, start_pose.position.z])
+        end = start + distance*self._push_direction if target_position is None else np.asarray(target_position)
         target = Pose()
-        target.position.x  = start_pose.position.x + x_distance
-        target.position.y  = start_pose.position.y
-        target.position.z  = start_pose.position.z
+        target.position.x, target.position.y, target.position.z = end.tolist()
         target.orientation = start_pose.orientation
-
-        direction = "+X" if x_distance >= 0 else "-X"
-        self.get_logger().info(
-            f"Cartesian {direction} {abs(x_distance)*1000:.1f}mm: "
-            f"x {start_pose.position.x:.4f} -> {target.position.x:.4f}  "
-            f"z stays at {start_pose.position.z:.4f}"
-        )
+        length = float(np.linalg.norm(end - start))
+        self.get_logger().info(f"Cartesian push-line move {length*1000:.1f}mm to {end.tolist()}")
 
         self._start_debug_timer()
-        ok = plan_and_execute_cartesian(
-            self,
-            self._cartesian_client,
-            self._execute_client,
-            base_frame=BASE_FRAME,
-            waypoints=[target],
-            velocity_scale=velocity_scale,
-            max_cartesian_speed=PUSH_MAX_CARTESIAN_SPEED,
-            max_step=CARTESIAN_MAX_STEP,
-            jump_threshold=CARTESIAN_JUMP_THRESH,
-            avoid_collisions=True,   # low pitched pushes: reject any path into the table
-            execute_timeout_sec=abs(x_distance) / PUSH_MAX_CARTESIAN_SPEED + 30.0,
-        )
-        self._stop_debug_timer()
+        try:
+            return plan_and_execute_cartesian(
+                self, self._cartesian_client, self._execute_client,
+                base_frame=BASE_FRAME, waypoints=[target], velocity_scale=velocity_scale,
+                max_cartesian_speed=max_speed, max_step=CARTESIAN_MAX_STEP,
+                jump_threshold=CARTESIAN_JUMP_THRESH, avoid_collisions=True,
+                execute_timeout_sec=length/max_speed + 30., execution_check=execution_check)
+        except RuntimeError as exc:
+            self._motion_uncertain = True
+            self.get_logger().error(str(exc))
+            return False
+        finally:
+            self._stop_debug_timer()
+
+
+    def _mean_contact_force(self):
+        """Check the unloaded baseline using fresh stationary samples."""
+        started = time.monotonic()
+        while rclpy.ok() and time.monotonic() - started < PUSH_FORCE_WINDOW_SEC:
+            rclpy.spin_once(self, timeout_sec=.02)
+        samples = [(t, f) for t, f in self._force_samples if t >= started]
+        if len(samples) < 5 or time.monotonic() - samples[-1][0] > .1:
+            self._force_check = dict(status="rejected", reason="missing or stale force/TF samples")
+            return None
+        return np.mean([f for _, f in samples], axis=0)
+
+    def _check_moving_contact(self, ball):
+        """Validate initial reaction from a rolling window while the finger moves."""
+        if self._force_check.get("status") == "validated":
+            return True  # Initial check only. Never steer or keep changing the direction.
+        now = time.monotonic()
+        samples = [(t, f) for t, f in self._force_samples if now-t <= PUSH_FORCE_WINDOW_SEC]
+        if not samples or now-samples[-1][0] > .1:
+            self._force_check = dict(status="rejected", reason="missing or stale force/TF during push")
+            return False
+        if len(samples) >= 5 and samples[-1][0]-samples[0][0] >= .06:
+            force = np.mean([f for _, f in samples], axis=0)
+            status, reason = force_push_check(force, self._push_direction,
+                PUSH_CONTACT_FORCE_N, PUSH_FORCE_ANGLE_DEG, PUSH_FORCE_LIMIT_N)
+            self._force_check = dict(status=status, reason=reason, force_base_n=force.tolist())
+            if status == "rejected":
+                return False
+            if status == "validated":
+                self.get_logger().info(f"Push vector validated during motion: {reason}; direction stays fixed")
+                return True
+        pose = self._lookup_ee_pose()
+        if pose is None:
+            self._force_check = dict(status="rejected", reason="missing pose during contact check")
+            return False
+        pos = np.array([pose.position.x, pose.position.y, pose.position.z])
+        offset = float((pos-np.asarray(ball)) @ self._push_direction)
+        if offset > PUSH_CONTACT_MARGIN:
+            self._force_check = dict(status="rejected", reason="no contact within 5 mm of predicted contact",
+                                     probe_offset_m=offset)
+            return False
+        return True
+
+    def _validated_push(self, ball, travel):
+        """One continuous fixed-vector push, checking contact before allowing travel past it."""
+        force = self._mean_contact_force()
+        if force is None:
+            return False
+        if np.linalg.norm(force) >= PUSH_CONTACT_FORCE_N:
+            self._force_check = dict(status="rejected", reason="force not zero at unloaded pre-push pose")
+            return False
+        self._force_check = dict(status="waiting", reason="approaching contact")
+        endpoint = np.asarray(self._pre_push_pos) + travel*self._push_direction
+        ok = self._cartesian_move(0., PUSH_VELOCITY_SCALE, target_position=endpoint,
+                                 execution_check=lambda: self._check_moving_contact(ball))
+        if ok and self._force_check["status"] != "validated":
+            self._force_check = dict(status="rejected", reason="motion ended without validated contact")
+            return False
         return ok
 
 
 
-def _tare_ft_sensor(node: Push, wait_sec: float = TARE_WAIT_SEC) -> None:
+def _tare_ft_sensor(node: Push, wait_sec: float = TARE_WAIT_SEC) -> bool:
     """Zero the F/T sensor's session residual at the current pose. Call ONLY when
     the tool is stationary and definitely not in contact with anything — e.g. right
     after the operator confirms the object is positioned but before the push starts.
@@ -324,20 +412,22 @@ def _tare_ft_sensor(node: Push, wait_sec: float = TARE_WAIT_SEC) -> None:
     """
     client = node.create_client(SetBool, "/netft_preprocessor/set_tare")
     if not client.wait_for_service(timeout_sec=3.0):
-        node.get_logger().warn("netft_preprocessor tare service not available — skipping session tare")
-        return
+        node.get_logger().warn("netft_preprocessor tare service not available — aborting push")
+        return False
     future = client.call_async(SetBool.Request(data=True))
     rclpy.spin_until_future_complete(node, future, timeout_sec=3.0)
     result = future.result()
     if result is None or not result.success:
         node.get_logger().warn(
-            f"Session tare request failed: {result.message if result else 'no response'} — proceeding untared"
+            f"Session tare request failed: {result.message if result else 'no response'} — aborting push"
         )
-        return
+        return False
     node.get_logger().info(f"{result.message} Waiting {wait_sec:.1f}s for capture to finish...")
     deadline = node.get_clock().now().nanoseconds * 1e-9 + wait_sec
     while rclpy.ok() and node.get_clock().now().nanoseconds * 1e-9 < deadline:
         rclpy.spin_once(node, timeout_sec=0.1)
+
+    return True
 
 
 def main(args=None) -> int:
@@ -363,20 +453,20 @@ def main(args=None) -> int:
         if not contact["available"]:
             node.get_logger().error(f"No planar_push contact: {contact['reason']} -- not moving.")
             return 1
-        normal = np.asarray(contact.get("normal", []), dtype=float)
-        direction = np.asarray(contact.get("direction", []), dtype=float)
-        if (normal.shape != (3,) or not np.isfinite(normal).all()
-                or np.linalg.norm(normal) < 1e-9
-                or -normal[0] / np.linalg.norm(normal) < np.cos(np.radians(20.0))
-                or direction.shape != (3,) or not np.allclose(direction, [1., 0., 0.])):
-            node.get_logger().error(
-                "Push requires +X direction within 20 deg of the inward normal. "
-                "Take a fresh snapshot or reposition the object -- not moving.")
+        try:
+            # Derive from the normal even for older saved +X-only contacts.
+            node._push_direction = horizontal_push_direction(contact.get("normal", []))
+            node._push_orientation = push_orientation(node._push_direction, PUSH_PITCH_DEG)
+        except ValueError as exc:
+            node.get_logger().error(f"{exc}. Take a fresh snapshot -- not moving.")
             return 1
         ball = contact["ball_center"]
+        if (not np.isfinite(ball).all() or ball[2] < PUSH_MIN_BALL_CENTER_Z):
+            node.get_logger().error("Saved push is below the new table-clearance floor; take a fresh snapshot.")
+            return 1
         node._object_xyz = latest_object_cloud(episode)
         node._pre_push_pos, push_travel = push_approach(
-            ball, node._object_xyz, PUSH_STANDOFF, PUSH_DISTANCE)
+            ball, node._object_xyz, PUSH_STANDOFF, PUSH_DISTANCE, node._push_direction)
         node.get_logger().info(f"planar_push contact ball center {ball}; pre-push {node._pre_push_pos}")
 
         if not ensure_egm_active(node):
@@ -399,39 +489,49 @@ def main(args=None) -> int:
 
         # Stationary, confirmed-in-position, not yet touching — zero the F/T
         # sensor's session residual right here before any contact happens.
-        _tare_ft_sensor(node)
+        if not _tare_ft_sensor(node):
+            node._force_check = dict(status="rejected", reason="session tare failed")
+            return 1
 
         # Phase 2: Cartesian push (F/T recorded during execution)
         node._push_started = True
         node._recording_ft = True
         node.get_logger().info(
-            f"Pushing {push_travel*1000:.0f}mm in +X  "
+            f"Pushing {push_travel*1000:.0f}mm along {node._push_direction.tolist()}  "
             f"velocity_scale={PUSH_VELOCITY_SCALE}  "
             f"cartesian_ceiling={PUSH_MAX_CARTESIAN_SPEED*1000:.1f}mm/s"
         )
-        push_ok = node._cartesian_move(+push_travel, PUSH_VELOCITY_SCALE)
+        push_ok = node._validated_push(ball, push_travel)
         node._recording_ft = False
 
         if not push_ok:
-            node.get_logger().error("Push failed.")
+            node.get_logger().error(f"Push failed: {node._force_check.get('reason', 'motion failed')}")
 
-        # Phase 3: Cartesian return — retrace in -X to stay in the same IK
+        if node._motion_uncertain:
+            return 1  # EGM is stopped in finally; do not plan another motion.
+
+        # Phase 3: Cartesian return — retrace to the measured start to stay in the same IK
         # solution branch (joint-space return can rotate joint 6 by 360°).
         node.get_logger().info("Returning via Cartesian path...")
-        return_ok = node._cartesian_move(-push_travel, RETURN_VELOCITY_SCALE)
-        if not return_ok:
+        return_ok = node._cartesian_move(0., RETURN_VELOCITY_SCALE,
+                                         target_position=node._pre_push_pos)
+        if not return_ok and not node._motion_uncertain:
             node.get_logger().error("Cartesian return failed — attempting joint-space fallback.")
+            node._object_xyz = np.vstack((node._object_xyz,
+                node._object_xyz + PUSH_DISTANCE*node._push_direction))
             node.move_to_pre_push(velocity_scale=RETURN_VELOCITY_SCALE)
 
     except KeyboardInterrupt:
         pass
     finally:
         stop_recording(node)
-        if node._push_started and rclpy.ok():
+        if node._push_started and not node._motion_uncertain and rclpy.ok():
             # Home, so the post-push snapshot sees the object without the arm in the way. The pushed
-            # object is somewhere in its old box stretched PUSH_DISTANCE in +X: plan around all of that.
+            # object may have moved along the push vector: bound the swept volume.
             try:
-                with object_obstacle(node, node._object_xyz, extend_x=PUSH_DISTANCE):
+                swept_xyz = np.vstack((node._object_xyz,
+                    node._object_xyz + PUSH_DISTANCE*node._push_direction))
+                with object_obstacle(node, swept_xyz):
                     home_ok = plan_and_execute_joint_goal(
                         node, node._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
                         velocity_scaling_factor=APPROACH_VELOCITY_SCALE,
@@ -459,20 +559,24 @@ def main(args=None) -> int:
                         "receive_time_origin_ros_s": node._log_start_s,
                         "object": node._object,
                         "pre_push": node._pre_push_pos,
+                        "push_direction": node._push_direction.tolist(),
+                        "push_orientation": node._push_orientation.tolist(),
+                        "force_check": node._force_check,
                         "push_ok": push_ok,
                         "return_ok": return_ok,
                     })
                 except Exception as exc:
                     node.get_logger().error(f"Failed to save push F/T+pose log: {exc}")
             status = "aborted" if not node._push_started else "ok" if push_ok and return_ok else "failed"
-            stage.end(status, push_ok=push_ok, return_ok=return_ok, home_ok=home_ok, pre_push=node._pre_push_pos)
+            stage.end(status, push_ok=push_ok, return_ok=return_ok, home_ok=home_ok, pre_push=node._pre_push_pos,
+                      push_direction=node._push_direction.tolist(), force_check=node._force_check)
             if home_ok and rclpy.ok():
                 take_snapshot(node, episode, label="after push")
         print(episode.summary())
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-    return 0
+    return 0 if push_ok and return_ok and home_ok else 1
 
 
 if __name__ == "__main__":

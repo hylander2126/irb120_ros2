@@ -100,9 +100,9 @@ BAG_TOPICS = [f"/{ns}/{t}" for ns in CAMERAS.values()
 # hand-tuned pushes used. Also applies to the press/forward contacts, which sit far higher.
 MIN_BALL_CENTER_Z = 0.06
 # planar_push only: push.py pitches the finger (PUSH_PITCH_DEG), which lifts the sensor stack
-# clear, so the push ball may go down to 5 mm above the table (ball centre 18 mm above it).
+# clear. Keep the bottom of the push ball 10 mm above the table to allow tracking error.
 # MoveIt still collision-checks the table on the approach and on the Cartesian push.
-PUSH_MIN_BALL_CENTER_Z = -0.021 + 0.01325 + 0.005
+PUSH_MIN_BALL_CENTER_Z = -0.021 + 0.01325 + 0.010
 
 CONTACT_COLORS = {"planar_push": (0, 200, 0), "forward_tip": (13, 140, 255), "press": (255, 0, 255)}  # BGR
 

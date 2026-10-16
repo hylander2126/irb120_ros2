@@ -88,8 +88,11 @@ The PDF assumes an expected pivot; this script's partial-cloud hull is an
 approximation used to supply one. The PDF's interaction-mode selection in
 Section IV-C is not implemented: the script reports candidates for all modes.
 
-- **Planar push:** inward-facing side for +X, within 5 mm of y=0, minimum contact
-  height. Exact height ties prefer y closest to zero, then minimum x. Points remain
+- **Planar push:** search the whole object, at any y, for a low contact whose
+  inward normal is within 20 degrees of +X and whose fingertip clears the table.
+  Within 10 mm of the lowest eligible contact, prefer a horizontal inward-normal
+  line passing closest to the observed footprint bounding-box center, then normal
+  alignment. The push direction is that horizontal inward normal. Points remain
   actual sensed points; y is not forced to zero off the observed surface.
 - **Pivot and direction:** build a 2D convex hull using only points within 20 mm
   above the table (3 mm below is allowed for noise). The facing hull edge nearest
@@ -169,7 +172,8 @@ cloud (base_link, default `table_z`) and saves the full output as
 `contacts.json` in the episode's perceive stage. The motion scripts then take
 their targets from it, with no hardcoded poses:
 
-- `push`: approach `PUSH_STANDOFF` behind the `planar_push` ball center, push +X.
+- `push`: approach `PUSH_STANDOFF` behind the `planar_push` ball center along the
+  horizontal inward normal, validate initial contact force, then push on that fixed line.
 - `arc_static`: approach `SQUASH_STANDOFF` above the `press` ball center; the
   arc is centered on the `press` pivot (transformed to `world`).
 

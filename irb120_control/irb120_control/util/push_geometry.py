@@ -14,18 +14,58 @@ FLANGE_TO_WRIST = 0.072     # joint_6 origin: wrist centre behind the flange
 WRIST_REACH = 0.0796        # link_5 collision mesh: furthest point from the wrist centre
 
 
-def push_approach(ball_center, xyz, standoff, travel):
+def horizontal_push_direction(normal):
+    """Horizontal inward normal, limited to the existing robot-facing 20 deg cone."""
+    normal = np.asarray(normal, dtype=float)
+    if (normal.shape != (3,) or not np.isfinite(normal).all()
+            or np.linalg.norm(normal) < 1e-9
+            or -normal[0] / np.linalg.norm(normal) < np.cos(np.radians(20.0))):
+        raise ValueError('Push normal must face the robot within 20 deg of -X')
+    direction = -normal.copy()
+    direction[2] = 0.
+    return direction / np.linalg.norm(direction)
+
+
+def push_orientation(direction, pitch_deg):
+    """Yaw the pitched tool so its shaft stays behind the push direction."""
+    from scipy.spatial.transform import Rotation
+    yaw = np.arctan2(direction[1], direction[0])
+    return (Rotation.from_rotvec([0., 0., yaw]) *
+            Rotation.from_rotvec([0., np.radians(pitch_deg), 0.])).as_quat()
+
+
+def force_push_check(force, direction, min_force=.3, max_angle_deg=45., hard_limit=20.):
+    """Check the reaction in base axes; return waiting/validated/rejected, never steer."""
+    force = np.asarray(force, dtype=float)
+    if force.shape != (3,) or not np.isfinite(force).all():
+        return 'rejected', 'invalid force'
+    if np.linalg.norm(force) >= hard_limit:
+        return 'rejected', 'force limit exceeded'
+    horizontal = np.linalg.norm(force[:2])
+    if horizontal < min_force:
+        return 'waiting', 'no sustained horizontal contact'
+    angle = float(np.degrees(np.arccos(np.clip(
+        -force[:2] @ np.asarray(direction)[:2] / horizontal, -1., 1.))))
+    return ('validated' if angle <= max_angle_deg else 'rejected',
+            f'reaction angle {angle:.1f} deg (limit {max_angle_deg:g})')
+
+
+def push_approach(ball_center, xyz, standoff, travel, direction=(1., 0., 0.)):
     """Clear the entire padded box while preserving the nominal push endpoint."""
     ball = np.asarray(ball_center, dtype=float)
     xyz = np.asarray(xyz, dtype=float)
+    direction = np.asarray(direction, dtype=float)
     if (ball.shape != (3,) or xyz.ndim != 2 or xyz.shape[1] != 3
             or not len(xyz) or not np.isfinite(xyz).all() or not np.isfinite(ball).all()):
         raise ValueError('Push approach requires finite ball center and nonempty Nx3 cloud')
-    nominal_x = ball[0] - standoff
+    if (direction.shape != (3,) or not np.isfinite(direction).all()
+            or direction[0] <= 0 or abs(direction[2]) > 1e-9
+            or not np.isclose(np.linalg.norm(direction), 1.)):
+        raise ValueError('Push direction must be a horizontal unit vector toward +X')
     clear_x = xyz[:, 0].min() - OBJECT_PADDING - BALL_RADIUS - APPROACH_CLEARANCE
-    pre = ball.copy()
-    pre[0] = min(nominal_x, clear_x)
-    return tuple(pre), float(travel + nominal_x - pre[0])
+    backoff = max(standoff, (ball[0] - clear_x) / direction[0])
+    pre = ball - backoff * direction
+    return tuple(pre), float(travel + backoff - standoff)
 
 
 def min_push_pitch(ball_height, clearance):

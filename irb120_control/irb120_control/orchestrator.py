@@ -57,7 +57,7 @@ import rclpy
 from irb120_control.push import PUSH_DISTANCE, PUSH_STANDOFF
 from irb120_control.util.episode import OUTCOMES, Episode
 from irb120_control.util.perception_snapshot import latest_object_cloud, take_snapshot
-from irb120_control.util.push_geometry import push_approach
+from irb120_control.util.push_geometry import push_approach, horizontal_push_direction
 from irb120_control.util.tip_cascade import (
     MAX_ATTEMPTS, PRESS, SENSOR_FAULTS, classify, describe, first_attempt, next_attempt,
     object_change, press_contact,
@@ -186,8 +186,10 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
         print(f"  planar_push  contact {_mm(push['point'])}   normal {angle:.1f} deg from -X ({verdict})")
         try:
             cloud = np.load(folder / "object_cloud.npz")["xyz"]
-            pre, travel = push_approach(push["ball_center"], cloud, PUSH_STANDOFF, PUSH_DISTANCE)
-            print(f"               pre-push ball {_mm(pre)}   travel {1000 * travel:.0f} mm in +X")
+            direction = horizontal_push_direction(push["normal"])
+            pre, travel = push_approach(push["ball_center"], cloud, PUSH_STANDOFF, PUSH_DISTANCE, direction)
+            print(f"               pre-push ball {_mm(pre)}   travel {1000 * travel:.0f} mm"
+                  f" along {np.round(direction, 3).tolist()} (force check before full push)")
         except (ValueError, OSError, KeyError) as exc:
             print(f"               pre-push: {exc}")
     else:

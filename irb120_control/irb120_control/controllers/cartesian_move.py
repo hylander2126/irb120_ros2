@@ -8,7 +8,8 @@ Cartesian path through the given waypoints, and executes it.
 
 from __future__ import annotations
 
-from typing import Sequence
+import time
+from typing import Sequence, Callable
 
 import rclpy
 from geometry_msgs.msg import Pose
@@ -46,6 +47,7 @@ def plan_and_execute_cartesian(
     avoid_collisions: bool = DEFAULT_AVOID_COLLISIONS,
     min_fraction: float = DEFAULT_MIN_FRACTION,
     execute_timeout_sec: float = 60.0,
+    execution_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Plan a Cartesian straight-line path and execute it.
 
@@ -58,6 +60,7 @@ def plan_and_execute_cartesian(
         acceleration_scale: Fraction of joint accel limits. Defaults to velocity_scale / 2.
         max_cartesian_speed: Hard EE speed ceiling in m/s (0 = disabled).
         min_fraction:      Minimum acceptable path coverage [0, 1].
+        execution_check:   Optional check during motion; False cancels and waits for a terminal result.
 
     Returns:
         True on success, False on any planning or execution failure.
@@ -101,7 +104,8 @@ def plan_and_execute_cartesian(
 
     from irb120_control.controllers.moveit_single_shot import reached_trajectory_end
     for attempt in (1, 2):  # JTC command-timeout race: see moveit_single_shot.execute_checked_plan
-        if not _execute_trajectory(node, execute_client, resp.solution, execute_timeout_sec):
+        if not _execute_trajectory(node, execute_client, resp.solution, execute_timeout_sec,
+                                   execution_check=execution_check):
             return False
         if reached_trajectory_end(node, resp.solution):
             return True
@@ -110,7 +114,8 @@ def plan_and_execute_cartesian(
     return False
 
 
-def _execute_trajectory(node, execute_client, trajectory, timeout_sec: float) -> bool:
+def _execute_trajectory(node, execute_client, trajectory, timeout_sec: float,
+                        execution_check=None) -> bool:
     if not execute_client.wait_for_server(timeout_sec=5.0):
         node.get_logger().error("execute_trajectory action server not available")
         return False
@@ -121,6 +126,8 @@ def _execute_trajectory(node, execute_client, trajectory, timeout_sec: float) ->
     future = execute_client.send_goal_async(goal)
     rclpy.spin_until_future_complete(node, future, timeout_sec=10.0)
     if not future.done() or future.result() is None:
+        if execution_check is not None:
+            raise RuntimeError("Cartesian goal acceptance unknown; do not command a retreat")
         node.get_logger().error("execute_trajectory goal not accepted")
         return False
 
@@ -130,7 +137,22 @@ def _execute_trajectory(node, execute_client, trajectory, timeout_sec: float) ->
         return False
 
     result_future = handle.get_result_async()
-    rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_sec)
+    if execution_check is None:
+        rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_sec)
+    else:
+        deadline = time.monotonic() + timeout_sec
+        while not result_future.done():
+            rclpy.spin_once(node, timeout_sec=.02)
+            if result_future.done():
+                break
+            if time.monotonic() >= deadline or not execution_check():
+                node.get_logger().error("Cartesian execution check failed or timed out; cancelling motion")
+                cancel = handle.cancel_goal_async()
+                rclpy.spin_until_future_complete(node, cancel, timeout_sec=3.0)
+                rclpy.spin_until_future_complete(node, result_future, timeout_sec=5.0)
+                if not result_future.done() or result_future.result() is None:
+                    raise RuntimeError("Cannot confirm Cartesian motion stopped; do not command a retreat")
+                return False
     if not result_future.done() or result_future.result() is None:
         node.get_logger().error("execute_trajectory result not received")
         return False

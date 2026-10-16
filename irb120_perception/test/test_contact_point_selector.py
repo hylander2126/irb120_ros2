@@ -108,13 +108,15 @@ def test_missing_support_does_not_use_overhang_as_base():
         assert 'support' in result[mode]['reason']
 
 
-def test_height_floor_and_absent_centerline_contacts():
+def test_height_floor_and_laterally_displaced_object():
     points, normals = box()
     result = select_contact_points(points, normals=normals, table_z=0., min_ball_center_z=0.06)
     assert result['planar_push']['point'][2] >= 0.06
     points[:, 1] += 0.2
     result = select_contact_points(points, normals=normals, table_z=0.)
-    assert not result['planar_push']['available']
+    assert result['planar_push']['available']
+    assert result['planar_push']['point'][2] == pytest.approx(.02)
+    assert result['planar_push']['point'][1] > .15
 
 
 def test_press_requires_observed_inset_top():
@@ -276,9 +278,27 @@ def test_push_prefers_alignment_in_low_height_band():
                              & (np.abs(points[:, 2] - .025) < 1e-9))[0]
     normals[aligned] = [-1, 0, 0]
     push = select_contact_points(points, normals=normals, table_z=0.,
-                                 score_tolerance=.006)['planar_push']
+                                 push_height_band=.006)['planar_push']
     np.testing.assert_allclose(push['point'], points[aligned])
     assert push['normal_angle_deg'] == pytest.approx(0)
+
+
+@pytest.mark.parametrize('lateral_offset', [-.08, .08])
+def test_push_selects_low_contact_away_from_robot_centerline(lateral_offset):
+    points, normals = box()
+    front = normals[:, 0] < -.9
+    # Leave only high front-face observations near y=0. A low, slightly
+    # oblique observation far off center must still beat the aligned high face.
+    keep = ~front | (points[:, 2] >= .075)
+    low = [.5, lateral_offset, .02]
+    points = np.vstack((points[keep], low))
+    normals = np.vstack((normals[keep],
+                         [-np.cos(np.radians(15)), np.sin(np.radians(15)), 0]))
+    push = select_contact_points(points, normals=normals, table_z=0.)['planar_push']
+    assert push['available']
+    np.testing.assert_allclose(push['point'], low)
+    assert push['normal_angle_deg'] == pytest.approx(15)
+    assert push['ball_center'][2] - .01325 >= .003
 
 
 def test_curved_pivot_tangent_is_centered_and_normal_to_pull():
@@ -289,6 +309,35 @@ def test_curved_pivot_tangent_is_centered_and_normal_to_pull():
     assert abs(np.dot(g['tangent'][1]-g['tangent'][0],g['direction'])) < 1e-12
     assert g['edge'] is None
     assert len(g['support_boundary']) == 128
+
+
+def test_push_line_targets_object_center_instead_of_world_centerline():
+    points, normals = box()
+    points[:, 1] += .12
+    push = select_contact_points(points, normals=normals, table_z=0.)['planar_push']
+    np.testing.assert_allclose(push['point'], [.5, .12, .02])
+    np.testing.assert_allclose(push['direction'], [1., 0., 0.])
+    assert push['center_line_offset_m'] == pytest.approx(0.)
+
+
+def test_push_direction_is_horizontal_inward_normal():
+    points, normals = box()
+    front = normals[:, 0] < -.9
+    normals[front] = [-.96, .26, .1]
+    push = select_contact_points(points, normals=normals, table_z=0.)['planar_push']
+    np.testing.assert_allclose(push['direction'], [.96/np.hypot(.96,.26),
+                                                -.26/np.hypot(.96,.26), 0.])
+
+
+def test_push_trades_small_height_increase_for_centered_line():
+    points, normals = box()
+    front = normals[:, 0] < -.9
+    keep = ~front | (points[:, 2] >= .025)
+    points = np.vstack((points[keep], [.5, -.045, .02]))
+    normals = np.vstack((normals[keep], [-.96, .26, .1]))
+    push = select_contact_points(points, normals=normals, table_z=0.)['planar_push']
+    np.testing.assert_allclose(push['point'], [.5, 0., .025], atol=1e-10)
+    assert push['center_line_offset_m'] == pytest.approx(0.)
 
 
 def test_experimental_filter_precedes_scoring_and_cannot_fallback():
