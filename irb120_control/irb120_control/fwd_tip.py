@@ -72,8 +72,8 @@ def rotate(q, vector):
 
 
 class ForwardTip(Node):
-    def __init__(self, object_name, config):
-        super().__init__('fwd_tip')
+    def __init__(self, object_name, config, node_name='fwd_tip'):
+        super().__init__(node_name)
         self._object = object_name
         self.config = config
         self._tf_buffer = Buffer()
@@ -347,20 +347,25 @@ class ForwardTip(Node):
         self.run_motion()
 
 
-def main(args=None):
+def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
     raw = list(sys.argv[1:] if args is None else args)
     ros_index = raw.index('--ros-args') if '--ros-args' in raw else len(raw)
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=(__doc__ if primitive == 'fwd_tip' else
+        'Forward pivot-axis arc with fixed orientation; return at 10% of peak pivot torque.'))
     parser.add_argument('object', help='Object/episode label; no ground-truth parameters required')
     parser.add_argument('--episode', default='new', help='new, last, or episode path')
     parser.add_argument('--quality', choices=['h264', 'lossless'], default='h264')
     parser.add_argument('--speed', type=float, default=.005, help='Forward/return speed in m/s')
     parser.add_argument('--max-travel', type=float, default=.080, help='Travel cap after contact, metres')
-    parser.add_argument('--reverse-fraction', type=float, default=.10, help='Fraction of peak axial force')
+    parser.add_argument('--reverse-fraction', type=float, default=.10, help='Fraction of peak pivot torque' if primitive == 'fwd_arc' else 'Fraction of peak axial force')
     parser.add_argument('--force-limit', type=float, default=20., help='Resultant force stop limit, N')
     parser.add_argument('--tip-force', type=float, default=.30,
                         help="Weakest contact force worth tipping on; below it back off as 'too_easy', N")
+    if primitive == 'fwd_arc':
+        parser.add_argument('--max-angle', type=float, default=30., help='Maximum arc angle, degrees')
     parsed = parser.parse_args(raw[:ros_index])
+    if primitive == 'fwd_arc' and (not math.isfinite(parsed.max_angle) or not 0 < parsed.max_angle <= 90):
+        parser.error('--max-angle must be in (0, 90] degrees')
     try:
         config = TipConfig(speed=parsed.speed, max_travel=parsed.max_travel,
                            reverse_fraction=parsed.reverse_fraction, force_limit=parsed.force_limit,
@@ -368,13 +373,15 @@ def main(args=None):
     except ValueError as exc:
         parser.error(str(exc))
     rclpy.init(args=raw[ros_index:])
-    node = ForwardTip(parsed.object, config)
+    node = node_type(parsed.object, config)
+    if primitive == 'fwd_arc':
+        node.max_angle = math.radians(parsed.max_angle)
     episode = stage = None
     home_ok = False
     recording_requested = False
     try:
         episode = Episode.resolve(parsed.episode, parsed.object, node, allow_unconfigured_object=True)
-        stage, contacts = begin_motion_stage(node, episode, 'forward_tip')
+        stage, contacts = begin_motion_stage(node, episode, 'forward_arc' if primitive == 'fwd_arc' else 'forward_tip')
         if stage is None:
             raise RuntimeError('No usable perception contacts; not moving')
         node.set_targets(contacts, latest_object_cloud(episode))
@@ -428,18 +435,19 @@ def main(args=None):
                     home_verification=getattr(node, '_last_joint_goal_verification', None))
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 try:
-                    save_ft_pose_log(node._ft_log, node._pose_log, str(stage.path), 'fwd_tip',
+                    save_ft_pose_log(node._ft_log, node._pose_log, str(stage.path), primitive,
                                      ft_raw_log=node._ft_capture.raw,
                                      timestamp=ts, commanded_pivot=node._pivot)
-                    (stage.path / f'fwd_tip_motion_{ts}.json').write_text(
+                    (stage.path / f'{primitive}_motion_{ts}.json').write_text(
                         json.dumps(node._motion_log, indent=2) + '\n')
-                    (stage.path / f'fwd_tip_diagnostics_{ts}.json').write_text(
+                    (stage.path / f'{primitive}_diagnostics_{ts}.json').write_text(
                         json.dumps(dict(tracking=node._tracking_log), separators=(',', ':')) + '\n')
-                    save_run_metadata(str(stage.path), 'fwd_tip', ts, {
+                    save_run_metadata(str(stage.path), primitive, ts, {
                         **module_constants(globals()), **asdict(config), **result,
                         **node._ft_capture.metadata(),
                         'object': parsed.object, 'pose_frame': BASE_FRAME,
-                        'completion_means': 'force-drop reversal and finger return; object restoration unverified',
+                        'completion_means': 'load-drop reversal and finger return; object restoration unverified',
+                        **getattr(node, 'trajectory_metadata', {}),
                     })
                 except Exception as exc:
                     success = False

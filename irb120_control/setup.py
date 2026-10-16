@@ -37,6 +37,7 @@ setup(
             'egm_handler            = irb120_control.util.egm_handler:main',
             'calibrate_ft_sensor    = irb120_control.util.calibrate_ft_sensor:main',
             'arc_static             = irb120_control.arc_static:main',
+            'fwd_arc = irb120_control.fwd_arc:main',
             'fwd_tip                = irb120_control.fwd_tip:main',
             'arc_static_batch       = irb120_control.arc_static_batch:main',
             'push                   = irb120_control.push:main',

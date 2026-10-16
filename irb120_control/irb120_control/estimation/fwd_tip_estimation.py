@@ -42,27 +42,22 @@ from irb120_control.estimation.tip_core import (
 
 FT_WRENCH_ORIGIN_OFFSET_X = 0.08225   # same NetFT torque origin as estimate_params
 BALL_RADIUS = 0.01325                 # util/push_geometry.BALL_RADIUS
+
+# ##########################################################################################
+# !!!  CANDIDATE EMPIRICAL CORRECTION — NOT APPLIED  !!!
+#   +0.94 deg (sd 0.29) added to the fitted tilt angle removes the systematic forward-tip
+#   bias (mass -5.3 %, height +8.5 %, 10 trials; leave-one-out RMS -> 2.6 % / 2.5 %).
+#   Held in reserve until pipeline debugging is exhausted. If ever applied, it MUST be
+#   logged in every result and flagged in plots. Details:
+#   PENDING_CORRECTIONS.md and runtime_logs/tipT_bias_audit/SENSITIVITY_AND_BIAS.md
+# ##########################################################################################
 PRIMARY_METHOD = "D"
 
 _LPF_CUTOFF_HZ = 6.0
 
-# Ground truth for the forward-tip suite. com_obj is (x, z) in the object's own frame:
-# origin at the base's near-bottom edge, +x along the push, +z up. The far base edge at
-# x = base_w is the pivot, so the CoM sits base_w - x behind it. Onshape, with the printed
-# body's mass properties overridden by measurement (2026-10-15: body 0.290 kg, its CoM
-# z 2.2 mm lower than uniform density gave) plus three 0.038 kg slugs; total weighed 0.404 kg.
-FWD_TIP_GROUND_TRUTH = {
-    "tipT_a": {"mass": 0.404, "com_obj": (0.030, 0.08247), "base_w": 0.060},
-    "tipT_b": {"mass": 0.404, "com_obj": (0.030, 0.0994), "base_w": 0.060},
-    "tipT_c": {"mass": 0.404, "com_obj": (0.030, 0.1220), "base_w": 0.060},
-    "tipT_d": {"mass": 0.404, "com_obj": (0.0074, 0.1220), "base_w": 0.060},
-    "tipT_e": {"mass": 0.404, "com_obj": (0.0526, 0.1220), "base_w": 0.060},
-}
-for _gt in FWD_TIP_GROUND_TRUTH.values():
-    _x, _z = _gt["com_obj"]
-    # Same convention as estimate_params.GROUND_TRUTH: com[0] = horizontal distance to pivot.
-    _gt["com"] = np.array([_gt["base_w"] - _x, 0.0, _z])
-    _gt["theta_deg"] = float(np.degrees(np.arctan2(_gt["com"][0], _gt["com"][2])))
+# Scoring references are owned by the models package, alongside the meshes.
+from irb120_models.experiment_gt import forward_tip_ground_truth
+FWD_TIP_GROUND_TRUTH = forward_tip_ground_truth()
 
 FWD_TIP_OBJECTS = tuple(FWD_TIP_GROUND_TRUTH)
 
@@ -122,7 +117,8 @@ def load_fwd_tip(path: str) -> TipLog:
     stem = Path(path)
     meta = json.loads(stem.with_suffix(".json").read_text())
     ts = meta.get("timestamp") or stem.stem.split("fwd_tip_")[-1]
-    motion_path = stem.parent / f"fwd_tip_motion_{ts}.json"
+    prefix = "fwd_arc" if stem.stem.startswith("fwd_arc_") else "fwd_tip"
+    motion_path = stem.parent / f"{prefix}_motion_{ts}.json"
     if not motion_path.exists():
         raise ValueError(f"No motion log {motion_path.name} (phase labels needed).")
     motion = json.loads(motion_path.read_text())

@@ -103,3 +103,18 @@ def test_complete_status_requires_measurements_but_not_cad(tmp_path):
         'mass: {value: 1.0}\ncom: {value: [0.04, 0.0, 0.1]}\n'
         'tip_edges: {default: {point: [0, 0, 0], direction: [0, 1, 0]}}\n')
     assert parse_object(folder / 'probe.yaml').status == 'complete'  # no mesh needed
+
+
+def test_experiment_ground_truth_adapters():
+    from irb120_models.experiment_gt import forward_tip_ground_truth, measured_ground_truth
+    regular = forward_tip_ground_truth()
+    all_configs = forward_tip_ground_truth(include_temporary=True)
+    assert 'tipT_c_2slugs' not in regular
+    assert all_configs['tipT_c_2slugs']['com'] == pytest.approx([.030, 0., .11912])
+    assert all_configs['tipT_c_2slugs']['mass'] == pytest.approx(.365)
+    assert regular['tipT_d']['com'][0] == pytest.approx(.0526)
+    assert regular['tipT_e']['com'][0] == pytest.approx(.0074)
+    for name, gt in measured_ground_truth(LEGACY).items():
+        expected = load_object(name).ground_truth()
+        assert gt['mass'] == expected['mass']
+        assert gt['theta_deg'] == expected['theta_star_deg']

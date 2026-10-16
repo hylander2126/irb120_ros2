@@ -1,0 +1,13 @@
+# Authoritative experimental GT; SI units. Coordinates are NOT the mesh CAD frame.
+# com_obj: near-bottom edge origin, +x along push, +z up. Far edge x=base_w.
+# Three-slug provenance: weighed assembly; Onshape with measured printed-body
+# mass properties (2026-10-15). No CAD/rest-pose registration is asserted here.
+configurations:
+  tipT_a: {mass: 0.404, com_obj: [0.030, 0.08247], base_w: 0.060}
+  tipT_b: {mass: 0.404, com_obj: [0.030, 0.0994], base_w: 0.060}
+  tipT_c: {mass: 0.404, com_obj: [0.030, 0.1220], base_w: 0.060}
+  tipT_d: {mass: 0.404, com_obj: [0.0074, 0.1220], base_w: 0.060}
+  tipT_e: {mass: 0.404, com_obj: [0.0526, 0.1220], base_w: 0.060}
+  # Temporary testing only; excluded from the default paper suite.
+  # User measured mass, confirmed CoM (30, 0, 119.12) mm on 2026-10-16.
+  tipT_c_2slugs: {mass: 0.365, com_obj: [0.030, 0.11912], base_w: 0.060, temporary: true}

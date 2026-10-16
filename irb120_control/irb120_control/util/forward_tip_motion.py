@@ -127,6 +127,7 @@ class TipMotion:
         self.contact_progress = None
         self.peak_force = 0.
         self.low_count = 0
+        self.peak_signal = 0.
         self.reversal_reason = None
         self.failure_reason = None
         self.returned = False
@@ -159,7 +160,7 @@ class TipMotion:
         n = self.config.stable_samples
         return float(np.median(self._window[-n:])) if len(self._window) >= n else 0.
 
-    def step(self, now, progress, force, force_norm, fresh=True):
+    def step(self, now, progress, force, force_norm, fresh=True, reversal_signal=None):
         """Return signed speed; caller enforces fresh sensors and pose tolerances."""
         c = self.config
         if self.done:
@@ -200,6 +201,8 @@ class TipMotion:
                     self.state = 'TIP'
                     self.state_started = now
                     self.contact_force = self.peak_force = self._median_window()
+                    if reversal_signal is not None:
+                        self.peak_signal = abs(reversal_signal)
                     return c.speed
             if progress - self.contact_progress >= c.load_travel:
                 held = float(np.median(self._load)) if self._load else 0.
@@ -214,10 +217,16 @@ class TipMotion:
                 self.peak_force = max(self.peak_force, abs(force))
                 if self.probe is None:
                     self._tip.append((travel, abs(force)))
-                low = abs(force) <= c.reverse_fraction * self.peak_force
+                signal = abs(force) if reversal_signal is None else abs(reversal_signal)
+                if not math.isfinite(signal):
+                    self.stop('nonfinite_feedback')
+                    return 0.
+                self.peak_signal = (self.peak_force if reversal_signal is None
+                                    else max(self.peak_signal, signal))
+                low = self.peak_signal > 0 and signal <= c.reverse_fraction * self.peak_signal
                 self.low_count = self.low_count + 1 if low and travel >= c.min_tip_travel else 0
                 if self.low_count >= c.stable_samples:
-                    self.reverse(now, 'force_drop', success=True)
+                    self.reverse(now, 'force_drop' if reversal_signal is None else 'torque_drop', success=True)
                     return 0.
             if travel >= c.max_travel:
                 self.reverse(now, 'travel_limit')

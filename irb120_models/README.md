@@ -134,3 +134,5 @@ motivates forward tipping (`fwd_tip.py`) for it.
 **Not done yet:** `estimate_params.py` still keeps its own `GROUND_TRUTH` table, which
 holds the same measured mass and CoM values as these models. Its θ\* is derived from the
 measured CoM, as here.
+
+Forward-tip experimental configurations are defined in `objects/tipT/configurations.yaml`, with an explicit experiment frame separate from the unregistered CAD frame. `irb120_models.experiment_gt` supplies estimator scoring references. Temporary configurations are opt-in and excluded from the default suite.

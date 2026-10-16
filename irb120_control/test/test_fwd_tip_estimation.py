@@ -178,3 +178,28 @@ def test_probe_slide_is_skipped_but_kept_as_a_friction_sample(tmp_path):
     mu = friction_from_fwd_tip(log, detect_onset(log, log.pivot), m)
     assert mu["mu_k"] == pytest.approx(0.5 / (m * G), rel=0.02)
     assert mu["mu_k_probe"] == pytest.approx(0.5 / (m * G))
+
+
+def test_face_geometry_also_inverts_variable_height_pivot_arc():
+    # The face-contact equation uses measured z at each sample; fixed height is
+    # unnecessary. Commanded angle is deliberately not used by the inversion.
+    pivot = np.array([0.67, 0.0, 0.003])
+    phi = np.radians(np.linspace(0, 15, 100))
+    d0, z0 = 0.133, 0.175
+    d = d0 * np.cos(phi) - z0 * np.sin(phi)
+    z = d0 * np.sin(phi) + z0 * np.cos(phi)
+    ball = np.c_[pivot[0] - d, np.zeros_like(d), pivot[2] + z]
+    est, _ = tilt_from_sliding_contact(ball, pivot, 0)
+    np.testing.assert_allclose(est, phi, atol=1e-9)
+
+
+def test_arc_log_loader_preserves_probe_exclusion(tmp_path):
+    from pathlib import Path
+    path, _ = _synthetic_episode(tmp_path, slide=0.0, probe=True)
+    old = Path(path)
+    ref = load_fwd_tip(path)
+    for file in list(old.parent.glob('fwd_tip_*')):
+        file.rename(file.with_name(file.name.replace('fwd_tip_', 'fwd_arc_', 1)))
+    arc = load_fwd_tip(str(old.with_name(old.name.replace('fwd_tip_', 'fwd_arc_', 1))))
+    np.testing.assert_array_equal(arc.branch, ref.branch)
+    np.testing.assert_allclose(arc.f_S, ref.f_S)
