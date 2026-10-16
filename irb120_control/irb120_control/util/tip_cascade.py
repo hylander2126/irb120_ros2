@@ -7,7 +7,7 @@ attempt on the snapshot taken after it:
   press-pull slipped (lost contact again at the force cap, or ball-to-pivot spread
   > NOSLIP_TOL_MM), or failed otherwise
       -> a riskier press contact (the snapshot's press_alternatives: more torque per
-         pull), starting at the force the last press-pull ended on
+         pull), starting again at the default press force (force_ref)
       -> forward tip -> stop
   forward tip hit its force limit, drifted, pushed its full travel without tipping,
   slid the object instead of tipping it, was too easy (the object nearly toppled
@@ -83,20 +83,32 @@ def classify(kind: str, results: dict | None, slip_mm: float | None = None,
     """(outcome, why) of one attempt from its stage results. Outcomes: success, slip,
     no_contact, sensor_fault, force_limit, drift, no_tip, slid, too_easy, moved, failed.
 
-    slid: the forward tip translated the object instead of tipping it, seen by its slide
-    probe (failure 'slide') or, without one, as a full-travel push after which the object
-    shifted but kept its height. Its push is the slide interaction (friction sample)."""
+    moved (ends the cascade): the object tilted or fell (top height changed). An object
+    that only shifted on the table and is still upright does not end it: the next attempt
+    is planned on the new snapshot as usual. A forward tip that shifted it without tipping
+    it is 'slid': the object slid instead of tipping, seen by the slide probe (failure
+    'slide') or by the shift itself. Its push is the slide interaction (friction sample).
+    Leaving the cameras' view or reach needs no rule here: the snapshot then fails or has
+    no usable contact, which already stops the episode or the cascade."""
     upright = change is None or abs(change["height_change_mm"]) <= HEIGHT_CHANGE_MM
-    if kind == FORWARD and results is not None and upright:
-        if results.get("failure_reason") == "slide":
-            force, travel = results.get("slide_force_n"), results.get("slide_travel_m")
-            return "slid", ("the object slid instead of tipping"
-                            + (f" ({force:.2f} N over {1000 * travel:.0f} mm)" if force and travel else ""))
-        if results.get("reversal_reason") == "travel_limit" and change and change["shift_mm"] > MOVED_MM:
-            return "slid", f"pushed the full travel and the object slid {change['shift_mm']:.0f} mm instead of tipping"
-    if change is not None and (change["shift_mm"] > MOVED_MM or not upright):
-        return "moved", (f"object moved {change['shift_mm']:.0f} mm, top height changed "
-                         f"{change['height_change_mm']:+.0f} mm")
+    if not upright:
+        return "moved", (f"object tilted or fell: top height changed {change['height_change_mm']:+.0f} mm, "
+                         f"shifted {change['shift_mm']:.0f} mm")
+    shifted = change is not None and change["shift_mm"] > MOVED_MM
+    outcome, why = _classify_step(kind, results, slip_mm)
+    if kind == FORWARD and results is not None and results.get("failure_reason") == "slide":
+        force, travel = results.get("slide_force_n"), results.get("slide_travel_m")
+        return "slid", ("the object slid instead of tipping"
+                        + (f" ({force:.2f} N over {1000 * travel:.0f} mm)" if force and travel else ""))
+    if shifted and kind == FORWARD and outcome not in ("success", "sensor_fault"):
+        return "slid", f"the object slid {change['shift_mm']:.0f} mm instead of tipping ({why})"
+    if shifted:
+        why += f"; object shifted {change['shift_mm']:.0f} mm but is still upright"
+    return outcome, why
+
+
+def _classify_step(kind: str, results: dict | None, slip_mm: float | None = None) -> tuple:
+    """classify() from the step's own results alone."""
     if results is None:
         return "failed", "the step left no result"
     fault = results.get("abort_reason") or results.get("failure_reason")
@@ -141,9 +153,6 @@ def _next_press(history: list, contacts: dict, force_ref: float):
     """The best press contact on this snapshot not already tried, or None."""
     tried = [np.asarray(h["press_point"]) for h in history
              if h["attempt"]["kind"] == PRESS and h.get("press_point") is not None]
-    ended = [h["final_force"] for h in history
-             if h["attempt"]["kind"] == PRESS and h["outcome"] == "slip" and h.get("final_force")]
-    start = min(max([force_ref, *ended]), PRESS_FORCE_MAX_N)
     alternatives = contacts.get("press_alternatives") or []
     for k, press in [(0, contacts.get("press"))] + list(enumerate(alternatives, 1)):
         if not (press or {}).get("available"):
@@ -151,7 +160,8 @@ def _next_press(history: list, contacts: dict, force_ref: float):
         point = np.asarray(press["point"], dtype=float)
         if any(np.linalg.norm(point - other) < SAME_CONTACT_M for other in tried):
             continue
-        return attempt(PRESS, k, start)
+        # A new contact starts at the default force; arc_static escalates from there.
+        return attempt(PRESS, k, force_ref)
     return None
 
 

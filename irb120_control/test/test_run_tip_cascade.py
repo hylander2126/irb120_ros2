@@ -31,7 +31,7 @@ def test_slip_then_riskier_contact_succeeds(monkeypatch):
 
     assert orchestrator.run_tip_cascade(None, episode, args) is None
     assert commands[0][:6] == ['arc_static', 'heart_a', '--force-ref', '5.000', '--press-candidate', '0']
-    assert commands[1][:6] == ['arc_static', 'heart_a', '--force-ref', '13.000', '--press-candidate', '1']
+    assert commands[1][:6] == ['arc_static', 'heart_a', '--force-ref', '5.000', '--press-candidate', '1']
     events = [c.args[0] for c in episode.add_event.call_args_list]
     assert any('tip attempt 1: slip' in e for e in events)
     assert any('tip attempt 2: success' in e for e in events)
@@ -76,7 +76,7 @@ def test_forward_slide_is_the_slide_interaction_then_press_pull(monkeypatch):
                            object='tipT_d', quality='h264')
     slides = []
     assert orchestrator.run_tip_cascade(None, episode, args, slides) is None
-    assert [c[0] for c in commands] == ['fwd_tip', 'arc_static']
+    assert [c[0] for c in commands] == ['fwd_arc', 'arc_static']
     assert slides == ['01_forward_tip']
     events = [c.args[0] for c in episode.add_event.call_args_list]
     assert any('tip attempt 1: slid' in e for e in events)

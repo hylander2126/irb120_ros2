@@ -216,6 +216,7 @@ def select_contact_points(clouds, *, normals=None,
                           finger_radius=0.01325, 
                           table_buffer=0.003,
                           min_ball_center_z=None, 
+                          push_min_ball_center_z=None,
                           y_band=0.005,
                           support_band=0.02, 
                           min_edge_length=0.03,
@@ -236,6 +237,8 @@ def select_contact_points(clouds, *, normals=None,
     Missing candidates return {available: False, reason: ...} for that mode.
     min_ball_center_z can impose a previously collision-checked tool-height
     floor; this function itself checks only the fingertip against the table.
+    push_min_ball_center_z replaces it for planar_push only (the push pitches the
+    finger, so its tool stack clears the table lower down); None keeps it.
 
     push_max_normal_angle_deg: maximum inward-normal deviation from the
     executable +X push direction. Prefer alignment within the lowest height band.
@@ -274,6 +277,8 @@ def select_contact_points(clouds, *, normals=None,
         raise ValueError('Invalid radius, band, tolerance or normal threshold')
     if min_ball_center_z is not None and not np.isfinite(min_ball_center_z):
         raise ValueError('min_ball_center_z must be finite')
+    if push_min_ball_center_z is not None and not np.isfinite(push_min_ball_center_z):
+        raise ValueError('push_min_ball_center_z must be finite')
     if isinstance(clouds, np.ndarray) and clouds.ndim == 2:
         points = np.asarray(clouds, dtype=float)
     else:
@@ -306,6 +311,9 @@ def select_contact_points(clouds, *, normals=None,
     if min_ball_center_z is not None:
         floor = max(floor, min_ball_center_z)
     clear = np.isfinite(normals).all(axis=1) & (centers[:, 2] >= floor)
+    push_floor = floor if push_min_ball_center_z is None else max(
+        table_z + finger_radius + table_buffer, push_min_ball_center_z)
+    push_clear = np.isfinite(normals).all(axis=1) & (centers[:, 2] >= push_floor)
 
     def missing(reason):
         return dict(available=False, reason=reason)
@@ -317,7 +325,7 @@ def select_contact_points(clouds, *, normals=None,
     result = dict(point_count=len(points), normal_count=int(np.isfinite(normals).all(axis=1).sum()))
     # Planar sliding stays along +X and close to y=0. Restrict to an actually
     # inward-facing side; a tangential top normal is not a useful push contact.
-    ids = np.flatnonzero(clear & (normals[:, 0] <= -np.cos(np.radians(push_max_normal_angle_deg)))
+    ids = np.flatnonzero(push_clear & (normals[:, 0] <= -np.cos(np.radians(push_max_normal_angle_deg)))
                          & (np.abs(normals[:, 2]) <= 0.5)
                          & (np.abs(points[:, 1]) <= y_band))
     if len(ids):

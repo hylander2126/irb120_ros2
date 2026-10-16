@@ -45,9 +45,12 @@ def test_forward_outcomes():
     assert classify(FORWARD, {'failure_reason': 'stale_force'})[0] == 'sensor_fault'
 
 
-def test_moved_object_overrides_everything():
-    moved = dict(shift_mm=15., height_change_mm=0.)
-    assert classify(PRESS, {'completed': True}, change=moved)[0] == 'moved'
+def test_only_a_tilted_or_fallen_object_ends_the_cascade():
+    shifted = dict(shift_mm=15., height_change_mm=0.)
+    assert classify(PRESS, {'completed': True}, change=shifted)[0] == 'success'
+    outcome, why = classify(PRESS, {'completed': False, 'status': 'failed'}, change=shifted)
+    assert outcome == 'failed' and 'still upright' in why
+    assert classify(FORWARD, {'reversal_reason': 'travel_limit'}, change=shifted)[0] == 'slid'
     fell = dict(shift_mm=2., height_change_mm=-60.)
     assert classify(FORWARD, {'completed': True}, change=fell)[0] == 'moved'
     assert classify(FORWARD, {'completed': True}, change=dict(shift_mm=3., height_change_mm=2.))[0] == 'success'
@@ -65,10 +68,10 @@ def test_slipping_press_goes_riskier_then_forward():
     first, _ = first_attempt(c, force_ref=5.)
     assert first == attempt(PRESS, 0, 5.)
     history = [run(first, 'slip', point=[.58, 0., .1], force=PRESS_FORCE_MAX_N)]
-    # The new snapshot's conservative contact is the one that slipped: riskier #1, at the
-    # force the slipping attempt ended on.
+    # The new snapshot's conservative contact is the one that slipped: riskier #1, back at
+    # the default force (arc_static escalates again from there).
     plan, _ = next_attempt(history, c, force_ref=5.)
-    assert plan == attempt(PRESS, 1, PRESS_FORCE_MAX_N)
+    assert plan == attempt(PRESS, 1, 5.)
     history.append(run(plan, 'slip', point=[.56, 0., .1], force=PRESS_FORCE_MAX_N))
     plan, _ = next_attempt(history, c, force_ref=5.)
     assert plan['press_candidate'] == 2

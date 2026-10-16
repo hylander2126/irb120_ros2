@@ -22,6 +22,13 @@ take_snapshot() saves into <episode>/NN_perceive/:
                            the forward (+X, far-edge) pivot fit from that mask, and whether
                            the pivot is straight or curved (contacts forward_tip.pivot_shape)
   bag/                     short rosbag of raw camera streams, TF, joint states, detector outputs
+                           (first perceive of an episode only: BAG_FIRST_PERCEIVE_ONLY)
+
+Seeded perceives (util/seed_model.py): once an episode has a full perceive, later ones
+register that object model to the fresh DBSCAN cloud (planar x, y, yaw) instead of waiting
+for SAM, move the model and its SAM pivot fits by that transform, and re-select contacts on
+it. object_cloud.npz is then the moved model. A fit that is poor, ambiguous, or shows the
+object tilted/fallen falls back to the full SAM perceive. snapshot.json 'seed' records which.
   snapshot.json            summary of the above, including tip_choice: which tip
                            (press_pull_tip / forward_tip) this snapshot calls for, and why
 
@@ -57,6 +64,7 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from irb120_control.util.episode import write_json_atomic
+from irb120_control.util.seed_model import apply as seed_apply, moved_pivot_report, register_planar
 from irb120_control.util.tip_choice import choose_tip
 from irb120_perception.contact_point_selector import select_contact_points
 
@@ -77,6 +85,10 @@ DBSCAN_TIMEOUT_SEC = 10.0
 CULL_TIMEOUT_SEC = 15.0    # the culler takes ~2 s per pass, with >= 2 s between passes
 REVIEW_TIMEOUT_SEC = 8.0   # cam3 review mask: one more SAM call, after the cull is published
 BAG_SECONDS = 1.0          # 0 = no bag
+# The bag costs ~11 s of a ~19 s perceive (recorder start-up, discovery, flushing ~110 MB).
+# Record it only on an episode's first perceive; later ones keep their per-camera aligned
+# depth and color, which is what offline checks use.
+BAG_FIRST_PERCEIVE_ONLY = True
 BAG_TOPICS = [f"/{ns}/{t}" for ns in CAMERAS.values()
               for t in ("color/image_raw", "color/camera_info",
                         "aligned_depth_to_color/image_raw", "aligned_depth_to_color/camera_info")] + [
@@ -87,6 +99,10 @@ BAG_TOPICS = [f"/{ns}/{t}" for ns in CAMERAS.values()
 # MoveIt found no valid pose. 0.06 (81 mm above the table) is the lowest the old
 # hand-tuned pushes used. Also applies to the press/forward contacts, which sit far higher.
 MIN_BALL_CENTER_Z = 0.06
+# planar_push only: push.py pitches the finger (PUSH_PITCH_DEG), which lifts the sensor stack
+# clear, so the push ball may go down to 5 mm above the table (ball centre 18 mm above it).
+# MoveIt still collision-checks the table on the approach and on the Cartesian push.
+PUSH_MIN_BALL_CENTER_Z = -0.021 + 0.01325 + 0.005
 
 CONTACT_COLORS = {"planar_push": (0, 200, 0), "forward_tip": (13, 140, 255), "press": (255, 0, 255)}  # BGR
 
@@ -327,11 +343,41 @@ def _final_selection_montage(review_frames, contacts, pivot_record):
     return np.hstack([cv2.resize(p, (int(p.shape[1]*height/p.shape[0]), height)) for p in panels])
 
 
-def take_snapshot(node, episode, label: str = "") -> dict:
-    """Run one perceive stage in `episode`; returns its snapshot.json record (ok=True on success)."""
+def _seed_model(episode):
+    """(stage dir, object cloud, press pivot report, forward pivot report) of the episode's
+    latest FULL (SAM) perceive, the model a seeded perceive registers; None if none."""
+    for s in reversed(episode.load()["stages"]):
+        if s["kind"] != "perceive" or s["status"] != "ok":
+            continue
+        d = episode.path / s["dir"]
+        try:
+            snap = json.loads((d / "snapshot.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if (snap.get("seed") or {}).get("mode") == "seeded":
+            continue
+        reports = []
+        for name in ("pivot_boundary_review.json", "forward_pivot_review.json"):
+            try:
+                reports.append(json.loads((d / name).read_text()))
+            except (OSError, ValueError):
+                reports.append({"candidate_status": "unavailable", "fallback_reason": f"model has no {name}"})
+        return (s["dir"], np.load(d / "object_cloud.npz")["xyz"], *reports)
+    return None
+
+
+def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
+    """Run one perceive stage in `episode`; returns its snapshot.json record (ok=True on success).
+
+    seed: if the episode already has a full perceive, register its object model to the
+    fresh DBSCAN cloud (util/seed_model.py) instead of waiting for SAM; falls back to the
+    full SAM perceive when that fit is not trustworthy. snapshot.json 'seed' says which ran."""
+    model = _seed_model(episode) if seed else None
+    first_perceive = not any(s["kind"] == "perceive" and s["status"] == "ok" for s in episode.load()["stages"])
     stage = episode.begin_stage("perceive", label=label)
     out = stage.path
-    record = {"ok": False, "label": label, "min_ball_center_z": MIN_BALL_CENTER_Z}
+    record = {"ok": False, "label": label, "min_ball_center_z": MIN_BALL_CENTER_Z,
+              "push_min_ball_center_z": PUSH_MIN_BALL_CENTER_Z}
     frames = {cam: {} for cam in CAMERAS}
     dbscan, cull = [], []
     sam_masks, sam_colors, sam_depths = deque(maxlen=16), deque(maxlen=16), deque(maxlen=16)
@@ -369,6 +415,9 @@ def take_snapshot(node, episode, label: str = "") -> dict:
             subs.append(node.create_subscription(
                 msg_type, topic, lambda m, c=cam, k=key: frames[c].__setitem__(k, m), qos_profile_sensor_data))
     cloud_msg = cull_msg = None
+    fit = None
+    record["seed"] = {"mode": "full", "reason": "no earlier full perceive in this episode" if seed
+                      else "seeding disabled"}
     try:
         # 1. Fresh DBSCAN cloud: reset the accumulator, then let it settle.
         _set_detector_active(node, False)
@@ -382,10 +431,20 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                     cloud_msg, n = msg, n + 1
             dbscan.clear()
         images = {cam: dict(m) for cam, m in frames.items()}  # taken together with the cloud
+        if model is not None and cloud_msg is not None:
+            fit = register_planar(model[1], _xyz(cloud_msg))
+            record["seed"] = {"mode": "seeded" if fit["ok"] else "full", "model_stage": model[0],
+                              **{k: v for k, v in fit.items() if k not in ("R",)}}
+            node.get_logger().info(
+                f"[snapshot] seeded from {model[0]}: yaw {fit.get('yaw_deg', 0):+.1f} deg, "
+                f"t {np.round(1000 * np.asarray(fit.get('t', [0, 0, 0])), 1)} mm" if fit["ok"] else
+                f"[snapshot] seed rejected ({fit['reason']}): full SAM perceive")
+            if not fit["ok"]:
+                fit = None
 
         # 2. The SAM cull of that cloud (the culler republishes with its input's stamp).
         t1 = time.monotonic()
-        while cloud_msg is not None and cull_msg is None and time.monotonic() - t1 < CULL_TIMEOUT_SEC:
+        while fit is None and cloud_msg is not None and cull_msg is None and time.monotonic() - t1 < CULL_TIMEOUT_SEC:
             rclpy.spin_once(node, timeout_sec=0.05)
             cull_msg = next((m for m in cull if _stamp(m) >= _stamp(cloud_msg) - 1e-6), None)
         # Diagnostics are optional: older cullers must still support snapshots.
@@ -414,7 +473,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
                 rclpy.spin_once(node, timeout_sec=0.05)
         record["wait_s"] = round(time.monotonic() - t0, 1)
 
-        if BAG_SECONDS > 0:
+        if BAG_SECONDS > 0 and (first_perceive or not BAG_FIRST_PERCEIVE_ONLY):
             record["bag_mb"] = round(_record_bag(node, out, BAG_SECONDS), 1)
     finally:
         for sub in subs:
@@ -423,7 +482,8 @@ def take_snapshot(node, episode, label: str = "") -> dict:
 
     # 3. Clouds.
     raw = _xyz(cloud_msg) if cloud_msg is not None else np.empty((0, 3))
-    obj = _xyz(cull_msg) if cull_msg is not None else np.empty((0, 3))
+    obj = (seed_apply(fit, model[1]) if fit is not None
+           else _xyz(cull_msg) if cull_msg is not None else np.empty((0, 3)))
     np.savez_compressed(out / "object_cloud_dbscan.npz", xyz=raw)
     np.savez_compressed(out / "object_cloud.npz", xyz=obj)
     record["dbscan_points"], record["points"] = len(raw), len(obj)
@@ -431,7 +491,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     if cloud_msg is None:
         record["error"] = (f"no object in the DBSCAN cloud within {DBSCAN_TIMEOUT_SEC:.0f} s"
                            + (f" -- detector: {camera_status[-1]}" if camera_status else ""))
-    elif cull_msg is None:
+    elif cull_msg is None and fit is None:
         record["error"] = f"no SAM cull output within {CULL_TIMEOUT_SEC:.0f} s -- is the culler running?"
     elif len(obj) < 3:
         record["error"] = "SAM cull removed the whole object"
@@ -440,6 +500,9 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     # no contacts are selected from a snapshot missing one.
     kept = {tuple(p) for p in np.round(obj, 5)}
     culled = np.array([p for p in raw if tuple(np.round(p, 5)) not in kept]).reshape(-1, 3)
+    if fit is not None and len(raw):  # seeded: the moved model, not a cull of this cloud
+        from scipy.spatial import cKDTree
+        culled = raw[cKDTree(obj).query(raw)[0] > 0.005]
     bridge = CvBridge()
     sam_images = None
     record['sam_mask'] = {'available': False, 'reason': 'no matching mask/color pair'}
@@ -539,7 +602,11 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     # 5. Press pivot: where the cam1 SAM mask meets the table (pivot_boundary_review).
     # Press selection uses it whenever the fit is reviewable, else the cloud estimate.
     from irb120_perception.pivot_boundary_review import evaluate as evaluate_press_pivot
-    pivot_report = evaluate_press_pivot(out, sam_images=sam_images)
+    if fit is not None:
+        pivot_report = moved_pivot_report(model[2], fit, model[0])
+        write_json_atomic(out / "pivot_boundary_review.json", pivot_report)
+    else:
+        pivot_report = evaluate_press_pivot(out, sam_images=sam_images)
     press_pivot = None
     if pivot_report.get("candidate_status") == "reviewable":
         press_pivot = (pivot_report.get("geometry") or {}).get("candidate_pivot_base_m")
@@ -553,6 +620,7 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     cameras = {cam: (depth, info) for cam, (_, depth, info) in review_frames.items()}
     try:
         contacts = _jsonable(select_contact_points(obj, min_ball_center_z=MIN_BALL_CENTER_Z,
+                                                   push_min_ball_center_z=PUSH_MIN_BALL_CENTER_Z,
                                                    press_pivot_override=press_pivot))
         contacts, evidence = evaluate_press(out, contacts, cameras=cameras, rule="top_support_v1",
                                             press_pivot_override=press_pivot)
@@ -567,10 +635,14 @@ def take_snapshot(node, episode, label: str = "") -> dict:
     if record["ok"]:
         from irb120_perception.forward_pivot_review import (
             contacts_with_forward_pivot, evaluate as evaluate_forward_pivot)
-        forward_report = evaluate_forward_pivot(out, contacts)
+        if fit is not None:
+            forward_report = moved_pivot_report(model[3], fit, model[0])
+            write_json_atomic(out / "forward_pivot_review.json", forward_report)
+        else:
+            forward_report = evaluate_forward_pivot(out, contacts)
         contacts, applied, reason = contacts_with_forward_pivot(contacts, forward_report)
-        record["forward_pivot"] = {"shape": forward_report["shape"],
-                                   "candidate_status": forward_report["candidate_status"],
+        record["forward_pivot"] = {"shape": forward_report.get("shape", "unknown"),
+                                   "candidate_status": forward_report.get("candidate_status"),
                                    "applied": applied, "reason": reason}
     write_json_atomic(out / "contacts.json", contacts)
     record["available"] = {m: bool((contacts.get(m) or {}).get("available")) for m in CONTACT_COLORS}

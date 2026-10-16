@@ -70,6 +70,9 @@ PUSH_MAX_NORMAL_ANGLE_DEG = 20.0  # push.py refuses contacts whose normal is fur
 ARC_STATE_IDS = (3, 4)  # arc_static STATE_IDS ARC, UNARC
 SQUASH_STATE_ID = 1
 
+# Stage kind the motion script records, where it differs from the step kind (fwd_arc).
+STAGE_KINDS = {"forward_tip": "forward_arc"}
+
 # Motion step kind -> (contact it needs, description for the prompt)
 STEPS = {
     "press_pull_tip": ("press", "press-pull tip"),
@@ -107,8 +110,8 @@ def step_command(kind: str, args, plan: dict | None = None) -> list:
     if kind == "press_pull_tip":
         return ["arc_static", args.object, "--force-ref", f"{plan['force_ref']:.3f}",
                 "--press-candidate", str(plan["press_candidate"]), "--quality", args.quality]
-    if kind == "forward_tip":
-        return ["fwd_tip", args.object, "--quality", args.quality]
+    if kind == "forward_tip":   # the arc version: it rubs the face far less than fwd_tip's straight push
+        return ["fwd_arc", args.object, "--quality", args.quality]
     if kind == "push":
         return ["push", args.object]
     raise ValueError(f"no command for step {kind}")
@@ -241,7 +244,7 @@ def run_step(episode: Episode, kind: str, command: list) -> tuple:
             interrupted = True
             print("\n[pipeline] Ctrl-C: waiting for the step to stop and clean up...")
     new = episode.load()["stages"][n_before:]
-    stage = next((s for s in reversed(new) if s["kind"] == kind), None)
+    stage = next((s for s in reversed(new) if s["kind"] == STAGE_KINDS.get(kind, kind)), None)
     snapshot_ok = bool(new) and new[-1]["kind"] == "perceive" and new[-1]["status"] == "ok"
     episode.add_event(f"{kind}: exit {returncode}, stages " + ", ".join(f"{s['dir']} {s['status']}" for s in new))
     if interrupted:

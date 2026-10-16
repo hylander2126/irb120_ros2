@@ -57,7 +57,17 @@ GROUP_NAME = "manipulator"
 
 PUSH_DISTANCE            = 0.080   # m
 PUSH_STANDOFF            = 0.040   # m, pre-push ball center sits this far behind (-X) the detected contact (~14 mm clear of the object's collision box)
-PUSH_ORIENTATION         = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
+# Finger pitched tip-down about base +Y. Horizontal (0 deg), the 90 mm F/T stack hangs 45 mm
+# below the shaft and hits the table, which forced ball centres >= 81 mm above it
+# (perception_snapshot.MIN_BALL_CENTER_Z). At 45 deg the stack's lowest point sits ~30 mm
+# ABOVE the ball centre, so the ball can push just above the table (PUSH_MIN_BALL_CENTER_Z),
+# which makes toppling during the planar push less likely. The ball is a sphere, so the
+# contact point on the face is unchanged; the shaft leans back-and-up, away from the object.
+# The wrench is logged in tool0 axes with tool0's pose per sample (ft_q*); friction
+# estimators rotate it into base_link (util/ft_frames.forces_in_base).
+PUSH_PITCH_DEG           = 45.0
+PUSH_ORIENTATION         = (0.0, float(np.sin(np.radians(PUSH_PITCH_DEG) / 2)), 0.0,
+                            float(np.cos(np.radians(PUSH_PITCH_DEG) / 2)))  # EE orientation (xyzw)
 PUSH_VELOCITY_SCALE      = 0.01    # fraction of joint limits (~5 mm/s at this pose)
 PUSH_MAX_CARTESIAN_SPEED = 0.010   # m/s hard ceiling — secondary safety cap
 CARTESIAN_MAX_STEP       = 0.001   # m — IK resolution along the path
@@ -262,6 +272,7 @@ class Push(Node):
             max_cartesian_speed=PUSH_MAX_CARTESIAN_SPEED,
             max_step=CARTESIAN_MAX_STEP,
             jump_threshold=CARTESIAN_JUMP_THRESH,
+            avoid_collisions=True,   # low pitched pushes: reject any path into the table
             execute_timeout_sec=abs(x_distance) / PUSH_MAX_CARTESIAN_SPEED + 30.0,
         )
         self._stop_debug_timer()

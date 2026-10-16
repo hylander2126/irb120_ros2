@@ -19,6 +19,7 @@ if __package__ in (None, ""):
 
 from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, construct_T, rotvec_between
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
+from irb120_control.util.ft_frames import forces_in_base
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 from irb120_control.estimation.tip_core import (TipLog, branch_mean, detect_onset, estimate_with_vision,
                                                 fit_track, print_vision_report, tilt_noslip)
@@ -212,8 +213,8 @@ def estimate_friction(push_log_path: str, mass_est: float, mass_gt: float) -> tu
     as -fx, so subtracting the bias from |f| instead gives a negative slip force.
     """
     data = np.load(push_log_path)
-    fx = _lpf(data["fx"])
-    fy = _lpf(data["fy"])
+    fx, fy, _ = forces_in_base(data)   # base_link axes: the finger may be pitched
+    fx, fy = _lpf(fx), _lpf(fy)
 
     n = len(fx)
     pre = slice(0, int(0.10 * n))                    # PRE-contact zero offset

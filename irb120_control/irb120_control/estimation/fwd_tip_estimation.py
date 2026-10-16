@@ -36,6 +36,7 @@ import numpy as np
 
 from irb120_control.estimation.com_estimation import model_fwd_wrench
 from irb120_control.estimation.helper_fns import quat_to_rotvec, rotvec_to_rot
+from irb120_control.util.ft_frames import forces_in_base
 from irb120_control.estimation.tip_core import (
     F_CONTACT_N, G, TipLog, branch_mean, classify_motion, compare_tracks, detect_onset,
     estimate_with_vision, fit_track, print_vision_report, tilt_sliding_face)
@@ -245,8 +246,9 @@ def friction_from_push(push_path, mass):
     """Static (breakaway peak) and kinetic (moving plateau) table friction from a planar push."""
     d = np.load(push_path)
     t = d["ft_time_s"]
-    f = np.hypot(_lowpass(t, d["fx"]), _lowpass(t, d["fy"]))
-    fz = _lowpass(t, d["fz"])
+    fx, fy, fz = forces_in_base(d)   # base_link axes: the finger may be pitched
+    f = np.hypot(_lowpass(t, fx), _lowpass(t, fy))
+    fz = _lowpass(t, fz)
     x = np.interp(t, d["pose_time_s"], d["x"])
     v = np.gradient(_lowpass(t, x), t)
     loaded = f > 0.3 * np.percentile(f, 99)
