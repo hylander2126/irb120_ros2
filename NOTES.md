@@ -186,9 +186,10 @@ geometric ideas below remain the fallback if that is not enough.
 
 Ideas:
 - Retreat straight back in -X (Cartesian, e.g. an extra 50 mm on the return) before planning home.
-- `arc_static`'s move home likely has the same problem: RETRACT (8 mm/s × 3 s = 24 mm) leaves
-  the ball ~14 mm above the box. A longer RETRACT (e.g. 6 s ≈ 48 mm) would clear it, but changes
-  tip timing.
+- `arc_static`'s move home: fixed. The timed RETRACT (8 mm/s × 3 s, nominally 24 mm) only rose
+  ~13 mm on tipT_d 2026-10-16 (episode 20261016_155329), leaving the ball ~4.5 mm inside the box;
+  MoveIt rejected the start state (error 99999) and the episode aborted. RETRACT now lifts closed
+  loop until the ball is BALL_RADIUS + APPROACH_CLEARANCE above the box top.
 
 ### Object swirls (yaws) during the push
 

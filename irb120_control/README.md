@@ -201,7 +201,8 @@ each on the snapshot taken after the one before, up to 4 attempts:
 - object moved more than 10 mm (other than a forward-tip slide) or its top height
   changed more than 10 mm: stop.
 
-The arc limit reached before the tangent-force flip counts as a tip. In step mode
+An arc that ends before the tangent-force flip (arc limit, or the tangent force
+collapsing) counts as a tip; the summary says which (`arc_exit` in the stage results). In step mode
 only the first attempt waits at the gate. `--tip press|forward` keeps the cascade
 to that tip. `arc_static --press-candidate K` runs the K-th press alternative.
 

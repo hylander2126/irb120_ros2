@@ -16,3 +16,13 @@ def test_already_clear_approach_unchanged():
     pre, travel = push_approach([.6, 0, .06], [[.63, 0, 0]], .04, .08)
     np.testing.assert_allclose(pre, [.56, 0, .06])
     assert np.isclose(travel, .08)
+
+
+def test_push_pitch_clears_table_at_lowest_ball():
+    from irb120_control.util.push_geometry import (
+        BALL_TO_STACK, STACK_RADIUS, min_push_pitch)
+    h, c = .01825, .02
+    th = min_push_pitch(h, c)
+    assert np.isclose(h + BALL_TO_STACK * np.sin(th) - STACK_RADIUS * np.cos(th), c)
+    assert 25 < np.degrees(th) < 32
+    assert min_push_pitch(.2, .02) == 0.0   # ball high enough: horizontal is fine

@@ -12,6 +12,8 @@ radial component computed in the actual XZ arc frame.
 
 UNARC reverses the arc back to the squash angle.  If contact is lost during
 ARC or UNARC, the complete attempt is re-run with a higher press force.
+RETRACT then lifts straight up until the finger ball clears the object's padded
+collision box (closed loop on the measured height), so the move home can plan.
 
 Runs as the 'press_pull_tip' stage of an episode (util/episode.py). The
 targets come from the episode's perception snapshot (taken first unless the
@@ -52,7 +54,8 @@ from irb120_control.util.episode import Episode
 from irb120_control.util.ft_tare import tare_netft
 from irb120_control.util.ft_capture import FTCapture, stamp_s
 from irb120_control.util.ft_frames import ESTIMATOR_POSE_FRAME
-from irb120_control.util.object_obstacle import object_obstacle
+from irb120_control.util.object_obstacle import box_bounds, object_obstacle
+from irb120_control.util.push_geometry import APPROACH_CLEARANCE, BALL_RADIUS
 from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, lookup, take_snapshot
 from irb120_control.util.motion_geometry import (
     arc_angle_xz,
@@ -126,7 +129,9 @@ LULL_WAIT_SEC = 1.0
 LULL_SETTLE_N = 0.5          # force must be within this many N of reference before leaving LULL
 LULL_SETTLE_TIMEOUT_SEC = 8.0 # bail to ARC anyway after this long even if not settled
 RETRACT_SPEED = 0.008       # m/s
-RETRACT_DURATION_SEC = 3.0
+RETRACT_MIN_SEC = 1.0       # always lift at least this long, to break contact
+RETRACT_TIMEOUT_SEC = 15.0  # give up lifting after this long (home planning will then report it)
+RETRACT_DURATION_SEC = 3.0  # fixed-time lift, only when there is no object box to clear
 
 KP_FORCE = 0.00035
 KI_FORCE = 0.000005
@@ -201,6 +206,7 @@ class ArcStatic(Node):
         self._pre_squash_pos = None  # world frame
         self._arc_center = None      # world frame (x, y, z)
         self._object_xyz = None      # detected object cloud (base_link), avoided on the approach
+        self._retract_clear_z = None # world z the ball center must reach to clear the object's box
 
         self._tf_buffer       = Buffer()
         self._tf_listener     = TransformListener(self._tf_buffer, self)
@@ -236,6 +242,7 @@ class ArcStatic(Node):
         # Why the run ended, for run_pipeline's tip cascade (util/tip_cascade.py).
         self._contact_missed = False     # no press force within the extra descent
         self._balance_reached = False    # tangent force flipped sign during ARC
+        self._arc_exit: str | None = None  # why ARC ended: balance / tangent_collapse / arc_limit
         self._force_cap_reached = False  # lost contact again with no force step left
         self._contact_count = 0
         self._force_x = 0.0
@@ -331,7 +338,7 @@ class ArcStatic(Node):
 
     def move_to_pre_squash(self) -> bool:
         """Plan around the detected object (a collision box only for this move). Also used for
-        retries and between batch trials, from the RETRACT pose ~24 mm above the object."""
+        retries and between batch trials, from the RETRACT pose just above the object's box."""
         diagnostic = None
         action = {}
         success = False
@@ -382,6 +389,10 @@ class ArcStatic(Node):
             contacts_file=getattr(self, '_approach_contacts_file', None),
             artifact_sha256=getattr(self, '_approach_artifact_hashes', {}))
         self._pre_squash_pos = tuple(float(v) for v in targets["pre_press"])
+        lo, hi = box_bounds(np.asarray(object_xyz, dtype=float))
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        box_top_world = float((corners @ np.asarray(R).T + np.asarray(t))[:, 2].max())
+        self._retract_clear_z = box_top_world + BALL_RADIUS + APPROACH_CLEARANCE
         self._arc_center = tuple(float(v) for v in targets["pivot"])
         # Display the exact transformed targets supplied to MoveIt, not a new selection.
         from visualization_msgs.msg import MarkerArray
@@ -399,7 +410,8 @@ class ArcStatic(Node):
     def move_to_home(self) -> bool:
         """Return to the robot's all-zero joint configuration, gently — same
         velocity/acceleration scale as the pre-squash approach — planning around
-        the object (back at rest after the tip; RETRACT leaves the finger above its box)."""
+        the object's box. RETRACT lifts the ball clear of that box first, since MoveIt
+        refuses to plan from a start state in collision with it."""
         try:
             with object_obstacle(self, self._object_xyz):
                 return plan_and_execute_joint_goal(
@@ -859,6 +871,7 @@ class ArcStatic(Node):
                 self._arc_fx_low_count += 1
                 if self._arc_fx_low_count >= ARC_FX_LOW_STABLE_SAMPLES:
                     self._lull_next = "UNARC"
+                    self._arc_exit = "tangent_collapse"
                     self.get_logger().info(
                         f"tangent force below threshold ({fx_low_thresh:.2f} N, "
                         f"{ARC_FX_LOW_FRACTION:.0%} of peak {self._arc_peak_tangent:.2f} N) for "
@@ -874,6 +887,7 @@ class ArcStatic(Node):
 
             if self._arc_fx_flipped(angle):
                 self._balance_reached = True
+                self._arc_exit = "balance"
                 self._lull_next = "UNARC"
                 self.get_logger().info(
                     f"tangent force sign flip reached: f_tangent={self._tangent_force(angle):.2f} N "
@@ -883,6 +897,7 @@ class ArcStatic(Node):
                 return
             if angle <= self._arc_end_angle:
                 self._lull_next = "UNARC"
+                self._arc_exit = "arc_limit"
                 self.get_logger().warn(
                     f"Reached max arc angle {ARC_MAX_ANGLE_DEG:.1f} deg before fx sign flip "
                     f"(f_tangent={self._tangent_force(angle):.2f} N); entering LULL as safety fallback"
@@ -913,7 +928,19 @@ class ArcStatic(Node):
         # -------- RETRACT --------
         if self._state == "RETRACT":
             elapsed = self._now_s() - self._state_start_time
-            if elapsed < RETRACT_DURATION_SEC:
+            if self._retract_clear_z is None:
+                lifting = elapsed < RETRACT_DURATION_SEC
+            else:
+                lifting = elapsed < RETRACT_MIN_SEC or pz < self._retract_clear_z
+                if lifting and elapsed >= RETRACT_TIMEOUT_SEC:
+                    self.get_logger().error(
+                        f"RETRACT: ball still {(self._retract_clear_z - pz) * 1000:.1f} mm below the "
+                        f"object box clearance after {RETRACT_TIMEOUT_SEC:.0f} s -- stopping the lift")
+                    lifting = False
+                elif not lifting:
+                    self.get_logger().info(
+                        f"RETRACT: ball clear of the object box (z {pz:.3f} m >= {self._retract_clear_z:.3f} m)")
+            if lifting:
                 if not self._servo_cmd.publish_twist(0.0, 0.0, RETRACT_SPEED, state=self._state, force_z=self._force_z):
                     self._done = True
                     return
@@ -931,6 +958,7 @@ class ArcStatic(Node):
         self._retry_requested = False
         self._contact_missed = False
         self._balance_reached = False
+        self._arc_exit = None
         self._contact_count = 0
         self._contact_felt = False
         self._lost_contact_count = 0
@@ -1188,7 +1216,7 @@ def main(args=None) -> int:
                       attempts=attempt, final_force_ref_n=force_ref, home_ok=home_ok,
                       abort_reason=node._abort_reason, press_candidate=parsed.press_candidate,
                       contact_missed=node._contact_missed, balance_reached=node._balance_reached,
-                      force_cap_reached=node._force_cap_reached,
+                      arc_exit=node._arc_exit, force_cap_reached=node._force_cap_reached,
                       home_verification=getattr(node, "_last_joint_goal_verification", None),
                       pre_squash=node._pre_squash_pos, arc_center=node._arc_center)
             if home_ok and rclpy.ok():

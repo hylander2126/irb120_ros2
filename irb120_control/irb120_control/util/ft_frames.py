@@ -16,7 +16,7 @@ def forces_in_base(d):
     """(fx, fy, fz) of an F/T+pose log rotated from WRENCH_AXES_FRAME into base_link axes.
 
     Uses the per-sample tool0 orientation logged with each wrench (ft_q*). Needed once the
-    finger is pitched (push.PUSH_PITCH_DEG); at the old horizontal pose tool0 is aligned with
+    finger is pitched (push.PUSH_PITCH_DEG, ~28.5 deg); at the old horizontal pose tool0 is aligned with
     base_link, so this is the identity there. Logs without ft_q*, or rows whose TF lookup
     failed (NaN), are taken as already aligned.
     """

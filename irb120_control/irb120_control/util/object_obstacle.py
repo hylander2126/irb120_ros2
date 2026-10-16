@@ -46,13 +46,19 @@ def _apply(node, obj: CollisionObject) -> bool:
     return future.result() is not None and future.result().success
 
 
+def box_bounds(xyz, extend_x: float = 0.0):
+    """The padded box's (lo, hi) corners in base_link, as object_obstacle() adds it."""
+    lo, hi = xyz.min(axis=0) - PADDING, xyz.max(axis=0) + PADDING
+    lo[2] = TABLE_Z
+    hi[0] += extend_x
+    return lo, hi
+
+
 @contextmanager
 def object_obstacle(node, xyz, extend_x: float = 0.0):
     """Add the object's padded bounding box (optionally stretched by extend_x in +X)
     to the planning scene for the duration of the block."""
-    lo, hi = xyz.min(axis=0) - PADDING, xyz.max(axis=0) + PADDING
-    lo[2] = TABLE_Z
-    hi[0] += extend_x
+    lo, hi = box_bounds(xyz, extend_x)
     obj = CollisionObject()
     obj.header.frame_id = FRAME
     obj.id = OBJECT_ID

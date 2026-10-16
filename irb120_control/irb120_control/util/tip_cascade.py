@@ -107,6 +107,14 @@ def classify(kind: str, results: dict | None, slip_mm: float | None = None,
     return outcome, why
 
 
+# How the press-pull's ARC ended (arc_static's arc_exit), as a note on "tipped".
+ARC_EXIT_NOTES = {
+    "balance": "",
+    "tangent_collapse": " (tangent force collapsed before the balance point)",
+    "arc_limit": " (arc limit reached before the balance point)",
+}
+
+
 def _classify_step(kind: str, results: dict | None, slip_mm: float | None = None) -> tuple:
     """classify() from the step's own results alone."""
     if results is None:
@@ -118,8 +126,9 @@ def _classify_step(kind: str, results: dict | None, slip_mm: float | None = None
         if results.get("completed"):
             if slip_mm is not None and slip_mm > NOSLIP_TOL_MM:
                 return "slip", f"tipped, but the finger slipped ({slip_mm:.1f} mm > {NOSLIP_TOL_MM:.0f} mm)"
-            return "success", "tipped" + ("" if results.get("balance_reached", True)
-                                          else " (arc limit reached before the balance point)")
+            return "success", "tipped" + ARC_EXIT_NOTES.get(
+                results.get("arc_exit") or ("balance" if results.get("balance_reached", True) else None),
+                " (stopped before the balance point)")
         if results.get("contact_missed"):
             return "no_contact", "no press force where the contact was expected"
         if results.get("force_cap_reached"):

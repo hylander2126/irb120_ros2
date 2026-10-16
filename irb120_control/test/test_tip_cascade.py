@@ -28,6 +28,10 @@ def test_press_outcomes():
     # The arc limit before the balance point still counts as a tip.
     outcome, why = classify(PRESS, {'completed': True, 'balance_reached': False})
     assert outcome == 'success' and 'balance point' in why
+    outcome, why = classify(PRESS, {'completed': True, 'balance_reached': False, 'arc_exit': 'tangent_collapse'})
+    assert outcome == 'success' and 'tangent force collapsed' in why
+    assert 'arc limit' in classify(PRESS, {'completed': True, 'balance_reached': False, 'arc_exit': 'arc_limit'})[1]
+    assert classify(PRESS, {'completed': True, 'balance_reached': True, 'arc_exit': 'balance'})[1] == 'tipped'
     assert classify(PRESS, {'completed': True}, slip_mm=6.)[0] == 'slip'
     assert classify(PRESS, {'completed': False, 'force_cap_reached': True, 'final_force_ref_n': 12.2})[0] == 'slip'
     assert classify(PRESS, {'completed': False, 'contact_missed': True})[0] == 'no_contact'
