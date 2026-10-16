@@ -30,6 +30,7 @@ from .joint_verification import JointGoalVerifier
 
 # Fixed cable-neutral window. Never wrap angles or recenter on the current pose.
 CABLE_LIMIT = math.pi / 3
+END_TOLERANCE_RAD = 0.05  # = the JTC's own per-joint goal tolerance (irb120_controllers.yaml)
 
 
 def cable_path_constraints():
@@ -62,6 +63,29 @@ def execute_checked_plan(node, trajectory, timeout_sec):
     if not validate_cable_trajectory(trajectory):
         node.get_logger().error('Trajectory violates joint 6 cable limits (+/-60 deg); not executing')
         return False
+    for attempt in (1, 2):
+        if not _execute(node, trajectory, timeout_sec):
+            return False
+        if reached_trajectory_end(node, trajectory):
+            return True
+        # The JTC can abort a fresh goal on a stale cmd_timeout right after an EGM restart and
+        # then report "Goal reached, success!" from its hold position (2026-10-16, push
+        # approach: 'Aborted due to command timeout' then success, arm never moved). The arm
+        # is still at the trajectory start then, so sending it again is valid.
+        node.get_logger().warn(f'Controller reported success but the arm is not at the trajectory end '
+                               f'(attempt {attempt}/2: JTC command-timeout race?)'
+                               + ('; re-sending once' if attempt == 1 else '; giving up'))
+    return False
+
+
+def reached_trajectory_end(node, trajectory, tolerance=END_TOLERANCE_RAD):
+    """Measured joints within `tolerance` of the trajectory's last point (fresh feedback)."""
+    joints = trajectory.joint_trajectory
+    return verify_joint_goal(node, joints.joint_names, list(joints.points[-1].positions),
+                             tolerance, timeout_sec=3.0)
+
+
+def _execute(node, trajectory, timeout_sec):
     client = ActionClient(node, ExecuteTrajectory, '/execute_trajectory')
     try:
         if not client.wait_for_server(timeout_sec=5.):

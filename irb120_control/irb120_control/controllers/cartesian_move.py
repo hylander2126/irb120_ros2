@@ -99,7 +99,15 @@ def plan_and_execute_cartesian(
         )
         return False
 
-    return _execute_trajectory(node, execute_client, resp.solution, execute_timeout_sec)
+    from irb120_control.controllers.moveit_single_shot import reached_trajectory_end
+    for attempt in (1, 2):  # JTC command-timeout race: see moveit_single_shot.execute_checked_plan
+        if not _execute_trajectory(node, execute_client, resp.solution, execute_timeout_sec):
+            return False
+        if reached_trajectory_end(node, resp.solution):
+            return True
+        node.get_logger().warn(f"Controller reported success but the arm is not at the Cartesian path end "
+                               f"(attempt {attempt}/2)" + ("; re-sending once" if attempt == 1 else "; giving up"))
+    return False
 
 
 def _execute_trajectory(node, execute_client, trajectory, timeout_sec: float) -> bool:

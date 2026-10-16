@@ -36,7 +36,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
-from irb120_control.util.episode import Episode
+from irb120_control.util.episode import Episode, write_json_atomic
 from irb120_control.util.object_obstacle import object_obstacle
 from irb120_control.util.push_geometry import push_approach
 from irb120_control.util.perception_snapshot import begin_motion_stage, latest_object_cloud, take_snapshot
@@ -78,6 +78,9 @@ RETURN_VELOCITY_SCALE    = 0.05    # slower return after push
 
 HOME_JOINT_POSITIONS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # retreat here before the post-push snapshot
 
+ARRIVAL_TOL_MM = 5.0       # measured EE vs pre-push target after the approach
+ARRIVAL_TOL_DEG = 3.0
+
 REQUIRE_OPERATOR_CONFIRM = True
 DEBUG = True
 
@@ -98,6 +101,7 @@ class Push(Node):
         super().__init__("push")
         self._object = object_name
         self._pre_push_pos = None  # set from the detected planar_push contact in main()
+        self._approach_diag = {}   # MoveIt request/result of the approach, saved even on abort
         self._object_xyz = None    # detected object cloud (base_link), avoided on the approach
         self._tf_buffer         = Buffer()
         self._tf_listener       = TransformListener(self._tf_buffer, self)
@@ -229,17 +233,41 @@ class Push(Node):
         """Plan around the detected object (a collision box only for this move)."""
         try:
             with object_obstacle(self, self._object_xyz):
-                return plan_and_execute_pose_goal(
+                ok = plan_and_execute_pose_goal(
                     self,
                     self._move_group_client,
                     base_frame=BASE_FRAME,
                     target_position=self._pre_push_pos,
                     target_orientation=PUSH_ORIENTATION,
                     velocity_scale=velocity_scale,
+                    diagnostics=self._approach_diag,
                 )
         except RuntimeError as exc:
             self.get_logger().error(str(exc))
             return False
+        return ok and self._arrived()
+
+    def _arrived(self) -> bool:
+        """MoveIt can report a goal reached without the arm getting there (2026-10-16: a
+        'successful' approach that never moved). Check the measured EE pose itself."""
+        for _ in range(20):  # let TF catch up with the last joint states
+            rclpy.spin_once(self, timeout_sec=0.05)
+        pose = self._lookup_ee_pose()
+        if pose is None:
+            self.get_logger().error("Cannot look up EE pose after the approach")
+            return False
+        q = np.array([pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+        err_mm = 1000 * float(np.linalg.norm(np.array([pose.position.x, pose.position.y, pose.position.z])
+                                             - np.asarray(self._pre_push_pos)))
+        err_deg = float(np.degrees(2 * np.arccos(np.clip(abs(q @ np.asarray(PUSH_ORIENTATION)), 0., 1.))))
+        self._approach_diag["arrival"] = dict(position_error_mm=err_mm, orientation_error_deg=err_deg)
+        if err_mm > ARRIVAL_TOL_MM or err_deg > ARRIVAL_TOL_DEG:
+            self.get_logger().error(
+                f"Approach reported success but the EE is {err_mm:.1f} mm / {err_deg:.1f} deg from the "
+                f"pre-push pose (limits {ARRIVAL_TOL_MM} mm / {ARRIVAL_TOL_DEG} deg). Not pushing. "
+                "MoveIt request/result saved as push_approach_diagnostics.json.")
+            return False
+        return True
 
     def _cartesian_move(self, x_distance: float, velocity_scale: float) -> bool:
         """Move the EE straight in X by x_distance (signed) at the given velocity scale."""
@@ -410,6 +438,11 @@ def main(args=None) -> int:
             if not home_ok:
                 node.get_logger().error("Return home failed -- skipping the post-push snapshot.")
         deactivate_egm(node)
+        if stage is not None and node._approach_diag:
+            try:
+                write_json_atomic(stage.path / "push_approach_diagnostics.json", node._approach_diag)
+            except Exception as exc:
+                node.get_logger().error(f"Failed to save approach diagnostics: {exc}")
         if stage is not None:
             if node._push_started:
                 try:
