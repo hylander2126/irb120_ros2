@@ -36,12 +36,12 @@ import numpy as np
 
 from irb120_control.estimation.com_estimation import model_fwd_wrench
 from irb120_control.estimation.helper_fns import quat_to_rotvec, rotvec_to_rot
-from irb120_control.util.ft_frames import forces_in_base
+from irb120_control.util.ft_frames import forces_in_base, wrench_origin_from_ball
 from irb120_control.estimation.tip_core import (
     F_CONTACT_N, G, TipLog, branch_mean, classify_motion, compare_tracks, detect_onset,
     estimate_with_vision, fit_track, print_vision_report, tilt_sliding_face)
 
-FT_WRENCH_ORIGIN_OFFSET_X = 0.08225   # same NetFT torque origin as estimate_params
+FT_WRENCH_ORIGIN_OFFSET_X = 0.08225   # historical tool0 offset; retained for legacy diagnostics
 BALL_RADIUS = 0.01325                 # util/push_geometry.BALL_RADIUS
 
 # ##########################################################################################
@@ -68,8 +68,10 @@ FWD_TIP_OBJECTS = tuple(FWD_TIP_GROUND_TRUTH)
 # ==========================================================================================
 def find_fwd_tip_logs(obj: str, root: str) -> list:
     """Forward-tip logs for `obj`, oldest first, under runtime_logs/ or a copied suite dir."""
-    pats = [os.path.join(root, "runtime_logs", obj, "episodes", "*", "*_forward_tip", "fwd_tip_2*.npz"),
-            os.path.join(root, obj, "episodes", "*", "*_forward_tip", "fwd_tip_2*.npz")]
+    pats = [os.path.join(root, prefix, obj, "episodes", "*", stage, filename)
+            for prefix in ("runtime_logs", "")
+            for stage, filename in (("*_forward_tip", "fwd_tip_2*.npz"),
+                                    ("*_forward_arc", "fwd_arc_2*.npz"))]
     return sorted({f for p in pats for f in glob.glob(p)})
 
 
@@ -144,7 +146,7 @@ def load_fwd_tip(path: str) -> TipLog:
         tau_S = np.einsum("nji,nj->ni", R_tool, tau_w)
     else:
         f_S, tau_S = f_w, tau_w
-    p_S = p_tool + np.einsum("nij,j->ni", R_tool, np.array([FT_WRENCH_ORIGIN_OFFSET_X, 0.0, 0.0]))
+    p_S = wrench_origin_from_ball(np.c_[d["x"], d["y"], d["z"]], q_tool)
 
     mt = np.array([r["time_s"] for r in motion])
     ms = np.array([r["state"] for r in motion])
@@ -365,7 +367,10 @@ def run_fwd_tip_estimation(obj, path, gt=None, verbose=True, pivot_offset=None,
                          f"of its peak (pure slide)")
 
     i_on = onset["i_on"]
-    slide_source, slide = "finger", onset["slide_m"]
+    # Arc motion has a horizontal component even with a stationary support.
+    # Only the fixed-height primitive can use finger travel as a slide proxy.
+    is_arc = Path(path).name.startswith("fwd_arc_")
+    slide_source, slide = ("unobserved_arc", 0.0) if is_arc else ("finger", onset["slide_m"])
     if vt is not None and np.isfinite(vt.slide[i_on]):
         pre = vt.valid & (np.arange(len(vt.valid)) <= onset["i0"])
         if pre.any():

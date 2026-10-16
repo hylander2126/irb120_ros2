@@ -134,3 +134,28 @@ def test_torque_calibration_recovers_bias_and_tool_com(tmp_path):
                                     electrical_zero=[0, 0, 0], g_world=[0, 0, -1],
                                     torque_zero=[0, 0, 0])))
     np.testing.assert_allclose(load_calibration(path)[3], 0.)
+
+
+def test_wrench_reference_tracks_actual_cad_mount_not_legacy_adapter_length():
+    from irb120_control.util.ft_frames import wrench_origin_from_ball
+    path = Path(__file__).parents[2] / 'irb120_models/urdf/irb120_with_finger.xacro'
+    root = ET.fromstring(xacro.process_file(str(path)).toxml())
+    transforms = {'tool0': np.eye(4)}
+    for _ in range(12):
+        for joint in root.findall('joint'):
+            parent, child = joint.find('parent').attrib['link'], joint.find('child').attrib['link']
+            if parent not in transforms or child in transforms:
+                continue
+            origin = joint.find('origin')
+            pos = np.fromstring(origin.attrib.get('xyz', '0 0 0'), sep=' ')
+            rpy = np.fromstring(origin.attrib.get('rpy', '0 0 0'), sep=' ')
+            T = np.eye(4)
+            T[:3,:3] = Rotation.from_euler('xyz', rpy).as_matrix()
+            T[:3,3] = pos
+            transforms[child] = transforms[parent] @ T
+    ball, mount = transforms['finger_ball_center'][:3,3], transforms['root_finger'][:3,3]
+    assert abs(mount[0]-.08225) > .0035
+    attitudes = Rotation.from_euler('xyz', [[0,0,0], [20,35,-10], [-70,5,100]], degrees=True)
+    origin = np.array([.4, .1, .2])
+    recovered = wrench_origin_from_ball(origin+attitudes.apply(ball), attitudes.as_quat())
+    np.testing.assert_allclose(recovered, origin+attitudes.apply(mount), atol=1e-6)

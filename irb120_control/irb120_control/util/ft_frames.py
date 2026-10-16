@@ -3,13 +3,34 @@
 The old tool0_to_ft joint was identity (commit 9296f57). NetFT's internal
 axis transform was configured for those axes. root_finger is a CAD frame
 with different axes. Published ft_link labels are retained for consumers.
-The estimator expects the tool0 reference pose and adds its own 0.08225 m
-wrench-origin offset; do not log the distal origin in its place.
+The log stores the tool0 reference pose. Estimation expresses moments about
+the finger mounting plane, recovered from the ball frame and rigid shaft.
+Do not treat the historical tool0-to-mount 0.08225 m as the current CAD chain.
 """
 
 WRENCH_AXES_FRAME = 'tool0'
 ESTIMATOR_POSE_FRAME = 'tool0'
 WRENCH_HEADER_FRAME = 'ft_link'
+
+# finger_ball_center_xyz in irb120_with_finger.xacro, expressed along tool0 +X.
+# This is the rigid mount-to-ball distance; it is independent of the adapters
+# between tool0 and the mount, which changed when the CAD chain was imported.
+FINGER_MOUNT_TO_BALL_X = 0.0866512
+
+
+def wrench_origin_from_ball(p_ball, q_tool):
+    """World position of the existing distal-face wrench reference.
+
+    The current tool0-to-mount chain is 85.8244 mm plus a transverse offset,
+    while the historical one was 82.25 mm. Both have the same rigid finger.
+    Using the logged ball pose handles either chain without an adapter-length
+    guess or any object mass/CoM input. Wrench axes remain tool0 axes.
+    """
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+    p_ball = np.asarray(p_ball, float)
+    return p_ball - Rotation.from_quat(q_tool).apply(
+        np.broadcast_to([FINGER_MOUNT_TO_BALL_X, 0., 0.], p_ball.shape))
 
 
 def forces_in_base(d):

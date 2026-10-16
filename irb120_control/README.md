@@ -358,3 +358,65 @@ Angles are never wrapped or recentered. Starts outside the wrist window fail.
 Collision avoidance remains active; no clearance padding was changed.
 Restart the running bringup/MoveIt/Servo stack after rebuilding to load the new
 robot model. These are software planning bounds, not ABB safety-rated limits.
+
+### Analyze complete tipT episodes
+
+The episode estimator reads the stage manifest, including forward arcs and
+press-pull fallbacks. It fits the two gravity first moments separately on the
+tip/return branches and jointly derives mass and CoM height, assuming the
+configured horizontal CoM distance. GT mass and height are used only for
+scoring, never as fit inputs, initialization, or corrections. Press-pull uses
+the opposite support edge when looking up horizontal CoM distance.
+
+From the workspace root, using the source package directly:
+
+```bash
+PYTHONPATH=src/irb120_ros2/irb120_control:src/irb120_ros2/irb120_models \
+python3 -m irb120_control.estimation.estimate_params --primitive episodes \
+  --episode latest --vision --out-dir runtime_logs/estimation_episodes
+```
+
+`--episode all` includes aborted episodes and preserves failed/skipped stages;
+a timestamp selects one episode. `--logs-root` also accepts a copied suite
+containing `<object>/episodes/`. `--object tipT_d` restricts the configuration.
+JSON preserves branch fits, first moments, diagnostics, scoring, controller
+outcomes and quality flags; CSV contains the primary estimates.
+
+`--tilt-source proprio` is the default. `--vision` additionally fits camera tilt;
+`--tilt-source vision` explicitly selects it for every fitted primitive, and
+`--tilt-source forward_vision` selects it only for forward stages. An unavailable
+requested camera fit is reported, without silently substituting proprioception.
+`--vision-cache-dir` can reuse saved tracks. Camera fitting uses its moving pivot
+and a 1 mm/s slide-speed gate; an arc's finger travel is never treated as measured
+table translation. Without vision its translation is explicitly unobserved.
+
+A small torque-fit residual does not validate angle zero, effective support or
+wrench calibration. Quality flags report angular spans below 5 degrees and
+median spherical-contact wrench disagreements above 5 mN m; these are diagnostic
+thresholds, not calibrated acceptance limits. The measured torque is retained.
+No empirical gain/angle/contact correction or GT-mass-conditioned height is
+applied. Existing `press_pull` and `fwd_tip` modes remain available; the latter
+now discovers forward-arc files as well as straight-tip files.
+
+The episode forward estimator now uses **first contact** as the upright face
+reference. A later torque maximum is not an upright observation; reproduce that
+older assumption with `--forward-reference torque_peak`. When pre-tip translation
+is observed/estimated, the upright face distance comes from the original contact
+geometry while the torque reference follows the translated support.
+
+Both tipping loaders now recover the distal-face wrench reference from the
+logged ball pose minus the rigid 86.6512 mm finger length. The fixed historical
+82.25 mm tool0 offset did not match the current CAD adapter stack (85.8244 mm
+plus its transverse offset). Wrench axes and recorded torque channels are
+unchanged. This also preserves the old stack when replaying old ball/tool poses.
+
+`--press-contact-model sphere_roll` enables an **experimental** planar model
+for a world-fixed sphere rolling without slip on an initially horizontal top.
+The ball centre is not a material point on the object, so its polar angle is
+not exactly the object's angle. The default remains the older point model;
+curved/sloped contacts and compliance need separate treatment.
+`--press-pivot-offset-x METRES` supplies an explicit experimental support offset;
+it is recorded in the JSON and is never fitted to GT mass/height. An offset
+learned from one object configuration is not a global robot calibration.
+See `runtime_logs/tipT_mechanics_audit_20261016/REPORT.md` for simulation,
+3/5 N training, withheld 4 N evaluation and the remaining D limitation.

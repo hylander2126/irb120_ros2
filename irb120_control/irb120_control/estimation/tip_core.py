@@ -155,7 +155,41 @@ def tilt_noslip(log: TipLog, pivot) -> TiltTrack:
                      info={"r0": r_t[i0]})
 
 
-def tilt_sliding_face(log: TipLog, pivot, i_ref: int) -> TiltTrack:
+def tilt_rolling_sphere(log: TipLog, pivot, radius=0.01325) -> TiltTrack:
+    """Optional planar press model for a world-fixed spherical finger rolling without slip.
+
+    A ball centre is not a material point of the rotating object. For backward
+    tilt phi, sticking contact velocities give b=Ry(-phi)*(r0+radius*phi*ex).
+    Thus the observed ball polar-angle increment is
+    phi+atan2(z0,x0+radius*phi)-atan2(z0,x0), rather than phi itself.
+    This assumes an initially horizontal top and a nonrotating finger. It is
+    an explicit alternative to the point approximation, not an angle calibration.
+    """
+    if log.primitive != 'press_pull' or log.tilt_dir[1] > -.999:
+        raise ValueError('rolling-sphere tilt requires backward planar press-pull')
+    track = tilt_noslip(log, pivot)
+    r0 = track.info['r0']
+    if r0[2] <= radius:
+        raise ValueError('contact height must exceed the ball radius')
+    observed = track.rotvec @ log.tilt_dir
+    phi = observed.copy()
+    for _ in range(8):
+        x = r0[0] + radius * phi
+        error = phi + np.arctan2(r0[2], x) - np.arctan2(r0[2], r0[0]) - observed
+        derivative = 1. - radius*r0[2]/(x*x+r0[2]*r0[2])
+        phi -= error / derivative
+    track.rotvec = phi[:, None]*log.tilt_dir
+    track.rotvec[~log.contact] = 0.
+    track.source = 'proprio:rolling_sphere'
+    predicted_radius = np.sqrt((r0[0]+radius*phi)**2+r0[1]**2+r0[2]**2)
+    actual_radius = np.linalg.norm(log.p_ball-pivot, axis=1)
+    rocking = log.contact & np.isin(log.branch, BRANCHES) & (phi > TILT_DEADBAND)
+    track.info['rolling_radial_rms_mm'] = float(np.sqrt(np.mean(
+        (actual_radius[rocking]-predicted_radius[rocking])**2)))*1000 if rocking.any() else None
+    return track
+
+
+def tilt_sliding_face(log: TipLog, pivot, i_ref: int, upright_distance=None) -> TiltTrack:
     """Forward tip: a fixed-height ball sliding on a planar face at horizontal distance d0
     (ball centre to pivot) when upright touches the face tilted by phi where
 
@@ -166,7 +200,10 @@ def tilt_sliding_face(log: TipLog, pivot, i_ref: int) -> TiltTrack:
     is behind its onset position (the object is back on the table there)."""
     d = (pivot - log.p_ball) @ log.push_dir
     zb = log.p_ball[:, 2] - pivot[2]
-    ratio = d[i_ref] / np.hypot(d, zb)
+    # When a slide moved the support, the upright face distance comes from
+    # the original support/contact geometry, not the moved support at first touch.
+    d0 = d[i_ref] if upright_distance is None else float(upright_distance)
+    ratio = d0 / np.hypot(d, zb)
     phi = np.arctan2(zb, d) - np.arccos(np.clip(ratio, -1.0, 1.0))
     bad = ratio > 1.0
     phi = np.maximum(np.where(bad, 0.0, phi), 0.0)
@@ -205,8 +242,15 @@ def detect_onset(log: TipLog, pivot) -> dict:
     from the finger sliding on the object, which is what vision is for.
     """
     active = log.branch != ""
-    on = np.where(active & (log.f_push > F_CONTACT_N))[0]
-    out = dict(contact=len(on) > 0, rocking=False)
+    if log.primitive == "press_pull":
+        # The normal press maintains contact even when its horizontal reaction
+        # opposes the arc direction (notably a CoM close to the support).
+        # Controller LULL..RETRACT is the loader's contact window.
+        on = np.where(log.contact)[0]
+    else:
+        on = np.where(active & (log.f_push > F_CONTACT_N))[0]
+    out = dict(contact=len(on) > 0, rocking=False,
+               contact_source="controller" if log.primitive == "press_pull" else "push_force")
     if not len(on):
         return out
     i0, i_last = int(on[0]), int(on[-1])
@@ -223,7 +267,7 @@ def detect_onset(log: TipLog, pivot) -> dict:
     i_on = int(near[np.argmax(tau0[near])])
     tail = sm[tip[-ONSET_SMOOTH:]].mean()
     slide = float((log.p_ball[i_on] - log.p_ball[i0]) @ log.push_dir)
-    out.update(i_on=i_on, slide_m=slide if slide >= SLIDE_MIN_M else 0.0,
+    out.update(i_on=i_on, slide_m=slide if log.primitive != "press_pull" and slide >= SLIDE_MIN_M else 0.0,
                rocking=bool(tail < ROCK_DROP * sm[i_on]), tau_end_frac=float(tail / sm[i_on]))
     return out
 

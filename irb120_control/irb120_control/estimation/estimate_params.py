@@ -19,7 +19,7 @@ if __package__ in (None, ""):
 
 from irb120_control.estimation.com_estimation import model_fwd_wrench, model_bkwd_wrench, construct_T, rotvec_between
 from irb120_control.estimation.helper_fns import rotvec_to_rot, quat_to_rotvec
-from irb120_control.util.ft_frames import forces_in_base
+from irb120_control.util.ft_frames import forces_in_base, wrench_origin_from_ball
 from irb120_control.estimation.plotting_helper import plot_wrench_and_tipping, plot_torque_fit_result, plot_raw_forces
 from irb120_control.estimation.tip_core import (TipLog, branch_mean, detect_onset, estimate_with_vision,
                                                 fit_track, print_vision_report, tilt_noslip)
@@ -49,11 +49,8 @@ PIVOT_DEFAULT = np.array([0.61, 0.0, 0.0])
 # Measured: box 1.8, heart 1.4, flashlight 2.1, monitor 8.4 mm — the monitor slips.
 NOSLIP_TOL_MM = 4.0
 
-# Distance tool0 -> finger_ball_center along tool0's local +X, from the URDF static chain
-# (irb120_with_finger.xacro): tool0 -> root_finger = 0.08225 (== FT_WRENCH_ORIGIN_OFFSET_X)
-# and root_finger -> finger_ball_center = 0.0866512. The chain also puts finger_ball_center
-# at the SAME orientation as tool0, so reconstructing the sensor pose from the logged EE pose
-# is a pure translation along the tool axis. See _reconstruct_sensor_pose.
+# Historical chain retained for the legacy tool0 fallback helper. The actual
+# wrench-reference position is now recovered from the logged ball pose below.
 EE_TO_SENSOR_OFFSET_X = 0.08225 + 0.0866512
 
 # Scoring references are owned by irb120_models.
@@ -67,21 +64,10 @@ def _lpf(x, axis=0):
 
 
 def _reconstruct_sensor_pose(p_ee_B, Q_ee):
-    """
-    Rebuild the F/T sensor pose in {B} from the logged EE (finger_ball_center) pose.
+    """Legacy tool0 pose reconstruction for logs lacking a tool orientation stream.
 
-    The loggers (arc_static.py, push.py) look up the frame "ft_link", which a URDF
-    refactor removed — the chain is now tool0 -> root_sensor -> ... -> sensor_body ->
-    root_finger -> finger_ball_center. Every sample of ft_p*/ft_q* in those logs is
-    therefore NaN. Reconstruction is exact here rather than approximate because the
-    URDF static chain puts finger_ball_center at the SAME orientation as tool0 (the
-    frame "ft_link" named: tool0 -> root_finger is 0.08225 m along tool0's local +X,
-    which is exactly the FT_WRENCH_ORIGIN_OFFSET_X this module already applies), so:
-
-        R_ft_B = R_ee_B
-        p_ft_B = p_ee_B - R_ee_B @ [EE_TO_SENSOR_OFFSET_X, 0, 0]
-
-    Returns (p_ft_B, Q_ft) on the EE time grid.
+    This preserves the old helper's API. Its position is not used as the
+    wrench origin: load_and_preprocess recovers that from the rigid finger.
     """
     R_ee_B = rotvec_to_rot(quat_to_rotvec(Q_ee))
     p_ft_B = p_ee_B - np.einsum("nij,j->ni", R_ee_B, np.array([EE_TO_SENSOR_OFFSET_X, 0.0, 0.0]))
@@ -171,13 +157,9 @@ def load_and_preprocess(filepath):
             time,
         )
 
-    # The logged TF pose is ft_link at base of sensor body, but NetFT torque channels behave as moments about the distal face/finger base.
-    R_ft_B = rotvec_to_rot(quat_to_rotvec(Q_ft))
-    p_ft_B = p_ft_B + np.einsum(
-        "nij,j->ni",
-        R_ft_B,
-        np.array([FT_WRENCH_ORIGIN_OFFSET_X, 0.0, 0.0]), # Shift the wrench origin before applying adjoint transforms.
-    )
+    # Preserve the distal-face wrench convention while recovering its actual
+    # location from the rigid finger, not the obsolete tool0 adapter length.
+    p_ft_B = wrench_origin_from_ball(p_ee_B, Q_ft)
 
     return time, f_meas_S, t_meas_S, p_ft_B, Q_ft, p_ee_B, Q_obj, state_id, logged_sensor_pose
 
@@ -1723,12 +1705,24 @@ def _output_dir(workspace_root: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--primitive", choices=["press_pull", "fwd_tip"], default="press_pull",
+    parser.add_argument("--primitive", choices=["press_pull", "fwd_tip", "episodes"], default="press_pull",
                         help="'press_pull' runs the arc_squash logs (default). 'fwd_tip' runs "
                              "forward-tip episodes through fwd_tip_estimation (method D).")
     parser.add_argument("--object", type=str, default=None,
                         help=f"press_pull: one of {ALL_OBJECTS}; fwd_tip: a FWD_TIP_GROUND_TRUTH key.")
     parser.add_argument("--workspace", type=str, default=None)
+    parser.add_argument("--episode", default="latest",
+                        help="episodes mode: latest, all, or an episode timestamp.")
+    parser.add_argument("--press-contact-model", choices=["point", "sphere_roll"], default="point",
+                        help="episodes mode: optional world-fixed spherical rolling contact model.")
+    parser.add_argument("--forward-reference", choices=["first_contact", "torque_peak"], default="first_contact",
+                        help="episodes mode: upright face reference; torque peak is a legacy ablation.")
+    parser.add_argument("--press-pivot-offset-x", type=float, default=0., metavar="METRES",
+                        help="episodes mode: explicit experimental support offset; logged in every press result.")
+    parser.add_argument("--tilt-source", choices=["proprio", "vision", "forward_vision"], default="proprio",
+                        help="episodes mode: primary tilt source; forward_vision uses camera tilt only for forward stages.")
+    parser.add_argument("--out-dir", default=None, help="Output directory for episodes mode.")
+    parser.add_argument("--vision-cache-dir", default=None, help="Camera track cache for episodes mode.")
     parser.add_argument("--logs-root", type=str, default=None,
                         help="fwd_tip only: directory holding <object>/episodes/ (a copied suite) "
                              "or runtime_logs/<object>/episodes/. Defaults to the workspace.")
@@ -1757,6 +1751,22 @@ def main():
     args = parser.parse_args()
 
     workspace_root = args.workspace or _find_workspace_root()
+    if args.primitive == "episodes":
+        from irb120_control.estimation.fwd_tip_estimation import FWD_TIP_OBJECTS
+        from irb120_control.estimation.episode_estimation import main_episodes
+        objects = [args.object] if args.object else list(FWD_TIP_OBJECTS)
+        if any(obj not in FWD_TIP_OBJECTS for obj in objects):
+            parser.error(f"episodes mode requires a configured tipT reference: {FWD_TIP_OBJECTS}")
+        if args.free_com_x or args.uncertainty_budget:
+            parser.error("episodes mode fits known-com_x first moments; these ablations are unsupported")
+        root = args.logs_root or workspace_root
+        main_episodes(objects, root, args.out_dir or os.path.join(root, "estimation_episodes"),
+                      selection=args.episode, tilt_source=args.tilt_source,
+                      vision=args.vision, cache_dir=args.vision_cache_dir,
+                      press_contact_model=args.press_contact_model,
+                      press_pivot_offset_x=args.press_pivot_offset_x,
+                      forward_reference=args.forward_reference)
+        return
     if args.primitive == "fwd_tip":
         from irb120_control.estimation.fwd_tip_estimation import FWD_TIP_OBJECTS, main_fwd_tip
         root = args.logs_root or workspace_root

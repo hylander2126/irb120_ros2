@@ -152,3 +152,30 @@ def test_vision_aligner_recovers_tilt_and_slide():
         p, rms, sd, cov = al.fit(img, p)
     assert abs(np.degrees(p[0]) - 10.0) < 0.3
     assert abs(p[1] - 0.02) < 0.0015
+
+
+def test_spherical_contact_tilt_recovers_world_fixed_rolling_motion():
+    from scipy.spatial.transform import Rotation
+    from irb120_control.estimation.tip_core import tilt_rolling_sphere
+    from irb120_control.estimation.episode_estimation import fit_first_moments
+    log, gt = _press_pull_log()
+    phi = tilt_noslip(log, log.pivot).rotvec @ log.tilt_dir
+    radius = .01325
+    r0 = np.array([-.03, 0., .196])
+    rot = Rotation.from_rotvec(phi[:,None]*log.tilt_dir)
+    # Integrate the no-slip velocity constraint for a nonrotating sphere.
+    log.p_ball = log.pivot + rot.apply(r0+np.c_[radius*phi, np.zeros(len(phi)), np.zeros(len(phi))])
+    contact = log.p_ball - radius*rot.apply(np.tile([0.,0.,1.],(len(phi),1)))
+    arm = contact-log.pivot
+    tau_y = -gt['m']*G*(gt['cx']*np.cos(phi)-gt['cz']*np.sin(phi))
+    force = np.c_[(tau_y+arm[:,0]*-5.)/arm[:,2], np.zeros(len(phi)), np.full(len(phi),-5.)]
+    log.p_S = log.p_ball-np.array([.0866512,0.,0.])
+    log.f_S = -force
+    log.tau_S = np.cross(contact-log.p_S, log.f_S)
+    corrected = tilt_rolling_sphere(log, log.pivot)
+    np.testing.assert_allclose(corrected.rotvec@log.tilt_dir, phi, atol=1e-12)
+    estimate = fit_first_moments(log, corrected, gt['cx'])['mean']
+    assert estimate['m'] == pytest.approx(gt['m'], abs=1e-10)
+    assert estimate['zc'] == pytest.approx(gt['cz'], abs=1e-10)
+    naive = fit_first_moments(log, tilt_noslip(log, log.pivot), gt['cx'])['mean']
+    assert abs(naive['zc']-gt['cz']) > .005
