@@ -112,3 +112,13 @@ def test_first_contact_reference_handles_slide_without_rezeroing_at_peak(tmp_pat
     assert result['forward_reference'] == 'first_contact'
     assert result['estimate']['mean']['m'] == pytest.approx(gt['mass'], rel=.02)
     assert result['estimate']['mean']['zc'] == pytest.approx(gt['com'][2], abs=.003)
+
+
+@pytest.fixture(autouse=True)
+def synthetic_cloud_height(monkeypatch):
+    """These dynamics fixtures have no perception files; supply a separate 30 cm envelope."""
+    import irb120_control.estimation.tip_core as core
+    import irb120_control.estimation.episode_estimation as episodes
+    bound = lambda log: (.30, 'synthetic independent cloud envelope')
+    monkeypatch.setattr(core, 'cloud_height_bound', bound)
+    monkeypatch.setattr(episodes, 'cloud_height_bound', bound)

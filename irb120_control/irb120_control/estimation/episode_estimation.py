@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from .physical_bounds import cloud_height_bound, bounded_gravity_fit
 
 from .tip_core import (G, TILT_DEADBAND, compare_tracks, detect_onset,
                        pivot_wrench, tilt_noslip, tilt_sliding_face, tilt_rolling_sphere)
@@ -51,18 +52,16 @@ def fit_first_moments(log, track, com_x, *, pivot=None, slide_speed_limit=None):
         slide = np.interp(log.t_epoch, log.t_epoch[good], track.slide[good])
         speed = np.gradient(gaussian_filter1d(slide, .25 / dt), log.t_epoch)
         mask &= good & (np.abs(speed) < slide_speed_limit)
+    height_bound, height_source = cloud_height_bound(log)
     branches = {}
     for branch in ('tip', 'return'):
         sel = mask & (log.branch == branch)
         if sel.sum() < 10:
             continue
         X = np.c_[np.cos(phi[sel]), -np.sin(phi[sel])]
-        hx, hz = np.linalg.lstsq(X, tau[sel] / G, rcond=None)[0]
-        if hx <= 0 or hz <= 0:
-            raise ValueError(f'{branch}: nonphysical gravity first moments')
-        mass = hx / com_x
-        height = hz / mass
-        branches[branch] = dict(m=float(mass), zc=float(height),
+        mass, height, active_bounds = bounded_gravity_fit(phi[sel], tau[sel], com_x, 0., height_bound)
+        hx, hz = mass*com_x, mass*height
+        branches[branch] = dict(m=float(mass), zc=float(height), active_bounds=active_bounds,
             theta=float(np.degrees(np.arctan2(com_x, height))),
             horizontal_first_moment_kg_m=float(hx), vertical_first_moment_kg_m=float(hz),
             amplitude_kg_m=float(np.hypot(hx, hz)), n=int(sel.sum()),
@@ -85,7 +84,7 @@ def fit_first_moments(log, track, com_x, *, pivot=None, slide_speed_limit=None):
     contact_point = log.p_ball + .01325 * normal
     residual = (moment - np.cross(contact_point - log.p_S, force)) @ log.tilt_dir
     diagnostics = {}
-    flags = []
+    flags = ['parameter_bound_active'] if any(q['active_bounds'] for q in branches.values()) else []
     for b, q in branches.items():
         sel = mask & (log.branch == b)
         diagnostics[b] = dict(contact_wrench_residual_median_mNm=float(np.median(residual[sel])) * 1000,
@@ -96,7 +95,7 @@ def fit_first_moments(log, track, com_x, *, pivot=None, slide_speed_limit=None):
             flags.append('angular_span_below_5deg')
     if len(branches) < 2:
         flags.append('single_branch_only')
-    return dict(method='joint_first_moments', tilt_source=track.source, mean=mean,
+    return dict(height_bound_m=height_bound,height_bound_source=height_source,method='joint_first_moments', tilt_source=track.source, mean=mean,
                 branches=branches, diagnostics=diagnostics, quality_flags=sorted(set(flags)))
 
 

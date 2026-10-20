@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.optimize import least_squares
+from .physical_bounds import cloud_height_bound, MIN_MASS_KG
 
 from irb120_control.estimation.com_estimation import construct_T, model_bkwd_wrench, model_fwd_wrench
 
@@ -343,6 +344,8 @@ def fit_track(log: TipLog, track: TiltTrack, com_x: float, *, x0=(0.4, 0.1),
 
 
 def _fit_branch(log, track, w_app, tau, tip_axis, sel, com_x, com_vec, x0, free_com_x, m_on):
+    height_bound, height_source = cloud_height_bound(log)
+    x0 = (max(x0[0], MIN_MASS_KG), float(np.clip(x0[1], 0, height_bound)))
     rv_ph = track.rotvec[sel]
     tau_meas = tau[sel]
     tilt_deg = np.degrees(rv_ph @ log.tilt_dir)
@@ -363,32 +366,32 @@ def _fit_branch(log, track, w_app, tau, tip_axis, sel, com_x, com_vec, x0, free_
     thA = -a_coeffs[1] / a_coeffs[0]
     czA = com_x / np.tan(np.deg2rad(abs(thA)))
     mA = least_squares(lambda p: (fwd(p[0], czA) - tau_meas).ravel(), x0=[x0[0]],
-                       bounds=([1e-6], [np.inf]), method="trf").x[0]
+                       bounds=([MIN_MASS_KG], [np.inf]), method="trf").x[0]
 
     # Method B: joint (m, z_c) [, com_x].
     if free_com_x:
         rB = least_squares(lambda p: (fwd(p[0], p[1], p[2]) - tau_meas).ravel(),
-                           x0=[x0[0], x0[1], com_x], bounds=([1e-6, 1e-3, -0.2], [np.inf, np.inf, 0.2]),
+                           x0=[x0[0], x0[1], com_x], bounds=([MIN_MASS_KG, 0, -0.2], [np.inf, height_bound, 0.2]),
                            method="trf")
         mB, czB, cxB = rB.x
     else:
         rB = least_squares(lambda p: (fwd(p[0], p[1]) - tau_meas).ravel(), x0=list(x0),
-                           bounds=([1e-6, 1e-3], [np.inf, np.inf]), method="trf")
+                           bounds=([MIN_MASS_KG, 0], [np.inf, height_bound]), method="trf")
         (mB, czB), cxB = rB.x, com_x
 
     out = {
         "n": int(sel.sum()),
         "tilt_deg": [float(tilt_deg.min()), float(tilt_deg.max())],
         "A": {"m": float(mA), "zc": float(czA), "theta": float(abs(thA)), "cx": com_x,
-              "theta_signed": float(thA), "coeffs": a_coeffs},
-        "B": {"m": float(mB), "zc": float(czB), "theta": theta_deg(cxB, czB), "cx": float(cxB),
+              "theta_signed": float(thA), "coeffs": a_coeffs, "physical": bool(0 <= czA <= height_bound)},
+        "B": {"height_bound_m": height_bound, "height_bound_source": height_source, "bound_active": bool(np.any(rB.active_mask)), "m": float(mB), "zc": float(czB), "theta": theta_deg(cxB, czB), "cx": float(cxB),
               "rms": float(np.sqrt(np.mean(rB.fun ** 2)))},
         "sel": sel,
     }
     # Method D: mass pinned by the onset torque; z_c and a constant tilt offset fitted.
     if m_on is not None and np.isfinite(m_on) and m_on > 0:
         rD = least_squares(lambda p: fwd(m_on, p[0], off=p[1]) - tau_meas, x0=[x0[1], 0.0],
-                           bounds=([1e-3, -np.radians(15)], [np.inf, np.radians(15)]))
+                           bounds=([0, -np.radians(15)], [height_bound, np.radians(15)]))
         czD, offD = rD.x
         out["D"] = {"m": float(m_on), "zc": float(czD), "theta": theta_deg(com_x, czD), "cx": com_x,
                     "offset_deg": float(np.degrees(offD)), "rms": float(np.sqrt(np.mean(rD.fun ** 2)))}

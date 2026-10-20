@@ -179,3 +179,13 @@ def test_spherical_contact_tilt_recovers_world_fixed_rolling_motion():
     assert estimate['zc'] == pytest.approx(gt['cz'], abs=1e-10)
     naive = fit_first_moments(log, tilt_noslip(log, log.pivot), gt['cx'])['mean']
     assert abs(naive['zc']-gt['cz']) > .005
+
+
+@pytest.fixture(autouse=True)
+def synthetic_cloud_height(monkeypatch):
+    """These dynamics fixtures have no perception files; supply a separate 30 cm envelope."""
+    import irb120_control.estimation.tip_core as core
+    import irb120_control.estimation.episode_estimation as episodes
+    bound = lambda log: (.30, 'synthetic independent cloud envelope')
+    monkeypatch.setattr(core, 'cloud_height_bound', bound)
+    monkeypatch.setattr(episodes, 'cloud_height_bound', bound)

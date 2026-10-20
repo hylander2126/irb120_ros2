@@ -4,6 +4,8 @@ take_snapshot() saves into <episode>/NN_perceive/:
 
   object_cloud.npz         the object cloud the contacts come from (DBSCAN -> SAM cull), base_link
   object_cloud_dbscan.npz  the raw DBSCAN cloud it was culled from, for comparison
+  support_scene_cloud.npz analysis-only depth scene retaining the lower surface/table
+  support_scene_cloud.json camera provenance and ROI; never used for contact selection
   contacts.json            the contacts motion steps use (base_link). Selected once:
                            forward_tip + planar_push by select_contact_points(), press by
                            experimental_view_check's top-support rule, both against the
@@ -580,6 +582,15 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
     if camera_errors:
         record["camera_errors"] = camera_errors
         record.setdefault("error", "camera(s) not available: " + "; ".join(camera_errors))
+
+    # Optional analysis artifact: separate from obj/raw and all contact-selector inputs.
+    # Keep failures isolated so a recorder issue cannot disable contact selection.
+    from .support_cloud_recording import record_support_scene
+    try:
+        record['support_scene'] = record_support_scene(out)
+    except Exception as exc:
+        record['support_scene'] = dict(available=False, reason=str(exc))
+        node.get_logger().warn(f"[snapshot] support-scene recording unavailable: {exc}")
 
     def refresh_overlays(contacts):
         """Draw every camera's overlay.png against `contacts`."""
