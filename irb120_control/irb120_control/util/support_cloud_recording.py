@@ -36,14 +36,18 @@ def reconstruct_view(depth_mm, info, xy_bounds, z_bounds):
     return base[keep], uv[keep].astype(np.int32)
 
 
-def record_support_scene(folder, *, xy_padding=.04, table_z=-.021):
+def record_support_scene(folder, *, xy_padding=.04, table_z=-.021, out_dir=None):
     """Add independent artifacts using existing snapshot depth, TF and object XY ROI.
 
     Object XY extent only scopes the scene. No object z-min crop, table subtraction,
     segmentation, voxelization, or detector-input modification is performed.
     Missing camera views are recorded explicitly; an empty object ROI fails closed.
+    out_dir: where to write the two files (default: the snapshot folder itself). Used to
+    rebuild clouds for read-only archived snapshots without touching them.
     """
     folder = Path(folder)
+    out = Path(out_dir) if out_dir is not None else folder
+    out.mkdir(parents=True, exist_ok=True)
     with np.load(folder/'object_cloud.npz') as data:
         obj = np.array(data['xyz'], dtype=float, copy=True)
     obj = obj[np.isfinite(obj).all(1)]
@@ -75,9 +79,9 @@ def record_support_scene(folder, *, xy_padding=.04, table_z=-.021):
         roi_z_m=z_bounds, table_z_reference_m=table_z, table_removed=False, voxelized=False,
         points=len(xyz), views=views, synchronization='per-view depth stamps retained; not claimed simultaneous',
         below_legacy_roi_points=int(np.sum(xyz[:, 2] < -.01)))
-    np.savez_compressed(folder/'support_scene_cloud.npz', xyz=xyz.astype(np.float32),
+    np.savez_compressed(out/'support_scene_cloud.npz', xyz=xyz.astype(np.float32),
                         camera_id=np.concatenate(ids), pixel_uv=np.concatenate(pixels))
-    (folder/'support_scene_cloud.json').write_text(json.dumps(metadata, indent=2)+'\n')
+    (out/'support_scene_cloud.json').write_text(json.dumps(metadata, indent=2)+'\n')
     return dict(available=True, file='support_scene_cloud.npz', metadata_file='support_scene_cloud.json',
                 points=len(xyz), below_legacy_roi_points=metadata['below_legacy_roi_points'],
                 views_recorded=sum(v['status']=='recorded' for v in views))

@@ -11,14 +11,16 @@ x a CoM source:
              perceived/commanded pivot, proprioceptive tilt. All primitives.
     motion   shape-free instantaneous support recovered from ball motion (orange.py).
              Press-pull only.
-    joint    cloud prior + motion posterior support geometry with a 95% band and gates
-             (joint_fit.py). Press-pull with a support_scene_cloud only.
+    joint    camera prior + motion posterior support geometry with a 95% band and gates
+             (joint_fit.py). Press-pull with a support scene cloud (recorded, or rebuilt under
+             derived/). Shape-agnostic: the camera prior is the support-side outer envelope
+             per height (scene_profile.envelope_profile), so a flat face, a T, or a round base
+             are all handled; a fillet shows as the envelope receding near the table.
   CoM sources
     supplied d_env from irb120_models: CoM distance from the OUTER base edge, i.e. what a
              table-edge balance measures (the paper's "planar CoM supplied" assumption).
              Its 1-sigma propagates as mass_rel_sigma_from_d.
     hull     filled convex hull of the pre-action cloud (no supplied CoM; uniform density).
-    cloud    the cloud axis (joint only; axisymmetric assumption).
   diagnostics (never paper inputs)
     fixed_oracle  fixed pivot with the fillet-aware support distance from the object record;
                   differs from fixed_supplied only for filleted bases (cylinders B-E).
@@ -59,7 +61,7 @@ import references  # noqa: E402
 from scene_profile import analyze_scene  # noqa: E402
 
 TIP_KINDS = ('forward_arc', 'forward_tip', 'press_pull_tip')
-METHODS = ('fixed_supplied', 'fixed_hull', 'motion_supplied', 'motion_hull', 'joint_supplied', 'joint_cloud',
+METHODS = ('fixed_supplied', 'fixed_hull', 'motion_supplied', 'motion_hull', 'joint_supplied', 'joint_hull',
            'fixed_oracle', 'fixed_supplied_vision')
 PAPER_CANDIDATES = METHODS[:6]
 
@@ -159,7 +161,7 @@ def analyze_stage(ep_dir, episode, stage, sig_reg, vision_dir, ref):
         row['results'] = results
         row['status'] = 'processed'
         return row
-    reg = check_folder(perceive)
+    reg = check_folder(perceive, cloud_dir=_paths.scene_dir(perceive))
     row['camera_agreement'] = reg['status']
     row['camera_spread_mm'] = reg.get('spread_m', np.nan) * 1000
     cloud = np.load(perceive / 'object_cloud.npz')['xyz'].astype(float)
@@ -175,11 +177,11 @@ def analyze_stage(ep_dir, episode, stage, sig_reg, vision_dir, ref):
         row['results'] = results
         row['status'] = 'processed'
         return row
-    has_scene = (perceive / 'support_scene_cloud.npz').exists()
+    has_scene = _paths.scene_dir(perceive) is not None
     try:
         # The per-camera scene profile locates the wall to ~1 mm; the fused detector cloud
         # only to ~4 mm (5 mm voxels, merged cameras). Prefer the scene when recorded.
-        env_x, direction = joint_fit.outer_face_x(perceive, log.pivot) if has_scene else \
+        env_x, direction = joint_fit.outer_face_x(perceive, log.pivot, log.push_dir) if has_scene else \
             near_envelope_x(cloud, centroid, log.pivot)
         row['envelope_source'] = 'scene_profile' if has_scene else 'detector_cloud'
     except Exception:
@@ -201,8 +203,8 @@ def analyze_stage(ep_dir, episode, stage, sig_reg, vision_dir, ref):
                 track = track_tilt_vision(log, cache_dir=str(vision_dir), verbose=False)
             except Exception:
                 track = None
-        attempt('joint_cloud', lambda: joint_summary(joint_fit.run(episode['object'], path, perceive, sig_reg,
-                                                                   vision_track=track)[0]))
+        attempt('joint_hull', lambda: joint_summary(joint_fit.run(episode['object'], path, perceive, sig_reg,
+                                                                  vision_track=track, com_x_world=float(centroid[0]))[0]))
         if d_env is not None:
             attempt('joint_supplied', lambda: joint_summary(joint_fit.run(episode['object'], path, perceive, sig_reg,
                                                                           vision_track=track, envelope_d=d_env)[0]))
@@ -259,7 +261,7 @@ def scene_folders(episodes):
     for ep_file in episodes:
         ep = json.loads(Path(ep_file).read_text())
         out += [Path(ep_file).parent / s['dir'] for s in ep['stages'] if s['kind'] == 'perceive'
-                and (Path(ep_file).parent / s['dir'] / 'support_scene_cloud.npz').exists()]
+                and _paths.scene_dir(Path(ep_file).parent / s['dir']) is not None]
     return out
 
 
@@ -267,7 +269,7 @@ def pooled_registration(scene_folders):
     sig = []
     for folder in scene_folders:
         try:
-            s = analyze_scene(folder, np.load(folder / 'object_cloud.npz')['xyz'])
+            s = analyze_scene(folder, np.load(folder / 'object_cloud.npz')['xyz'], cloud_dir=_paths.scene_dir(folder))
             q = joint_fit.registration_sigma([v for v in s['views'] if v['status'] == 'ok'
                                               and v['elevation_deg'] <= joint_fit.MAX_ELEVATION_DEG])
             if q is not None:

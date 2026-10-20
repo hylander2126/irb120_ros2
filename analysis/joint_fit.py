@@ -23,12 +23,12 @@ from pathlib import Path
 import copy
 import numpy as np
 
-import _paths  # noqa: F401
+import _paths
 from irb120_control.estimation.estimate_params import tiplog_from_press_pull
 from irb120_control.estimation.physical_bounds import cloud_height_bound, bounded_gravity_fit
 from motion_contact import reconstruct, regularize_support
 from rolling import rolling_angle, tau_at
-from scene_profile import analyze_scene, R_GRID, interval
+from scene_profile import R_GRID, envelope_profile, interval
 
 MAX_ELEVATION_DEG = 45.     # steeper views cannot see a downward-facing lower transition
 REG_FLOOR_M = .001
@@ -139,31 +139,34 @@ def mass_fits(log, R, p0x, arm, cap, mask):
     return fits
 
 
-def support_view(scene_folder, pivot):
-    """Scene profile and the low-elevation camera facing the support (pivot) side."""
+def support_view(scene_folder, pivot, push_dir):
+    """Shape-agnostic support-side envelope profile and the low-elevation camera facing it.
+    The scene cloud is read from the snapshot or its derived mirror (_paths.scene_dir)."""
     selector = np.load(Path(scene_folder) / 'object_cloud.npz')['xyz']
-    scene = analyze_scene(scene_folder, selector)
-    center = np.array(scene['center_xy'])
-    support_dir = (np.asarray(pivot[:2]) - center) / np.linalg.norm(np.asarray(pivot[:2]) - center)
+    scene = envelope_profile(scene_folder, selector, pivot, push_dir, cloud_dir=_paths.scene_dir(scene_folder))
+    center, support_dir = np.array(scene['center_xy']), np.array(scene['support_dir'])
     low = [v for v in scene['views'] if v['status'] == 'ok' and v['elevation_deg'] <= MAX_ELEVATION_DEG]
-    view = max(low, key=lambda v: float(np.dot(v['azimuth_toward_camera'], support_dir)))
+    if not low:
+        raise ValueError('no low-elevation camera sees the support-side face')
+    view = max(low, key=lambda v: v['facing'])
     return scene, center, support_dir, low, view
 
 
-def outer_face_x(scene_folder, pivot):
+def outer_face_x(scene_folder, pivot, push_dir):
     """World x of the support-side outer wall (35 mm wall line of the support camera), and
     the unit direction from the axis to the support."""
-    _, center, support_dir, _, view = support_view(scene_folder, pivot)
+    _, center, support_dir, _, view = support_view(scene_folder, pivot, push_dir)
     return float(center[0] + support_dir[0] * view['fits']['5mm']['outer_radius_m']), support_dir
 
 
-def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_track=None, envelope_d=None):
-    """envelope_d: supplied CoM distance from the support-side OUTER base edge (table-edge
-    measurement). None: the CoM is assumed on the cloud axis (axisymmetric objects)."""
+def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_track=None, envelope_d=None,
+        com_x_world=None):
+    """CoM source, one of: envelope_d = supplied distance from the support-side OUTER base
+    edge (table-edge measurement); com_x_world = a world x (e.g. the hull centroid)."""
     rng = np.random.default_rng(seed)
     log = tiplog_from_press_pull(str(log_path)); start = np.where(log.branch == 'tip')[0][0]
     cap, cloud_path = cloud_height_bound(log)
-    scene, center, support_dir, low, view = support_view(scene_folder, log.pivot)
+    scene, center, support_dir, low, view = support_view(scene_folder, log.pivot, log.push_dir)
     # Union of per-cutoff intervals: each cutoff's delta-chi2, minimized over cutoffs.
     # (Raw chi2 is not comparable across cutoffs: fewer bins give smaller chi2.)
     prior_chi2 = np.min([np.array(f['chi2_profile']) - min(f['chi2_profile']) for f in view['fits'].values()], axis=0)
@@ -191,7 +194,12 @@ def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_trac
         p0x = initial_support(R, x_face, motion, sig_reg)
         # Arm = cloud axis (all cameras) - support (robot frame), as replay.py. Not a_bottom - R:
         # that would drop the registration offset the GLS support estimate absorbs.
-        com_x = center[0] if envelope_d is None else x_face_outer - support_dir[0] * envelope_d
+        if envelope_d is not None:
+            com_x = x_face_outer - support_dir[0] * envelope_d
+        elif com_x_world is not None:
+            com_x = com_x_world
+        else:
+            raise ValueError('joint_fit.run needs envelope_d or com_x_world')
         arm = float(com_x - p0x) * float(-np.sign(support_dir[0]))
         propagated[str(q)] = dict(R_m=R, p0_x=p0x, arm_m=arm,
                                   branches=mass_fits(log, R, p0x, arm, cap, mask))

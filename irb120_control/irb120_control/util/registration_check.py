@@ -50,9 +50,11 @@ def camera_tables(scene_xyz, camera_id, object_xyz) -> dict:
     return out
 
 
-def check_folder(folder, tolerance_m: float = TOLERANCE_M) -> dict:
+def check_folder(folder, tolerance_m: float = TOLERANCE_M, cloud_dir=None) -> dict:
+    """cloud_dir: where support_scene_cloud.npz lives if not in the snapshot (offline backfill)."""
     folder = Path(folder)
-    scene_file, object_file = folder / "support_scene_cloud.npz", folder / "object_cloud.npz"
+    scene_file = Path(cloud_dir or folder) / "support_scene_cloud.npz"
+    object_file = folder / "object_cloud.npz"
     if not (scene_file.exists() and object_file.exists()):
         return dict(status="unavailable", reason="needs support_scene_cloud.npz and object_cloud.npz", folder=str(folder))
     scene = np.load(scene_file)

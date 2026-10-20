@@ -11,18 +11,16 @@ Two different things, kept apart:
   mass, height  SCORING references, used only after estimation. None when unknown or
              sealed (everyday objects until the estimates are frozen).
 
-Tier 1 = mass and height both known (tipT, cylinder, heart). Tier 2 = everything else.
+Only experiment configurations are looked up (tipT, cylinder, everyday families); the older
+single-object records (box, heart, flashlight, monitor, soda) are not considered.
+Tier 1 = mass and height both known. Tier 2 = everything else.
 """
 import numpy as np
 
 import _paths  # noqa: F401
-from irb120_models import list_objects, load_object
 from irb120_models.configurations import list_configurations, load_configuration
 from irb120_models.experiment_gt import forward_tip_ground_truth
 
-# Family records whose ground truth is a documented placeholder (cylinder.yaml notes); sweep
-# variants have their own configurations. Never use these.
-PLACEHOLDER_RECORDS = {'cylinder', 'tipT'}
 MODES = ('forward', 'press_pull')
 
 
@@ -65,18 +63,6 @@ def lookup(label: str) -> dict | None:
         return _ref(f"{record['family']} configuration", record.get('mass'), record['com_obj'][-1],
                     record['initial_support_distances'], unc, d_env=envelope_distances(record),
                     radius=record.get('fillet_radius'), placement=record.get('placement'))
-    base = label if label in list_objects() else label.split('_')[0]
-    if base in list_objects() and base not in PLACEHOLDER_RECORDS:
-        try:
-            gt = load_object(base).ground_truth()
-        except ValueError:          # broken object record (e.g. a missing mesh): nothing
-            return None
-        if gt.get('mass') is None:
-            return None
-        # The measured com_x is the press-pull pivot distance: the published press-pull
-        # estimator (estimate_params) uses it as d. The forward edge is not recorded.
-        return _ref(f'measured ground truth ({base})', gt['mass'], gt['com_z'],
-                    dict(press_pull=gt.get('com_x')))
     return None
 
 

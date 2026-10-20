@@ -102,10 +102,10 @@ def interval(chi2, level):
     return [float(ok.min()), float(ok.max())]
 
 
-def analyze_scene(folder, selector_xyz):
-    folder = Path(folder)
-    meta = json.loads((folder / 'support_scene_cloud.json').read_text())
-    cloud = np.load(folder / 'support_scene_cloud.npz')
+def analyze_scene(folder, selector_xyz, cloud_dir=None):
+    folder = Path(folder); cloud_dir = Path(cloud_dir or folder)
+    meta = json.loads((cloud_dir / 'support_scene_cloud.json').read_text())
+    cloud = np.load(cloud_dir / 'support_scene_cloud.npz')
     xyz = cloud['xyz'].astype(float); cam = cloud['camera_id']; uv = cloud['pixel_uv']
     clean = np.zeros(len(xyz), bool)
     for c in np.unique(cam):
@@ -183,3 +183,89 @@ def support_view(scene, support_xy):
     d = np.asarray(support_xy) - np.asarray(scene['center_xy']); d /= np.linalg.norm(d)
     ok = [v for v in scene['views'] if v['status'] == 'ok']
     return max(ok, key=lambda v: float(np.dot(v['azimuth_toward_camera'], d)))
+
+
+# ------------------------------------------------------------------ shape-agnostic profile
+LATERAL_BAND_M = 0.012      # half-width of the strip in front of the pivot (cylinder sagitta <2 mm)
+ENVELOPE_Q = 0.95           # outermost surface toward the support in each height bin
+MAX_ELEVATION_DEG = 45.     # steeper views cannot see a downward-facing fillet
+
+
+def envelope_profile(folder, selector_xyz, pivot, push_dir, cloud_dir=None):
+    """Support-side outer envelope u(h) per low-elevation camera; no shape family assumed.
+
+    d = the horizontal push direction (the object tips toward it, so it points at the pivot side);
+    the strip is the points within LATERAL_BAND_M of the line through the PIVOT along d
+    (the selector-cloud median is biased sideways by uneven camera coverage). u is measured
+    from c = selector-cloud median along d. For each camera: its own table plane and
+    flying-pixel filter. In each 1 mm height bin, u is the ENVELOPE_Q
+    quantile of (p - c).d, i.e. the outermost surface toward the support. A vertical face
+    (box, tipT, cylinder seen head-on) gives a constant u; a fillet makes u recede near the
+    table. The same fillet + lean chi2 machinery as the axisymmetric profile then applies,
+    with the flare cutoffs. Returns the scene dict shape used by joint_fit.
+    """
+    folder = Path(folder); cloud_dir = Path(cloud_dir or folder)
+    meta = json.loads((cloud_dir / 'support_scene_cloud.json').read_text())
+    cloud = np.load(cloud_dir / 'support_scene_cloud.npz')
+    xyz = cloud['xyz'].astype(float); cam = cloud['camera_id']; uv = cloud['pixel_uv']
+    c = np.median(selector_xyz[:, :2], axis=0)
+    pivot = np.asarray(pivot, float)[:2]
+    d = np.asarray(push_dir, float)[:2]; d /= np.linalg.norm(d)
+    lat = np.array([-d[1], d[0]])
+    # Footprint from the base band only: an overhang (tipT top bar) is not where the object
+    # meets the table, and would push the table ring out of the recorded scene.
+    hs = selector_xyz[:, 2] - TABLE_Z_REF
+    base = selector_xyz[(hs > .020) & (hs < .045)]
+    base = base if len(base) >= 50 else selector_xyz
+    footprint = float(np.quantile(np.linalg.norm(base[:, :2] - c, axis=1), .95))
+    views = []
+    for view in meta['views']:
+        cid = view['camera_id']
+        if view.get('status') != 'recorded':
+            views.append(dict(camera=view['camera'], status='missing')); continue
+        sel = cam == cid
+        clean = edge_free(folder, int(cid), uv[sel])
+        p = xyz[sel][clean]
+        table = fit_table(p, c, footprint + .015, footprint + .060)
+        if table is None:
+            views.append(dict(camera=view['camera'], status='insufficient table pixels')); continue
+        position = camera_position(view)
+        toward = position[:2] - c; horizontal = np.linalg.norm(toward); toward /= horizontal
+        elevation = float(np.degrees(np.arctan2(position[2] - TABLE_Z_REF, horizontal)))
+        h = height_above(p, c, table['plane'])
+        u = (p[:, :2] - c) @ d; w = (p[:, :2] - pivot) @ lat
+        strip = (np.abs(w) < LATERAL_BAND_M) & (u > 0) & (u < footprint + .015)
+        h_min = max(.002, 3 * table['sigma_m'])
+        bins = []
+        for lo in np.arange(0, PROFILE_TOP, BIN_M):
+            q = strip & (h >= lo) & (h < lo + BIN_M)
+            if q.sum() >= 5:
+                uq = u[q]; top = uq[uq >= np.quantile(uq, .8)]
+                bins.append((lo + BIN_M / 2, float(np.quantile(uq, ENVELOPE_Q)),
+                             1.4826 * float(np.median(np.abs(top - np.median(top)))), int(len(top))))
+        entry = dict(camera=view['camera'], camera_id=int(cid), azimuth_toward_camera=toward.tolist(),
+                     elevation_deg=elevation, table=table, table_height_floor_m=float(h_min),
+                     facing=float(np.dot(toward, d)))
+        if len([b for b in bins if b[0] > .025]) < 5:
+            views.append(dict(entry, status='wall bins insufficient')); continue
+        fits = {}
+        for cut in CUTOFFS_M:
+            B = np.array([b for b in bins if b[0] >= max(h_min, cut)])
+            hB, rB = B[:, 0], B[:, 1]
+            sB = np.sqrt(sys_floor_of(bins) ** 2 + (B[:, 2] / np.sqrt(B[:, 3])) ** 2)
+            chi2, nuisance = chi2_profile(hB, rB, sB)
+            dof = max(len(hB) - 3, 1)
+            birge = max(1.0, float(chi2.min() / dof))
+            chi2 = chi2 / birge
+            j = int(np.argmin(chi2))
+            fits[f'{cut * 1000:.0f}mm'] = dict(cutoff_m=float(max(h_min, cut)), best_R_m=float(R_GRID[j]),
+                R_68_m=interval(chi2, 1.0), R_95_m=interval(chi2, 3.84), reduced_chi2=birge,
+                outer_radius_m=float(nuisance[j][0]), wall_lean_mm_per_10mm=float(10 * nuisance[j][1]),
+                chi2_profile=chi2.tolist(), bins_used=int(len(hB)))
+        views.append(dict(entry, status='ok', fits=fits, best_R_m=fits['5mm']['best_R_m'],
+                          outer_radius_m=fits['5mm']['outer_radius_m'],
+                          R_95_envelope_m=[min(f['R_95_m'][0] for f in fits.values()),
+                                           max(f['R_95_m'][1] for f in fits.values())],
+                          bins=[dict(h=b[0], rho=b[1], mad=b[2], n=b[3]) for b in bins]))
+    return dict(center_xy=c.tolist(), support_dir=d.tolist(), footprint_m=footprint, views=views,
+                R_grid_m=R_GRID.tolist(), profile='envelope')

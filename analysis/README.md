@@ -31,12 +31,14 @@ Each method is a support model × a CoM source; the full definitions are in the
 | fixed_hull | same | filled convex hull of the cloud | all |
 | motion_supplied | recovered from ball motion | supplied, from the perceived outer wall | press-pull |
 | motion_hull | recovered from ball motion | hull centroid | press-pull |
-| joint_supplied | cloud prior + motion posterior, with band and gates | supplied, from the scene-profile wall | press-pull + scene cloud |
-| joint_cloud | same | cloud axis (axisymmetric) | press-pull + scene cloud |
+| joint_supplied | camera prior (support-side outer envelope per height; any shape) + motion posterior, with band and gates | supplied, from the perceived outer wall | press-pull + scene cloud (recorded or rebuilt) |
+| joint_hull | same | hull centroid | press-pull + scene cloud |
 | fixed_oracle | pivot with the fillet-aware support distance | diagnostic only (uses support GT) | filleted bases |
 | fixed_supplied_vision | as fixed_supplied, camera tilt | diagnostic | `--vision` |
 
-`compare_methods.py` runs all of them on the development data and the published 40 trials.
+`compare_methods.py` runs all of them on the tipT and cylinder suites.
+`backfill_scene_clouds.py` rebuilds support scene clouds for snapshots that predate them
+(from their saved depth), into `~/Documents/irb120_data/derived/`.
 Its output is in `~/Documents/irb120_data/method_comparison_dev/`.
 
 ## Files
