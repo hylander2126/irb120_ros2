@@ -221,3 +221,27 @@ are generated outputs and must be regenerated after changing references.
 For the current paper, object GT and nominal CAD inputs are fixed references;
 GT uncertainty metadata is not propagated. The measurement-only collection plan
 is `runtime_logs/suite_analysis/UNCERTAINTY_COLLECTION.md` at workspace root.
+
+## Everyday objects (`objects/everyday/configurations.yaml`)
+
+Tier-2 objects: no CAD and no full ground truth. Each is one configuration, named exactly as
+its episode label. The file's header comment is the procedure; the essentials:
+
+- **Frame:** the same as tipT, `near_outer_base_edge_x_along_push_z_up`. Fix a placement first (which face points at the robot; write it in `placement` and mark the object).
+  - x runs along the push, away from the robot.
+  - x = 0 is the near outer extreme of the base (the press-pull pivot side); x = `base_w` is the far one (forward tip).
+  - y is to the robot's left, from the footprint's lateral mid-line.
+- **What to measure:** the planar CoM, by balancing on a sharp table edge from both sides along the push axis:
+  - `support_distances.press_pull`: near outer extreme to the table edge at balance;
+  - `support_distances.forward`: the same from the far side;
+  - `base_w` with calipers.
+
+  `support_closure()` returns press_pull + forward − base_w, a direct check on the measurement. Record the 1-sigma in `uncertainty.support_distances`.
+- **Mass may stay `null`** (sealed until the estimates are frozen); `com_obj` z stays `null` (estimated).
+- **These are outer-edge distances.** For a sharp-edged base that is the pivot. For a rounded base the actual support on a flat table is inset; the analysis treats that inset as something to estimate, not something supplied.
+
+```python
+from irb120_models.configurations import load_configuration, support_closure
+r = load_configuration('mug_blue')
+r['support_distances'], support_closure(r)
+```

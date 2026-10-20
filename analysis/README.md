@@ -18,25 +18,31 @@ Dry runs on the development archive (2026-10-20):
 - `--data-root ~/Documents/irb120_data/dev_2026-10/cylinder_suite`
 - `--data-root ~/Documents/irb120_data/dev_2026-10/tipT_suite`
 
-Both complete. reference_d reproduces the earlier suite numbers.
+Both complete. The fixed pivot with the record's support distance (fixed_oracle on cylinders, fixed_supplied on tipT) reproduces the earlier suite numbers.
 
 ## Methods (per tip stage)
 
-| Name | Needs | Gives |
-|---|---|---|
-| reference_d | measured CoM distance (tier 1) | production estimator m, z_c; errors |
-| hull_d | pre-action cloud | first moments h_x = m d, h_z = m z (identifiable); m, z_c under a filled-hull uniform-density assumption |
-| orange | press-pull, cloud | shape-free instantaneous support m, z_c (CoM on the hull centroid) |
-| joint | press-pull, support_scene_cloud | support geometry prior→posterior, m with a 95% band, accepted/borderline/rejected (JOINT_FIT.md) |
+Each method is a support model × a CoM source; the full definitions are in the
+`make_paper_results.py` docstring.
 
-On the development data:
-- **The hull assumption fails** on concave shapes (tipT E, +103% mass) and on short arms (cylinder D, −38%).
-- **First moments are the robust GT-free output.** Which mass method is the headline is a decision to freeze before scoring official data.
+| Method | Support | CoM | Where |
+|---|---|---|---|
+| fixed_supplied | perceived/commanded pivot (production estimator) | supplied outer-edge distance (irb120_models; table-edge measurement) | all |
+| fixed_hull | same | filled convex hull of the cloud | all |
+| motion_supplied | recovered from ball motion | supplied, from the perceived outer wall | press-pull |
+| motion_hull | recovered from ball motion | hull centroid | press-pull |
+| joint_supplied | cloud prior + motion posterior, with band and gates | supplied, from the scene-profile wall | press-pull + scene cloud |
+| joint_cloud | same | cloud axis (axisymmetric) | press-pull + scene cloud |
+| fixed_oracle | pivot with the fillet-aware support distance | diagnostic only (uses support GT) | rounded bases |
+| fixed_supplied_vision | as fixed_supplied, camera tilt | diagnostic | `--vision` |
+
+`compare_methods.py` runs all of them on the development data and the published 40 trials.
+Its output is in `~/Documents/irb120_data/method_comparison_dev/`.
 
 ## Files
 
-- `make_paper_results.py`: entry point.
-- `references.py`: scoring references by object label (tier 1) or None (tier 2).
+- `make_paper_results.py`: entry point. `compare_methods.py`: method comparison on development data.
+- `references.py`: supplied CoM distances (inputs) and mass/height references (scoring) by object label.
 - `joint_fit.py`, `scene_profile.py`, `motion_contact.py`, `rolling.py`, `orange.py`, `cloud_geometry.py`, `hull_com.py`: methods.
 - `JOINT_FIT.md`: method note and development results for the joint fit.
 - `tests/`: `python3 -m pytest -q tests`.

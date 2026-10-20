@@ -153,3 +153,24 @@ def test_xyz_com_preserved_and_height_uses_z(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter,'list_configurations',lambda family:['sample_a'])
     assert adapter.cylinder_sweep_references()['sample_a'] == pytest.approx(
         dict(radius_mm=8.,mass_kg=.362,height_mm=72.,d_mm=32.))
+
+
+def test_everyday_family_record_with_table_edge_distances(tmp_path, monkeypatch):
+    import yaml
+    from irb120_models import configurations
+    family = tmp_path / 'everyday'
+    family.mkdir()
+    source = (configurations.objects_dir() / 'everyday' / 'configurations.yaml').read_text()
+    data = yaml.safe_load(source)
+    assert data['configurations'] == {}          # shipped empty; Steven fills it in
+    data['configurations'] = {'mug_test': {
+        'placement': 'handle left', 'com_obj': [0.041, 0.002, None], 'base_w': 0.082,
+        'support_distances': {'press_pull': 0.041, 'forward': 0.0415},
+        'uncertainty': {'support_distances': {'press_pull': 0.001, 'forward': 0.001}}}}
+    (family / 'configurations.yaml').write_text(yaml.safe_dump(data))
+    monkeypatch.setattr(configurations, 'objects_dir', lambda: tmp_path)
+    record = configurations.load_configuration('mug_test')
+    assert record['mass'] is None and record['com_obj'][2] is None
+    assert record['initial_support_distances'] == {'press_pull': 0.041, 'forward': 0.0415}
+    assert abs(configurations.support_closure(record) - 0.0005) < 1e-12
+    assert 'mug_test' in configurations.list_configurations('everyday')

@@ -34,5 +34,6 @@ cad:                         # values from a CAD model, where one exists
   theta_star_deg: 23.984
   source: "CAD (per Steven, 2026-10-09). Informational only: ground truth is the measured CoM."
 notes:
-  - "rest_pose and tip_edges are placeholders. The mesh is 0.10 m tall along CAD z, the same
-    as the recorded com height, so the CAD frame is not the resting pose."
+  - "The mesh (heart.gltf) is 0.105 x 0.105 x 0.200 m with CAD z up and its base at z = 0, which
+    Steven confirmed is the physical heart (2026-10-20). The recorded CoM height 0.100 m is at
+    mid-height. rest_pose and tip_edges remain unverified placeholders."

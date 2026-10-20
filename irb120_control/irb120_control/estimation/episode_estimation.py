@@ -201,7 +201,7 @@ def analyze_episode(path, reference, *, tilt_source='proprio', vision=False, cac
                        horizontal_com_distance_m=d, fits=fits, estimate=fits[selected_source])
             if stage['status'] != 'ok':
                 rec['estimate']['quality_flags'].append('controller_stage_not_ok')
-            if episode.get('outcome', {}).get('result') != 'success':
+            if (episode.get('outcome') or {}).get('result') != 'success':
                 rec['estimate']['quality_flags'].append('episode_not_success')
             # Scoring is deliberately outside fit_first_moments. Mass and height GT
             # cannot affect tilt, filtering, branch selection, or fitting.

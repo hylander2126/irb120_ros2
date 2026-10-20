@@ -139,16 +139,31 @@ def mass_fits(log, R, p0x, arm, cap, mask):
     return fits
 
 
-def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_track=None):
-    rng = np.random.default_rng(seed)
-    log = tiplog_from_press_pull(str(log_path)); start = np.where(log.branch == 'tip')[0][0]
-    cap, cloud_path = cloud_height_bound(log)
+def support_view(scene_folder, pivot):
+    """Scene profile and the low-elevation camera facing the support (pivot) side."""
     selector = np.load(Path(scene_folder) / 'object_cloud.npz')['xyz']
     scene = analyze_scene(scene_folder, selector)
     center = np.array(scene['center_xy'])
-    support_dir = (log.pivot[:2] - center) / np.linalg.norm(log.pivot[:2] - center)
+    support_dir = (np.asarray(pivot[:2]) - center) / np.linalg.norm(np.asarray(pivot[:2]) - center)
     low = [v for v in scene['views'] if v['status'] == 'ok' and v['elevation_deg'] <= MAX_ELEVATION_DEG]
     view = max(low, key=lambda v: float(np.dot(v['azimuth_toward_camera'], support_dir)))
+    return scene, center, support_dir, low, view
+
+
+def outer_face_x(scene_folder, pivot):
+    """World x of the support-side outer wall (35 mm wall line of the support camera), and
+    the unit direction from the axis to the support."""
+    _, center, support_dir, _, view = support_view(scene_folder, pivot)
+    return float(center[0] + support_dir[0] * view['fits']['5mm']['outer_radius_m']), support_dir
+
+
+def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_track=None, envelope_d=None):
+    """envelope_d: supplied CoM distance from the support-side OUTER base edge (table-edge
+    measurement). None: the CoM is assumed on the cloud axis (axisymmetric objects)."""
+    rng = np.random.default_rng(seed)
+    log = tiplog_from_press_pull(str(log_path)); start = np.where(log.branch == 'tip')[0][0]
+    cap, cloud_path = cloud_height_bound(log)
+    scene, center, support_dir, low, view = support_view(scene_folder, log.pivot)
     # Union of per-cutoff intervals: each cutoff's delta-chi2, minimized over cutoffs.
     # (Raw chi2 is not comparable across cutoffs: fewer bins give smaller chi2.)
     prior_chi2 = np.min([np.array(f['chi2_profile']) - min(f['chi2_profile']) for f in view['fits'].values()], axis=0)
@@ -156,6 +171,9 @@ def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_trac
     # Wall position at the table (lean extrapolated from the wall line at 35 mm).
     a_bottom = main['outer_radius_m'] - .035 * main['wall_lean_mm_per_10mm'] / 10
     x_face = float(center[0] + support_dir[0] * a_bottom)
+    # Outer envelope on the support side (wall at 35 mm, no lean extrapolation): the face a
+    # table-edge measurement is referenced to.
+    x_face_outer = float(center[0] + support_dir[0] * main['outer_radius_m'])
     sig_reg = registration_sigma(low)
     reg_source = 'this scene, low-elevation views'
     if sig_reg is None:
@@ -173,7 +191,8 @@ def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_trac
         p0x = initial_support(R, x_face, motion, sig_reg)
         # Arm = cloud axis (all cameras) - support (robot frame), as replay.py. Not a_bottom - R:
         # that would drop the registration offset the GLS support estimate absorbs.
-        arm = float(center[0] - p0x) * float(-np.sign(support_dir[0]))
+        com_x = center[0] if envelope_d is None else x_face_outer - support_dir[0] * envelope_d
+        arm = float(com_x - p0x) * float(-np.sign(support_dir[0]))
         propagated[str(q)] = dict(R_m=R, p0_x=p0x, arm_m=arm,
                                   branches=mass_fits(log, R, p0x, arm, cap, mask))
     # Registration error of the cloud axis moves the arm directly (mass ~ 1/arm).
@@ -186,7 +205,7 @@ def run(name, log_path, scene_folder, sig_reg_fallback=None, seed=0, vision_trac
     result = dict(object=name, log=str(log_path), scene=str(scene_folder),
         support_view=view['camera'], support_view_elevation_deg=view['elevation_deg'], x_face_m=x_face,
         outer_radius_bottom_m=a_bottom, axis_xy_m=scene['center_xy'], height_cap_m=cap,
-        registration_sigma_source=reg_source, motion=motion, geometry=geom, propagated=propagated, vision=vision,
+        registration_sigma_source=reg_source, envelope_d=envelope_d, motion=motion, geometry=geom, propagated=propagated, vision=vision,
         views=[dict(camera=v['camera'], status=v['status'], elevation_deg=v.get('elevation_deg'),
                     R_95_envelope_m=v.get('R_95_envelope_m'), fits={k: {kk: vv for kk, vv in f.items() if kk != 'chi2_profile'}
                     for k, f in v.get('fits', {}).items()}) for v in scene['views']])

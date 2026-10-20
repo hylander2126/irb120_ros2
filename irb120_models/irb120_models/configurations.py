@@ -96,7 +96,10 @@ def _validate(record):
         _number(value, f'{name}.support_distances.{mode}')
     uncertainty = record.get('uncertainty') or {}
     for key, value in uncertainty.items():
-        if isinstance(value, list):
+        if isinstance(value, dict):
+            for mode, item in value.items():
+                _number(item, f'{name}.uncertainty.{key}.{mode}')
+        elif isinstance(value, list):
             if key == 'com_obj' and len(value) not in (2,3):
                 raise ValueError(f'{name}.uncertainty.com_obj: expected [sigma_x,sigma_y,sigma_z] or [sigma_x,sigma_z]')
             for item in value:
@@ -105,6 +108,18 @@ def _validate(record):
             _number(value, f'{name}.uncertainty.{key}')
     if record.get('mesh'):
         _mesh_path(record)
+
+
+def support_closure(record):
+    """press_pull + forward - base_w (m), when all three are known; else None.
+
+    Two independent table-edge measurements plus the footprint length should close; the
+    residual is a direct check on the planar CoM measurement.
+    """
+    d = record.get('support_distances') or {}
+    if None in (d.get('press_pull'), d.get('forward'), record.get('base_w')):
+        return None
+    return d['press_pull'] + d['forward'] - record['base_w']
 
 
 def planar_com(record):

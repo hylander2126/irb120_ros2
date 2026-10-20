@@ -14,8 +14,9 @@ from rolling import tau_at
 BRANCHES = ('tip', 'return')
 
 
-def estimate(log, com_x_world, degree=3, window_s=.6):
-    cap, _ = cloud_height_bound(log)
+def estimate(log, com_x_world, degree=3, window_s=.6, height_cap=None):
+    """height_cap: only for logs without a pre-action cloud (legacy trials)."""
+    cap = height_cap if height_cap is not None else cloud_height_bound(log)[0]
     start = np.where(log.branch == 'tip')[0][0]
     motion = regularize_support(reconstruct(log.t_epoch, log.p_ball, start, window_s=window_s),
                                 log.p_ball, log.branch, degree)

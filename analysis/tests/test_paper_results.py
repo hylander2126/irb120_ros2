@@ -27,3 +27,14 @@ def test_unknown_objects_get_no_reference():
     assert ref['mass'] > 0 and references.estimator_reference(ref)['com'][0] > 0
     free = references.estimator_reference(None, .02)
     assert np.isnan(free['mass']) and free['com_obj'][0] == .02
+
+
+def test_supplied_distance_is_the_outer_edge_not_the_support():
+    cyl = references.lookup('cylinder_c')          # 80 mm diameter, 16 mm fillet
+    assert cyl['d_env']['press_pull'] == pytest.approx(.040)
+    assert cyl['d']['press_pull'] == pytest.approx(.024)   # oracle: needs the fillet
+    sharp = references.lookup('tipT_d')
+    assert sharp['d_env'] == sharp['d']
+    heart = references.lookup('heart')             # measured com_x is the press-pull distance
+    assert heart['d_env']['press_pull'] == pytest.approx(.0458) and heart['d_env']['forward'] is None
+    assert references.lookup('cylinder_a_repeat') is None   # labels are never guessed

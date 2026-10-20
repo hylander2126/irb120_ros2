@@ -1,0 +1,58 @@
+# EDIT THIS FILE for everyday objects (tier 2). All lengths in METRES, mass in kg.
+#
+# Episode labels must equal the configuration names below (e.g. run_pipeline mug_blue ...).
+#
+# FRAME (same as tipT): near_outer_base_edge_x_along_push_z_up
+#   Fix the PLACEMENT first: which face points at the robot, written in `placement` and
+#   marked on the object. Everything below is relative to that placement.
+#   x: horizontal, along the push, away from the robot. Origin x = 0 at the NEAR extreme of
+#      the base footprint: the point or edge of the base closest to the robot, which is the
+#      press-pull pivot. The FAR extreme is at x = base_w, the forward-tip pivot.
+#   y: horizontal, + to the robot's left (base_link +y), from the footprint's lateral
+#      mid-line (halfway between its left and right extremes).
+#   z: up from the table. Leave null: CoM height is what the experiments estimate.
+#
+# WHAT THE ESTIMATOR NEEDS: only the horizontal distance d from the pivot edge to the CoM,
+# per mode: support_distances.press_pull (near edge) and support_distances.forward (far edge).
+#
+# SHARP-TABLE-EDGE METHOD, two measurements along the push axis:
+#   1. Near edge: place the object in its placement orientation with the NEAR side
+#      toward the table edge, the push axis perpendicular to the table edge. Slide it out
+#      over the edge until it just balances. support_distances.press_pull = distance from
+#      the near extreme of the base to the table edge.
+#   2. Far edge: the same with the FAR side over the edge -> support_distances.forward.
+#   3. base_w = footprint length along the push (calipers).
+#   Check: press_pull + forward should equal base_w. The closure error goes into
+#   uncertainty (see the README). com_obj.x = support_distances.press_pull.
+#   Optional lateral pair (left/right over the edge): y = (d_left - d_right) / 2.
+#
+# MASS: weigh, but you may leave null here and keep the value sealed until the estimates
+# are frozen; scoring then happens blind (add it afterwards).
+#
+# Example (copy, uncomment, fill in; numbers are illustrative):
+#   mug_blue:
+#     placement: "handle pointing to the robot's left; logo faces the robot"
+#     mass: null
+#     com_obj: [0.041, 0.002, null]
+#     base_w: 0.082
+#     support_distances: {press_pull: 0.041, forward: 0.042}
+#     uncertainty:
+#       support_distances: {press_pull: 0.001, forward: 0.001}
+#       com_obj: [0.001, 0.002, null]
+#     measurement: "sharp table edge, calipers to 0.1 mm, 3 repeats each side, 2026-10-21"
+#     source: "Steven, table-edge balance"
+schema_version: 1
+defaults:
+  frame: near_outer_base_edge_x_along_push_z_up
+  mesh: null
+  mass: null
+  com_obj: [null, null, null]
+  base_w: null
+  support_distances: {forward: null, press_pull: null}
+  uncertainty:  # 1-sigma; used for propagation, never for scoring
+    mass: null
+    com_obj: [null, null, null]
+    base_w: null
+    support_distances: {forward: null, press_pull: null}
+  source: null
+configurations: {}
