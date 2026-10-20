@@ -1,0 +1,56 @@
+# EDIT THIS FILE for cylinder sweep ground truth. All lengths in METRES, mass in kg.
+# Example only: 364 g -> mass: 0.364; centered CoM at 80 mm -> com_obj: [0.0, 0.0, 0.080].
+# com_obj: [x,y,z] from BOTTOM CENTER on the table plane, +x along push, +z up.
+# Axisymmetric mass distribution implies x=0; z must come from mass properties.
+# base_w: shared full OUTER diameter (80 mm in the supplied variant meshes).
+# Initial flat-support radius = base_w/2 - fillet_radius; derived automatically.
+# For symmetric CoM x=0, this is the pivot-to-CoM horizontal distance in both modes.
+# This upright reference does not model support migration during rolling.
+# Radii: user-supplied probing-for-properties/figures/lineup.png, 2026-10-19;
+# cylinder_a..e correspond to displayed C1..C5.
+schema_version: 1
+defaults:
+  frame: bottom_center_x_along_push_z_up
+  source: null  # e.g. scale + Onshape export, date, print/insert assumptions
+  mesh: null  # optional; never inherit the legacy cylinder mesh for every radius
+  mass: null
+  com_obj: [0.0, 0.0, null]
+  base_w: 0.080  # shared outer diameter; CAD mesh bounds checked 2026-10-19
+  support_model: circular_base_fillet
+  support_distances: {forward: null, press_pull: null}
+  uncertainty:  # optional metadata; excluded from the paper's fixed-GT scoring
+    mass: null
+    com_obj: [null, null, null]
+    base_w: null
+    fillet_radius: null
+configurations:
+  cylinder_a:
+    fillet_radius: 0.000
+    mass: 0.365
+    com_obj: [0.0, 0.0, 0.071]
+    source: null
+    mesh: meshes/cylinder_a.gltf
+  cylinder_b:
+    fillet_radius: 0.008
+    mass: 0.362
+    com_obj: [0.0, 0.0, 0.072]
+    source: null
+    mesh: meshes/cylinder_b.gltf
+  cylinder_c:
+    fillet_radius: 0.016
+    mass: 0.358
+    com_obj: [0.0, 0.0, 0.073]
+    source: null
+    mesh: meshes/cylinder_c.gltf
+  cylinder_d:
+    fillet_radius: 0.024
+    mass: 0.352
+    com_obj: [0.0, 0.0, 0.074]
+    source: null
+    mesh: meshes/cylinder_d.gltf
+  cylinder_e:
+    fillet_radius: 0.030
+    mass: 0.346
+    com_obj: [0.0, 0.0, 0.075]
+    source: null
+    mesh: meshes/cylinder_e.gltf

@@ -1,3 +1,5 @@
+# Legacy single-cylinder model. For cylinder_a..e sweep values, edit configurations.yaml.
+# This family record is not inherited by experimental variants.
 # Ground truth for the Cylinder. This file is the source of truth for the object;
 # cylinder.urdf and meshes/cylinder.stl are generated from it. See irb120_models/README.md.
 name: cylinder

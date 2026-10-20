@@ -136,3 +136,88 @@ holds the same measured mass and CoM values as these models. Its θ\* is derived
 measured CoM, as here.
 
 Forward-tip experimental configurations are defined in `objects/tipT/configurations.yaml`, with an explicit experiment frame separate from the unregistered CAD frame. `irb120_models.experiment_gt` supplies estimator scoring references. Temporary configurations are opt-in and excluded from the default suite.
+
+## Experimental families and variants (TipT and cylinder)
+
+**Edit sweep values in these files, not in figures or analysis JSON exports:**
+
+- `objects/tipT/configurations.yaml`: `tipT_a` through `tipT_e`, plus opt-in temporary variants.
+- `objects/cylinder/configurations.yaml`: `cylinder_a` through `cylinder_e`.
+
+Each file has shared `defaults` and per-variant `configurations`. Variant fields
+override defaults; uncertainty mappings can be overridden field by field. Values
+use **kg and metres** throughout. `null` means unknown, including uncertainty;
+it never means zero. Existing TipT measurements were preserved. Cylinder radii
+are populated (0, .008, .016, .024, .030 m); enter the remaining measurements.
+
+Example cylinder entry (numbers below illustrate the format, not measurements):
+
+```yaml
+  cylinder_b:
+    fillet_radius: 0.008
+    mass: 0.364
+    com_obj: [0.000, 0.000, 0.080]  # x,y,z from bottom center, metres
+    source: "Scale and Onshape export, YYYY-MM-DD; describe print/inserts"
+    mesh: null             # optional: meshes/cylinder_b.gltf once exported
+    uncertainty:
+      mass: null           # optional 1-sigma, kg
+      com_obj: [null, null, null] # optional metadata; unused in fixed-GT paper scoring
+```
+
+**Frames:** each family declares its frame explicitly:
+
+- Cylinder: `bottom_center_x_along_push_z_up`. The origin is the cylinder axis
+  at table height, +x along the push, +z up. Enter Onshape CoM directly when its
+  frame matches this convention. For an axisymmetric mass distribution, enter
+  `com_obj: [0.0, 0.0, z]`; z is the actual CoM height, not necessarily half the height.
+- TipT: `near_outer_base_edge_x_along_push_z_up`. The near edge is the press-pull
+  edge; the far edge is `x=base_w`. Existing TipT coordinates are unchanged.
+
+Both files accept `[x,y,z]` in metres (and legacy `[x,z]`); planar analysis uses x,z. The adapter translates centered x into the
+near-envelope frame as `x_near = x_center + base_w/2`; z is unchanged. CAD exports
+must use the declared origin/axes; assigning a frame name does not transform the
+mesh or register an arbitrary CAD origin. `load_configuration()` preserves the
+authored coordinates.
+
+**Cylinder support:** the family defaults declare the shared outer diameter
+`base_w: 0.080` and `support_model: circular_base_fillet`. Each variant only needs
+its fillet radius, mass and CoM height. With bottom-center CoM coordinate x, the
+upright flat-support radius is `a = base_w/2 - fillet_radius`; horizontal distances
+to CoM are `d_press_pull = a + x` and `d_forward = a - x`. For symmetric x=0,
+the five variants give 40, 32, 24, 16 and 10 mm. The loader exposes the results
+as `initial_support_distances`, and the suite adapter uses the press-pull distance.
+An explicit `support_distances` entry can override a geometric distance if needed.
+These are initial support boundaries; migration during rolling is still a model
+validity issue. Fillet radii larger than half the outer diameter are rejected;
+zero support distance is retained as zero, not converted into a positive lever.
+
+**Meshes:** TipT variants share `meshes/tipT.gltf` because their exterior is the
+same. Their mass/CoM still differ. Cylinder exteriors differ, so CAD visualization
+or geometry-based evaluation should use the corresponding per-variant export:
+place it at e.g. `objects/cylinder/meshes/cylinder_b.gltf`, then set that variant's
+`mesh` field. Leave it null until then. Ground-truth entry and numerical scoring
+do not require a mesh. The legacy `cylinder.gltf` is not automatically assigned
+to any variant because its fillet identity has not been verified.
+
+```python
+from irb120_models import list_configurations, load_configuration, configuration_mesh
+list_configurations('cylinder')
+c = load_configuration('cylinder_b')
+c['mass'], c['com_obj'], c['uncertainty'], c['source']
+configuration_mesh('cylinder_b')  # absolute Path, or None
+```
+
+The existing `load_object('cylinder')` API and `object_models generate` still
+refer to the legacy family model; they do not generate per-variant URDFs. Use
+`load_configuration()` for experiment IDs. No variant URDF or synthetic mesh is
+required for this registry. Newly added meshes/YAMLs are installed by the existing
+package setup; rebuild the package before relying on installed share files.
+
+`scripts/analyze_property_suites.py` now reads these YAMLs by default through
+`irb120_models.experiment_gt`; rerun it after edits. Its `--references` argument
+remains an explicit optional override for comparison experiments. Figures/tables
+are generated outputs and must be regenerated after changing references.
+
+For the current paper, object GT and nominal CAD inputs are fixed references;
+GT uncertainty metadata is not propagated. The measurement-only collection plan
+is `runtime_logs/suite_analysis/UNCERTAINTY_COLLECTION.md` at workspace root.

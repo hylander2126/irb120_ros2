@@ -1,13 +1,22 @@
 # Authoritative experimental GT; SI units. Coordinates are NOT the mesh CAD frame.
-# com_obj: near-bottom edge origin, +x along push, +z up. Far edge x=base_w.
+# com_obj: [x,y,z], near-bottom edge origin, +x along push, +z up. Far edge x=base_w.
 # Three-slug provenance: weighed assembly; Onshape with measured printed-body
 # mass properties (2026-10-15). No CAD/rest-pose registration is asserted here.
+schema_version: 1
+defaults:
+  frame: near_outer_base_edge_x_along_push_z_up
+  mesh: meshes/tipT.gltf  # shared exterior; internal slug placements differ
+  source: "Weighed assembly; Onshape with measured printed-body mass properties (2026-10-15)."
+  uncertainty:  # optional metadata; excluded from the paper's fixed-GT scoring
+    mass: null
+    com_obj: [null, null, null]
+    base_w: null
 configurations:
-  tipT_a: {mass: 0.404, com_obj: [0.030, 0.08247], base_w: 0.060}
-  tipT_b: {mass: 0.404, com_obj: [0.030, 0.0994], base_w: 0.060}
-  tipT_c: {mass: 0.404, com_obj: [0.030, 0.1220], base_w: 0.060}
-  tipT_d: {mass: 0.404, com_obj: [0.0074, 0.1220], base_w: 0.060}
-  tipT_e: {mass: 0.404, com_obj: [0.0526, 0.1220], base_w: 0.060}
+  tipT_a: {mass: 0.404, com_obj: [0.030, 0.0, 0.08247], base_w: 0.060}
+  tipT_b: {mass: 0.404, com_obj: [0.030, 0.0, 0.0994], base_w: 0.060}
+  tipT_c: {mass: 0.404, com_obj: [0.030, 0.0, 0.1220], base_w: 0.060}
+  tipT_d: {mass: 0.404, com_obj: [0.0074, 0.0, 0.1220], base_w: 0.060}
+  tipT_e: {mass: 0.404, com_obj: [0.0526, 0.0, 0.1220], base_w: 0.060}
   # Temporary testing only; excluded from the default paper suite.
   # User measured mass, confirmed CoM (30, 0, 119.12) mm on 2026-10-16.
-  tipT_c_2slugs: {mass: 0.365, com_obj: [0.030, 0.11912], base_w: 0.060, temporary: true}
+  tipT_c_2slugs: {mass: 0.365, com_obj: [0.030, 0.0, 0.11912], base_w: 0.060, temporary: true, source: "User measured mass and confirmed CoM, 2026-10-16."}

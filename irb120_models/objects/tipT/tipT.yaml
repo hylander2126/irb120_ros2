@@ -1,3 +1,4 @@
+# Shared TipT exterior model. Variant ground truth lives in configurations.yaml.
 # Ground truth for the Tip T. This file is the source of truth for the object;
 # tipT.urdf and meshes/tipT.stl are generated from it. See irb120_models/README.md.
 name: tipT
