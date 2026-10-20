@@ -6,7 +6,7 @@ Two different things, kept apart:
              estimator INPUT for the paper's "planar CoM is supplied" assumption; 1-sigma
              d_sigma when recorded.
   d          distance from the actual flat-table SUPPORT (fillet-aware for cylinders).
-             Equal to d_env for sharp-edged objects. For rounded bases it needs the support
+             Equal to d_env for sharp-edged objects. For filleted bases it needs the support
              geometry, so it is a DIAGNOSTIC ceiling ("oracle"), never a paper input.
   mass, height  SCORING references, used only after estimation. None when unknown or
              sealed (everyday objects until the estimates are frozen).

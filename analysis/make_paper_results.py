@@ -21,7 +21,7 @@ x a CoM source:
     cloud    the cloud axis (joint only; axisymmetric assumption).
   diagnostics (never paper inputs)
     fixed_oracle  fixed pivot with the fillet-aware support distance from the object record;
-                  differs from fixed_supplied only for rounded bases (cylinders).
+                  differs from fixed_supplied only for filleted bases (cylinders B-E).
     fixed_supplied_vision  fixed pivot, camera tilt instead of proprioceptive (--vision).
 
 The identifiable first moments h_x = m*d and h_z = m*z are reported for the fixed methods.

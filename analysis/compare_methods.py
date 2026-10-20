@@ -1,19 +1,17 @@
-"""Compare every estimation method on all development data, to choose the headline method.
+"""Compare every estimation method on the tipT and cylinder suites, to choose the headline.
 
     python3 compare_methods.py [--out DIR] [--vision]
 
-Data (read-only):
-  ~/Documents/irb120_data/dev_2026-10/{tipT_suite, tipT_full_suite_old, tipT_c_debugging,
-                                       cylinder_suite, cylinder_a_pivot_test}
-  ~/Documents/github/press-pull-tipping/runtime_logs/{box,heart,flashlight,monitor}/arc_squash
-      the 40 published press-pull trials (no perception clouds, legacy pivot convention)
+Data (read-only): ~/Documents/irb120_data/dev_2026-10/{tipT_suite, cylinder_suite}, every
+episode. Nothing else (no repeats from debugging folders, no legacy trials).
 
-Methods are those of make_paper_results.py. Legacy trials have no clouds, so only the
-support models are compared there: fixed (logged pivot) and motion (support from ball motion),
-both with the supplied d. The height cap is set to 1 m since no cloud bound exists.
+Methods are those of make_paper_results.py, plus one candidate selection rule:
+  fillet_switch  joint_supplied when the joint fit detects a filleted base (its posterior
+                 R 95% interval excludes 0 by more than FILLET_MIN_MM), else fixed_supplied.
+                 GT-free: uses only the camera prior and the press-pull motion.
+The orchestrator's pivot-shape check (straight/curved footprint, seen from above) cannot
+serve here: it reports sharp cylinder A and filleted B-D alike as 'curved'.
 
-Repeat labels are mapped to the configuration they were run as (ALIASES, from the audits:
-c1-c3 and the arc runs are repeats of tipT_c; cylinder_a_pivot_test is cylinder_a).
 One endpoint per episode (the cascade's final stage), as the paper would report.
 """
 import argparse
@@ -26,28 +24,14 @@ import numpy as np
 
 import _paths
 import make_paper_results as mp
-import orange
-from irb120_control.estimation.estimate_params import GROUND_TRUTH, tiplog_from_press_pull
-from irb120_control.estimation.physical_bounds import bounded_gravity_fit
-from irb120_control.estimation.tip_core import TILT_DEADBAND, pivot_wrench, tilt_noslip
 
-SETS = ('tipT_suite', 'tipT_full_suite_old', 'tipT_c_debugging', 'cylinder_suite', 'cylinder_a_pivot_test')
-ALIASES = {'tipT_c1': 'tipT_c', 'tipT_c2': 'tipT_c', 'tipT_c3': 'tipT_c', 'tipT_c_arc': 'tipT_c',
-           'tipT_c_arc_2': 'tipT_c', 'tipT_c_arc_3': 'tipT_c', 'cylinder_a_pivot_test': 'cylinder_a'}
-LEGACY = Path.home() / 'Documents/github/press-pull-tipping/runtime_logs'
-LEGACY_OBJECTS = ('box', 'heart', 'flashlight', 'monitor')
-# Published Table 2 (relative pivot mode, 10 trials each), for context only.
-PUBLISHED_MASS_KG = dict(box=0.7069, heart=0.242, flashlight=0.396, monitor=5.274)
-LEGACY_CAP_M = 1.0
-
-
+SETS = ('tipT_suite', 'cylinder_suite')
+FILLET_MIN_MM = 1.0
 def family(row):
     obj = row['object']
     if obj.startswith('tipT'):
         return 'tipT forward' if row['kind'] != 'press_pull_tip' else 'tipT press-pull'
-    if obj.startswith('cylinder'):
-        return 'cylinder press-pull'
-    return f'legacy {obj} press-pull'
+    return 'cylinder press-pull'
 
 
 def seed_vision_cache(cache):
@@ -68,49 +52,13 @@ def seed_vision_cache(cache):
     return sum(v is not None for v in seen.values())
 
 
-def legacy_fixed(log, d):
-    """fit_first_moments' core with the logged pivot, without the cloud height bound."""
-    track = tilt_noslip(log, log.pivot)
-    phi = track.rotvec @ log.tilt_dir
-    tau = pivot_wrench(log, np.zeros_like(log.p_ball), log.pivot)[:, :3] @ log.tilt_dir
-    mask = track.valid & log.contact & np.isfinite(phi) & np.isfinite(tau) & (phi > TILT_DEADBAND)
-    fits = []
-    for b in ('tip', 'return'):
-        sel = mask & (log.branch == b)
-        if sel.sum() >= 10:
-            fits.append(bounded_gravity_fit(phi[sel], tau[sel], d, 0., LEGACY_CAP_M))
-    if not fits:
-        raise ValueError('no branch with enough rocking samples')
-    return dict(m=float(np.mean([f[0] for f in fits])), zc=float(np.mean([f[1] for f in fits])),
-                flags=';'.join(sorted({a for f in fits for a in f[2]})))
-
-
-def legacy_rows():
-    rows = []
-    for obj in LEGACY_OBJECTS:
-        gt = GROUND_TRUTH[obj]; d = float(gt['com'][0])
-        for f in sorted((LEGACY / obj / 'arc_squash').glob('arc_static*_2*.npz')):   # not most_recent.npz (a copy)
-            row = dict(object=obj, recorded_label=obj, episode=f.stem, stage='arc_squash', kind='press_pull_tip',
-                       set='published_2026-08', tier=1, results={})
-            try:
-                log = tiplog_from_press_pull(str(f))
-            except Exception as exc:
-                row['status'] = f'log unreadable: {exc}'
-                continue                                   # empty/aborted logs are not trials
-            for name, fn in (('fixed_supplied', lambda: legacy_fixed(log, d)),
-                             ('motion_supplied', lambda: (lambda o: dict(m=o['mass_kg'], zc=o['height_m'], split=o['branch_mass_split']))(
-                                 orange.estimate(log, float(log.pivot[0] + d), height_cap=LEGACY_CAP_M)))):
-                try:
-                    row['results'][name] = fn()
-                except Exception as exc:
-                    row['results'][name] = dict(error=f'{type(exc).__name__}: {exc}')
-            for q in row['results'].values():
-                if q.get('m') is not None:
-                    q['mass_error_pct'] = 100 * (q['m'] / gt['mass'] - 1)
-                    q['height_error_pct'] = 100 * (q['zc'] / gt['com'][2] - 1)
-            row['status'] = 'processed'
-            rows.append(row)
-    return rows
+def fillet_switch(row):
+    """The candidate rule; returns (method chosen, its result) for an endpoint."""
+    res = row.get('results') or {}
+    joint = res.get('joint_supplied') or {}
+    if row['kind'] == 'press_pull_tip' and joint.get('R95_mm') and joint['R95_mm'][0] > FILLET_MIN_MM:
+        return 'joint_supplied', joint
+    return 'fixed_supplied', res.get('fixed_supplied') or {}
 
 
 def stats(values):
@@ -125,7 +73,7 @@ def aggregate(endpoints):
     table = {}
     for fam in sorted({family(r) for r in endpoints}):
         rows = [r for r in endpoints if family(r) == fam]
-        for method in mp.METHODS:
+        for method in (*mp.METHODS, 'fillet_switch'):
             qs = [(r.get('results') or {}).get(method) or {} for r in rows]
             if not any(q for q in qs):
                 continue
@@ -147,17 +95,18 @@ def report(table, endpoints, out, n_vision):
         lines.append(f"| {fam} | {method} | {q['estimated']}/{q['trials']} | {fmt(q['mass'], 'median_abs')} | "
                      f"{fmt(q['mass'], 'rms')} | {fmt(q['mass'], 'max_abs')} | "
                      f"{'—' if q['mass'] is None else q['mass']['within_10']} | {fmt(q['height'], 'median_abs')} | {fmt(q['height'], 'rms')} |")
-    per_object = mp.summary_table(endpoints)
+    per_object = mp.summary_table(endpoints, (*mp.METHODS, 'fillet_switch'))
+    switch = '\n'.join(f"| {r['object']} | {r['episode']} | {r['fillet_switch_choice']} |" for r in endpoints)
     (out / 'COMPARISON_TABLES.md').write_text(
-        '# Method comparison tables (development data)\n\nGenerated by `analysis/compare_methods.py`. '
+        '# Method comparison tables (tipT and cylinder suites)\n\nGenerated by `analysis/compare_methods.py`. '
         f'Camera tracks reused from the archive: {n_vision}.\n\n## By geometry family\n\n' + '\n'.join(lines) +
-        '\n\n## Per object (endpoints)\n\n' + per_object + '\n\nPublished Table 2 masses (relative pivot): ' +
-        ', '.join(f'{k} {v * 1000:.1f} g' for k, v in PUBLISHED_MASS_KG.items()) + '\n')
+        '\n\n## Per object (endpoints)\n\n' + per_object +
+        '\n\n## fillet_switch choices\n\n| Object | Episode | Chosen |\n|---|---|---|\n' + switch + '\n')
 
 
 def figure(endpoints, out):
     fams = sorted({family(r) for r in endpoints})
-    methods = [m for m in mp.METHODS if any(((r.get('results') or {}).get(m) or {}).get('mass_error_pct') is not None for r in endpoints)]
+    methods = [m for m in (*mp.METHODS, 'fillet_switch') if any(((r.get('results') or {}).get(m) or {}).get('mass_error_pct') is not None for r in endpoints)]
     fig, axes = mp.plt.subplots(2, 1, figsize=(15, 9), sharex=True, layout='constrained')
     for ax, key, label in zip(axes, ('mass_error_pct', 'height_error_pct'), ('Mass error (%)', 'CoM height error (%)')):
         for j, method in enumerate(methods):
@@ -180,6 +129,9 @@ def main():
     p.add_argument('--vision', action='store_true')
     a = p.parse_args()
     out = a.out.expanduser(); out.mkdir(parents=True, exist_ok=True)
+    for old in out.iterdir():                     # overwrite: one comparison, no stale files
+        if old.is_file():
+            old.unlink()
     vision_dir, n_vision = None, 0
     if a.vision:
         vision_dir = out / 'vision_cache'; vision_dir.mkdir(exist_ok=True)
@@ -190,14 +142,14 @@ def main():
     rows, endpoints, failures = [], [], []
     for ep_file in episodes:
         label = json.loads(ep_file.read_text())['object']
-        ep_rows, endpoint, fails = mp.process_episode(ep_file, root, sig_reg, vision_dir, label=ALIASES.get(label, label))
+        ep_rows, endpoint, fails = mp.process_episode(ep_file, root, sig_reg, vision_dir)
         rows += ep_rows; failures += fails
         if endpoint:
+            choice, result = fillet_switch(endpoint)
+            endpoint['results']['fillet_switch'] = dict(result, chosen=choice)
+            endpoint['fillet_switch_choice'] = choice
             endpoints.append(endpoint)
         print(f'{label:<24} {ep_file.parent.name:<22} {len(ep_rows)} stage(s)', flush=True)
-    legacy = legacy_rows()
-    rows += legacy; endpoints += legacy
-    print(f'legacy trials: {len(legacy)}', flush=True)
     mp.write_tables(rows, out)
     table = aggregate(endpoints)
     (out / 'comparison.json').write_text(json.dumps({f'{k[0]} | {k[1]}': v for k, v in table.items()}, indent=1) + '\n')

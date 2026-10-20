@@ -238,7 +238,7 @@ its episode label. The file's header comment is the procedure; the essentials:
 
   `support_closure()` returns press_pull + forward − base_w, a direct check on the measurement. Record the 1-sigma in `uncertainty.support_distances`.
 - **Mass may stay `null`** (sealed until the estimates are frozen); `com_obj` z stays `null` (estimated).
-- **These are outer-edge distances.** For a sharp-edged base that is the pivot. For a rounded base the actual support on a flat table is inset; the analysis treats that inset as something to estimate, not something supplied.
+- **These are outer-edge distances.** For a sharp-edged base that is the pivot. For a filleted base the actual support on a flat table is inset; the analysis treats that inset as something to estimate, not something supplied.
 
 ```python
 from irb120_models.configurations import load_configuration, support_closure

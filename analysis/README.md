@@ -33,7 +33,7 @@ Each method is a support model × a CoM source; the full definitions are in the
 | motion_hull | recovered from ball motion | hull centroid | press-pull |
 | joint_supplied | cloud prior + motion posterior, with band and gates | supplied, from the scene-profile wall | press-pull + scene cloud |
 | joint_cloud | same | cloud axis (axisymmetric) | press-pull + scene cloud |
-| fixed_oracle | pivot with the fillet-aware support distance | diagnostic only (uses support GT) | rounded bases |
+| fixed_oracle | pivot with the fillet-aware support distance | diagnostic only (uses support GT) | filleted bases |
 | fixed_supplied_vision | as fixed_supplied, camera tilt | diagnostic | `--vision` |
 
 `compare_methods.py` runs all of them on the development data and the published 40 trials.
