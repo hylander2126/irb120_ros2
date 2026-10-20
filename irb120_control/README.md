@@ -93,7 +93,7 @@ summary, `episode.json` (git commit, camera extrinsics, each stage's
 status/results/files, notes, outcome):
 
 ```
-runtime_logs/<object>/episodes/<YYYYmmdd_HHMMSS>/
+<log root: runtime_logs/ or the official raw/ folder>/<object>/episodes/<YYYYmmdd_HHMMSS>/
   episode.json
   00_perceive/        cloud (DBSCAN -> SAM cull), contacts.json, per-camera color/depth/overlay PNGs, short bag
   01_push/            F/T + pose .npz, metadata .json, cam1/2/3 videos
@@ -130,6 +130,39 @@ ros2 run irb120_control episode note "object slid ~5 mm sideways during push"
 ros2 run irb120_control episode outcome success --reason "tipped past theta* and settled back"
 ros2 run irb120_control episode show
 ```
+
+### Official data (`--official`)
+
+`run_pipeline <object> --official` records into the official data folder instead of
+`runtime_logs/`. Default `~/Documents/irb120_data/official_v1/raw`; override with
+`--data-root` or `$IRB120_OFFICIAL_ROOT`.
+
+It refuses to start unless:
+- the irb120_ros2 checkout is clean;
+- the data folder has `PROTOCOL.md` and `MANIFEST.json`;
+- `config/ft_calibration.json` exists.
+
+Every episode.json gets an `official` block with the git tag and the sha256 of the protocol,
+manifest, F/T calibration and `cam_tf_*` extrinsic launch files (`util/official_run.py`). The
+motion steps inherit the location through `$IRB120_LOG_ROOT` (`runtime_log_dir.log_root()`),
+which also works on its own for scratch runs elsewhere.
+
+After the first snapshot of every episode (official or not), a camera agreement check compares
+each camera's table plane height at the object (`util/registration_check.py`). It records the
+result as an episode event. In an official episode a failure (spread above 1.5 mm) asks the
+operator whether to continue; with `--auto` it aborts before any motion. To check saved
+snapshots offline:
+
+```bash
+python3 -m irb120_control.util.registration_check <perceive folder> [...]
+```
+
+Recorded videos now have a per-frame timestamp sidecar, `<video>.frames.csv`
+(`util/video_stamps.py`). `tilt_vision` uses it instead of the filename time and nominal frame
+rate when it is present.
+
+Offline results for a whole data folder: `irb120_ros2/analysis/make_paper_results.py`
+(see `analysis/README.md`).
 
 ### Step order: tip first, then push
 

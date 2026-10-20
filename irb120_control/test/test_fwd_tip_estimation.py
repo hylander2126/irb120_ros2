@@ -94,6 +94,12 @@ def _synthetic_episode(tmp_path, m=0.38, cx=0.030, cz=0.110, slide=0.010, mu_f=0
 
     ep = tmp_path / "episodes" / "20260101_000000" / "01_forward_tip"
     ep.mkdir(parents=True)
+    # Pre-action cloud for the physical height bound (base_link z; table at world z = 0).
+    perceive = ep.parent / "00_perceive"
+    perceive.mkdir()
+    top = 2 * cz + 0.02
+    np.savez(perceive / "object_cloud.npz",
+             xyz=np.array([[pivot0[0], 0.0, -0.021], [pivot0[0], 0.0, top - 0.021]]))
     ts = "20260101_000100"
     quat = np.tile([0.0, 0.0, 0.0, 1.0], (n, 1))
     np.savez(ep / f"fwd_tip_{ts}.npz",

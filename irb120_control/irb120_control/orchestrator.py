@@ -42,6 +42,7 @@ Usage:
     ros2 run irb120_control run_pipeline heart_a --trials 10 --force-ref 7
     ros2 run irb120_control run_pipeline heart_a --order push-tip --auto
     ros2 run irb120_control run_pipeline monitor --tip forward
+    ros2 run irb120_control run_pipeline heart_a --trials 5 --official
 """
 
 import argparse
@@ -56,6 +57,8 @@ import rclpy
 
 from irb120_control.push import PUSH_DISTANCE, PUSH_STANDOFF
 from irb120_control.util.episode import OUTCOMES, Episode
+from irb120_control.util.official_run import OfficialRunError, prepare as prepare_official
+from irb120_control.util.registration_check import check_folder as check_registration, describe as describe_registration
 from irb120_control.util.perception_snapshot import latest_object_cloud, take_snapshot
 from irb120_control.util.push_geometry import push_approach, horizontal_push_direction
 from irb120_control.util.tip_cascade import (
@@ -255,10 +258,15 @@ def run_step(episode: Episode, kind: str, command: list) -> tuple:
 
 
 def run_episode(node, args, note: str) -> Episode:
-    episode = Episode.create(args.object, node, note, allow_unconfigured_object=True)
+    extra = {"official": args.official_info} if args.official_info else {}
+    episode = Episode.create(args.object, node, note, allow_unconfigured_object=True, extra=extra)
     episode.add_event(f"pipeline: order {args.order}, force_ref {args.force_ref} N, "
-                      f"{'auto' if args.auto else 'step'} mode")
+                      f"{'auto' if args.auto else 'step'} mode"
+                      + (", OFFICIAL" if args.official_info else ""))
     take_snapshot(node, episode, label="initial")
+    if not registration_ok(episode, args):
+        episode.set_outcome("aborted", "camera agreement check failed before any motion")
+        return episode
 
     slides = []  # forward tips that slid the object: each is a slide interaction already
     for phase in args.order.split("-"):
@@ -273,6 +281,22 @@ def run_episode(node, args, note: str) -> Episode:
         result = input(f"\nOutcome? {'/'.join(OUTCOMES)}: ").strip().lower()
     episode.set_outcome(result, input("Reason / note (Enter to skip): ").strip())
     return episode
+
+
+def registration_ok(episode: Episode, args) -> bool:
+    """Camera agreement on the initial snapshot (util/registration_check.py). Recorded in
+    episode.json. A failure only stops an official episode, and only if the operator says so."""
+    stage = _latest_perceive(episode)
+    if stage is None:
+        return True
+    result = check_registration(episode.path / stage["dir"])
+    episode.add_event(describe_registration(result))
+    print(f"\n[pipeline] {describe_registration(result)}")
+    if result["status"] != "fail" or not args.official_info:
+        return True
+    if args.auto:
+        return False
+    return input("[pipeline] Cameras disagree. Continue this official episode anyway? [y/N] ").strip().lower() == "y"
 
 
 def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
@@ -402,7 +426,21 @@ def main(args=None) -> int:
                         help="don't wait between steps; stop the episode at the first failed step")
     parser.add_argument("--no-images", dest="open_images", action="store_false",
                         help="don't open each snapshot's final_selection image")
+    parser.add_argument("--official", action="store_true",
+                        help="record official data: requires a clean commit, PROTOCOL.md and MANIFEST.json "
+                             "in the data root; episodes go to <data root>/raw (util/official_run.py)")
+    parser.add_argument("--data-root", default=None,
+                        help="official data root (default $IRB120_OFFICIAL_ROOT or ~/Documents/irb120_data/official_v1)")
     parsed = parser.parse_args(raw_args[:ros_args_index])
+    parsed.official_info = None
+    if parsed.official:
+        try:
+            parsed.official_info = prepare_official(parsed.data_root)
+        except OfficialRunError as exc:
+            print(f"[pipeline] {exc}")
+            return 1
+        print(f"[pipeline] OFFICIAL run -> {parsed.official_info['data_root']}/raw "
+              f"(tag {parsed.official_info['git_tag'] or 'none'})")
 
     rclpy.init(args=raw_args[ros_args_index:])
     node = rclpy.create_node("run_pipeline")  # camera extrinsics into each episode, and the snapshots

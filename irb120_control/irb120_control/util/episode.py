@@ -1,6 +1,6 @@
 """Episodes: one folder + one summary file per pipeline run on one object.
 
-  runtime_logs/<object>/episodes/<YYYYmmdd_HHMMSS>/
+  <log root>/<object>/episodes/<YYYYmmdd_HHMMSS>/     (log root: runtime_log_dir.log_root())
     episode.json         # summary: git commit, camera extrinsics, stages, events, notes, outcome
     00_perceive/         # perception_snapshot.take_snapshot()
     01_push/             # push.py: F/T + pose .npz, metadata .json, videos
@@ -26,7 +26,7 @@ import socket
 from datetime import datetime
 from pathlib import Path
 
-from irb120_control.util.runtime_log_dir import git_commit_info, load_object_params, resolve_workspace_root
+from irb120_control.util.runtime_log_dir import git_commit_info, load_object_params, log_root
 
 OUTCOMES = ("success", "partial", "failure", "aborted")
 CAMERA_LINKS = ("realsense_link", "realsense2_link", "realsense3_link")
@@ -44,7 +44,7 @@ def _now() -> str:
 
 
 def _episodes_dir(object_name: str = "*") -> Path:
-    return resolve_workspace_root() / "runtime_logs" / object_name / "episodes"
+    return log_root() / object_name / "episodes"
 
 
 class Stage:
@@ -62,7 +62,7 @@ class Episode:
 
     @classmethod
     def create(cls, object_name: str, node=None, note: str = "",
-               allow_unconfigured_object: bool = False) -> "Episode":
+               allow_unconfigured_object: bool = False, extra: dict | None = None) -> "Episode":
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", object_name):
             raise ValueError("Object name must contain only letters, numbers, '_' or '-', "
                              "and must start with a letter or number")
@@ -94,6 +94,7 @@ class Episode:
             "object_params": object_params,
             "object_params_configured": object_params_configured,
             "camera_extrinsics_in_base_link": calibration,
+            **(extra or {}),
             "notes": [{"time": _now(), "text": note}] if note else [],
             "events": [],
             "stages": [],

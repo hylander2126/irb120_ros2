@@ -1,6 +1,6 @@
 """Adaptive tipping: after each tip attempt, why it failed decides what to try next.
 
-Design notes: runtime_logs/ADAPTIVE_PRESS_IDEAS.md. The first attempt is choose_tip's.
+Design notes: notes/ADAPTIVE_PRESS_IDEAS.md (workspace). The first attempt is choose_tip's.
 After each attempt classify() names the outcome, and next_attempt() picks the next
 attempt on the snapshot taken after it:
 

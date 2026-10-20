@@ -18,10 +18,11 @@ against the same pixels in a reference frame recorded before contact: a 2-parame
 Gauss-Newton with Huber IRLS weights, coarse-to-fine, warm-started from the previous
 frame. Pixels covered by the finger (ball + rod, known from the log) are masked out.
 
-Timing. The recorder names the video after its first frame (1 s resolution) and writes
-every camera frame at a nominal 30 fps. That coarse sync is refined by tracking the finger
-ball in the same video and solving for the time offset that best matches its logged
-3D trajectory projected into the image.
+Timing. Newer recordings have a per-frame stamp sidecar (util/video_stamps.py); those
+stamps are used directly and the ball track below only reports a residual offset. Older
+videos have only the filename (1 s resolution) and a nominal 30 fps; that coarse sync is
+refined by tracking the finger ball in the same video and solving for the time offset
+that best matches its logged 3D trajectory projected into the image.
 
 Output: a tip_core.TiltTrack on the log's time grid, with phi, the slide, a 1-sigma tilt
 that includes the static noise floor, and validity (residual and coverage gates).
@@ -37,6 +38,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from irb120_control.estimation.tip_core import TiltTrack, TipLog
+from irb120_control.util.video_stamps import load_frame_stamps
 
 BASE_LINK_IN_WORLD = np.array([0.0, 0.0, 0.021])   # irb120_with_finger.xacro world -> base_link
 NOMINAL_FPS = 30.0
@@ -190,9 +192,12 @@ def _finger_mask_fn(cam, shape):
 # ==========================================================================================
 #  TIME SYNC (finger ball)
 # ==========================================================================================
-def refine_sync(log: TipLog, a, cam: _Camera, t_start: float, n_frames: int, patch_r=None) -> dict:
-    """Time offset of the video against the log, from the finger ball's image track."""
-    tf = t_start + np.arange(n_frames) / NOMINAL_FPS
+def refine_sync(log: TipLog, a, cam: _Camera, t_start: float, n_frames: int, patch_r=None,
+                frame_times=None) -> dict:
+    """Time offset of the video against the log, from the finger ball's image track.
+    frame_times: per-frame stamps when the video has a sidecar; then the offset found is
+    a residual check (expected ~0), not the sync itself."""
+    tf = t_start + np.arange(n_frames) / NOMINAL_FPS if frame_times is None else np.asarray(frame_times)
     p_b = log.p_ball - BASE_LINK_IN_WORLD
     t_log = log.t_epoch
     in_log = (tf > t_log[0] + SYNC_SEARCH_S) & (tf < t_log[-1] - SYNC_SEARCH_S)
@@ -381,14 +386,23 @@ def _fit_video(log, a, verbose):
     U, V, X = object_pixels(a, cam)
     if len(X) < 200:
         raise ValueError(f"only {len(X)} object pixels in {a['camera']}")
-    t_start = video_start_epoch(a["video"])
     cap = cv2.VideoCapture(a["video"])
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
-    sync = refine_sync(log, a, cam, t_start, n_frames)
-    if not sync["ok"]:
-        sync["offset_s"] = 0.0
-    tf = t_start + sync["offset_s"] + np.arange(n_frames) / NOMINAL_FPS
+    stamps = load_frame_stamps(a["video"])
+    if stamps is not None and len(stamps[1]) >= n_frames:
+        # Recorded per-frame stamps: use them directly; the ball track only checks them.
+        frame_times = stamps[1][:n_frames]
+        sync = refine_sync(log, a, cam, frame_times[0], n_frames, frame_times=frame_times)
+        sync.update(source="frame_stamps", residual_offset_s=sync["offset_s"], offset_s=0.0)
+        tf = frame_times
+    else:
+        t_start = video_start_epoch(a["video"])
+        sync = refine_sync(log, a, cam, t_start, n_frames)
+        if not sync["ok"]:
+            sync["offset_s"] = 0.0
+        sync["source"] = "filename_and_ball_track"
+        tf = t_start + sync["offset_s"] + np.arange(n_frames) / NOMINAL_FPS
     if verbose:
         print(f"    vision {a['camera']}: {len(X)} object px, sync {sync['offset_s']:+.2f} s "
               f"({'ball track' if sync['ok'] else 'filename only: ' + sync['why']})")

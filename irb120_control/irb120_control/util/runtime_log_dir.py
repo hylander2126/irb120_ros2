@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -77,9 +78,19 @@ def resolve_workspace_root() -> Path:
     return file_path.parents[0]
 
 
+# Where episodes and stage logs go. Unset: <workspace>/runtime_logs (development runs).
+# run_pipeline --official sets it to the official data folder; child processes inherit it.
+LOG_ROOT_ENV = "IRB120_LOG_ROOT"
+
+
+def log_root() -> Path:
+    env = os.environ.get(LOG_ROOT_ENV)
+    return Path(env).expanduser() if env else resolve_workspace_root() / "runtime_logs"
+
+
 def runtime_log_dir(subdir: str) -> Path:
-    """Return workspace_root/runtime_logs/<subdir>, creating it if needed."""
-    path = resolve_workspace_root() / "runtime_logs" / subdir
+    """Return log_root()/<subdir> (absolute subdirs are used as given), creating it if needed."""
+    path = log_root() / subdir
     path.mkdir(parents=True, exist_ok=True)
     return path
 
