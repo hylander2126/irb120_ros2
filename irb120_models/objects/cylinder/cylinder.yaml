@@ -6,7 +6,7 @@ name: cylinder
 label: Cylinder
 status: provisional
 body_frame: cad
-mesh: meshes/cylinder.gltf  # Onshape export, metres
+mesh: meshes/cylinder_a.gltf  # default: the sharp-edged sweep variant (cylinder.gltf was removed); metres
 rest_pose:                   # CAD frame -> table frame as it sits in the experiments
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]

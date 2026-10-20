@@ -10,6 +10,10 @@ from irb120_models import list_objects, load_object
 from irb120_models.configurations import list_configurations, load_configuration
 from irb120_models.experiment_gt import forward_tip_ground_truth
 
+# Family records whose ground truth is a documented placeholder (cylinder.yaml notes); sweep
+# variants have their own configurations. Never score against these.
+PLACEHOLDER_RECORDS = {'cylinder', 'tipT'}
+
 
 def lookup(label: str) -> dict | None:
     """Reference in the estimator's convention, or None (tier 2).
@@ -30,7 +34,7 @@ def lookup(label: str) -> dict | None:
             ref['com_obj'] = np.array([d, 0., z]); ref['com'] = ref['com_obj'].copy()
         return ref
     base = label if label in list_objects() else label.split('_')[0]
-    if base in list_objects():
+    if base in list_objects() and base not in PLACEHOLDER_RECORDS:
         try:
             gt = load_object(base).ground_truth()
         except ValueError:          # broken object record (e.g. a missing mesh): no reference

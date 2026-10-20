@@ -73,8 +73,9 @@ def test_gltf_to_stl_round_trip(tmp_path):
     assert again.shape == tri.shape
     assert np.abs(again - tri).max() < 1e-6
     lo, hi = mesh_tools.mass_properties(tri)['bounds']
-    assert lo == pytest.approx([-0.03, -0.03, 0.0], abs=1e-4)
-    assert hi == pytest.approx([0.03, 0.03, 0.1], abs=1e-4)
+    # cylinder's default mesh is cylinder_a: 80 mm diameter (tessellated), 150 mm tall.
+    assert lo == pytest.approx([-0.04, -0.04, 0.0], abs=1e-4)
+    assert hi == pytest.approx([0.04, 0.04, 0.15], abs=1e-4)
 
 
 def test_ground_truth_from_body_frame_com(tmp_path):

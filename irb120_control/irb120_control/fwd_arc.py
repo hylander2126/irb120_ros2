@@ -90,6 +90,7 @@ class ForwardArc(ForwardTip):
             return
         try:
             pose = self._transform(EE_LINK)
+            pose_tf_stamp = self._last_tf_stamp   # this lookup's stamp, before others overwrite it
         except (TransformException, ValueError):
             if late:  # TF is queued behind the freeze too; a real dropout fails the next tick
                 self._hold_after_stall('pose missing or stale')
@@ -134,7 +135,8 @@ class ForwardArc(ForwardTip):
         velocity = self._world_from_servo.T @ (speed * tangent + correction)
         if not self._servo_cmd.publish_twist(*velocity, state=self.motion.state):
             self._stop('servo_subscriber_lost')
-        self._pose_log.append([self._now_s(), *pose])
+        # Columns as arc_static: ..., arc angle, wrist pitch, state id (0 = none), TF stamp.
+        self._pose_log.append([self._now_s(), *pose, np.nan, np.nan, 0, pose_tf_stamp])
         self._motion_log.append(dict(time_s=self._now_s(), state=self.motion.state,
             progress_m=progress, arc_angle_rad=arc_angle, pivot_torque_nm=torque,
             peak_pivot_torque_nm=self.motion.peak_signal, axial_force_n=axial, peak_force_n=self.motion.peak_force,
