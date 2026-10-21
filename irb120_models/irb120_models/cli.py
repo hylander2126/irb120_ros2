@@ -5,6 +5,8 @@ Create, regenerate and inspect object models (``ros2 run irb120_models object_mo
     generate [NAME ...]                  rewrite the URDF and STL from the YAML + mesh
     check [NAME ...]                     exit 1 if any generated file is stale
     show [NAME ...]                      ground truth, plus what the mesh alone implies
+    frame SNAPSHOT [--name NAME] ...     view the experiment frame and CoM on a perceived
+                                         snapshot; move them by hand (frame_view.py)
 
 ``show`` is the sanity check for hand-measured values: it prints the uniform-density
 centroid and the com_x / theta* that centroid would give, next to the measured ones.
@@ -228,9 +230,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument('name')
     p.add_argument('--mesh', type=Path, required=True)
     p.add_argument('--label')
+    p = sub.add_parser('frame', help='check an experiment frame and CoM against a perceived snapshot')
+    p.add_argument('snapshot', type=Path, help='perceive folder, or an episode folder (first perceive)')
+    p.add_argument('--name', help='configuration name (default: the episode object label)')
+    p.add_argument('--com', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                   help='CoM in the frame, mm, overriding the record (nan = unknown)')
+    p.add_argument('--origin', choices=('press', 'cloud'), default='press',
+                   help='origin x: the press-pull pivot the robot used, or the cloud footprint near extreme')
+    p.add_argument('--shift', type=float, nargs=3, default=(0., 0., 0.), metavar=('DX', 'DY', 'DZ'),
+                   help='move the frame from its automatic placement, mm in frame axes')
+    p.add_argument('--yaw', type=float, default=0., help='turn the frame about z, deg')
+    p.add_argument('--base-w', type=float, help='footprint length along the push, mm (default: the record)')
+    p.add_argument('--mesh', type=Path, help='.stl/.gltf to overlay (default: the record mesh)')
+    p.add_argument('--mesh-pose', type=float, nargs=6, default=(0.,) * 6,
+                   metavar=('X', 'Y', 'Z', 'R', 'P', 'YAW'), help='mesh in the frame: mm and deg (rpy)')
+    p.add_argument('--png', type=Path, help='write a side + top view here instead of opening a window')
     args = parser.parse_args(argv)
     if args.command == 'new':
         return cmd_new(args.name, args.mesh, args.label)
+    if args.command == 'frame':
+        from irb120_models import frame_view
+        frame_view.show(frame_view.build_state(args.snapshot, args.name, args.com, args.shift, args.yaw,
+                                               args.mesh, args.mesh_pose, args.origin, args.base_w), args.png)
+        return 0
     names = args.names or list_objects()
     return {'generate': cmd_generate, 'check': cmd_check, 'show': cmd_show}[args.command](names)
 
