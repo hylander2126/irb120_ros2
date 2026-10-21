@@ -15,7 +15,10 @@ snapshot and takes the next one after returning home.
 Before every motion step it prints the snapshot that step will use (contacts,
 pivot, approach targets) and opens its final_selection image, then waits:
 Enter runs the step, 'r' re-perceives (e.g. after nudging the object), 'q'
-stops the episode. --auto skips these waits and stops at the first failed step.
+stops the episode; before a tip, 'n' cycles through the tip options (tip_options:
+the cascade's pick, the other tip, the press backups), opening each one's image;
+running one that is not the cascade's pick asks why, logged as an event.
+--auto skips these waits and stops at the first failed step.
 
 A step stopped by a sensor fault (stale F/T or pose; SENSOR_FAULTS) is not
 treated as an object failure: the tip cascade runs it again, and a push ends the
@@ -30,8 +33,8 @@ straight edge, press-pull first when it is curved (a point contact) or unknown;
 press-pull starts on its conservative contact (directly above the pivot). If that
 fails, the tip cascade (util/tip_cascade.py) picks the next attempt from why it
 failed -- riskier press contacts, more press force, the other tip -- each on the
-snapshot taken after the one before, up to MAX_ATTEMPTS. Only the first attempt
-waits at the gate in step mode. --tip press|forward keeps the cascade to that tip.
+snapshot taken after the one before, up to MAX_ATTEMPTS. Every attempt waits at
+the gate in step mode. --tip press|forward keeps the cascade to that tip.
 A forward tip that slid the object instead of tipping it (its slide probe, or a
 full-travel push that shifted the upright object) is the episode's slide
 interaction: press-pull follows, and the push phase is skipped (--auto) or
@@ -55,15 +58,15 @@ import sys
 import numpy as np
 import rclpy
 
-from irb120_control.push import PUSH_DISTANCE, PUSH_STANDOFF
+from irb120_control.push import PUSH_CONTACT_MARGIN, PUSH_DISTANCE, PUSH_STANDOFF
 from irb120_control.util.episode import OUTCOMES, Episode
 from irb120_control.util.official_run import OfficialRunError, prepare as prepare_official
 from irb120_control.util.registration_check import check_folder as check_registration, describe as describe_registration
 from irb120_control.util.perception_snapshot import latest_object_cloud, take_snapshot
 from irb120_control.util.push_geometry import push_approach, horizontal_push_direction
 from irb120_control.util.tip_cascade import (
-    MAX_ATTEMPTS, PRESS, SENSOR_FAULTS, classify, describe, first_attempt, next_attempt,
-    object_change, press_contact,
+    FORWARD, MAX_ATTEMPTS, PRESS, SENSOR_FAULTS, attempt, classify, describe, first_attempt,
+    next_attempt, object_change, press_contact,
 )
 from irb120_control.util.tip_choice import TIP_MODES, forward_pivot_shape
 from irb120_perception.press_targets import PRESS_STANDOFF
@@ -112,7 +115,8 @@ def step_command(kind: str, args, plan: dict | None = None) -> list:
     """The motion script for a step; `plan` (a tip_cascade attempt) for the tips."""
     if kind == "press_pull_tip":
         return ["arc_static", args.object, "--force-ref", f"{plan['force_ref']:.3f}",
-                "--press-candidate", str(plan["press_candidate"]), "--quality", args.quality]
+                "--press-candidate", str(plan["press_candidate"]), "--quality", args.quality,
+                *(["--press-backup", str(plan["press_backup"])] if plan.get("press_backup") else [])]
     if kind == "forward_tip":   # the arc version: it rubs the face far less than fwd_tip's straight push
         return ["fwd_arc", args.object, "--quality", args.quality]
     if kind == "push":
@@ -168,6 +172,10 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
             print(f"               riskier #{alternative['rank']}: contact {_mm(alternative['point'])}"
                   f"   +{1000 * alternative['torque_gain']:.1f} mm torque/pull"
                   f"   {1000 * alternative['lateral_offset_m']:+.0f} mm sideways")
+        for backup in contacts.get("press_backups") or []:
+            print(f"               backup B{backup['rank']}: contact {_mm(backup['point'])}"
+                  f"   {1000 * backup['along_edge_offset']:+.0f} mm from pivot center"
+                  f"   vs chosen {1000 * press.get('along_edge_offset', float('nan')):+.0f} mm")
     else:
         print(f"  press        NONE: {press.get('reason')}")
 
@@ -190,7 +198,8 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
         try:
             cloud = np.load(folder / "object_cloud.npz")["xyz"]
             direction = horizontal_push_direction(push["normal"])
-            pre, travel = push_approach(push["ball_center"], cloud, PUSH_STANDOFF, PUSH_DISTANCE, direction)
+            pre, travel = push_approach(push["ball_center"], cloud, PUSH_STANDOFF,
+                                         PUSH_CONTACT_MARGIN + PUSH_DISTANCE, direction)
             print(f"               pre-push ball {_mm(pre)}   travel {1000 * travel:.0f} mm"
                   f" along {np.round(direction, 3).tolist()} (force check before full push)")
         except (ValueError, OSError, KeyError) as exc:
@@ -206,17 +215,47 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
     return contacts
 
 
+MAX_TIP_OPTIONS = 4  # the cascade's pick plus up to 3 more, cycled with 'n' at the gate
+
+
+def tip_options(plan: dict, contacts: dict, args) -> list:
+    """The plans 'n' cycles through at the gate: the cascade's pick first, then the other
+    tip (forward tip, or press-pull on the conservative contact), then each press backup
+    (snapshot's press_backups); only tips --tip allows, at most MAX_TIP_OPTIONS."""
+    force = plan["force_ref"] if plan["kind"] == PRESS else args.force_ref
+    others = []
+    if plan["kind"] == PRESS and args.tip != "press" and (contacts.get("forward_tip") or {}).get("available"):
+        others.append(attempt(FORWARD))
+    if args.tip != "forward" and (contacts.get("press") or {}).get("available"):
+        if plan["kind"] != PRESS:
+            others.append(attempt(PRESS, 0, force))
+        others += [attempt(PRESS, 0, force, press_backup=b["rank"]) for b in contacts.get("press_backups") or []]
+    key = lambda p: (p["kind"], p["press_candidate"], p.get("press_backup", 0))  # noqa: E731
+    return ([plan] + [o for o in others if key(o) != key(plan)])[:MAX_TIP_OPTIONS]
+
+
+def option_image(episode: Episode, plan: dict) -> Path | None:
+    """The latest snapshot's image of `plan`'s contact (final_selection_B<k>.jpg for a backup)."""
+    stage = _latest_perceive(episode)
+    if stage is None:
+        return None
+    name = f"final_selection_B{plan['press_backup']}.jpg" if plan.get("press_backup") else "final_selection.jpg"
+    path = episode.path / stage["dir"] / name
+    return path if path.exists() else None
+
+
 def sensor_fault(stage: dict | None) -> str | None:
     results = (stage or {}).get("results", {})
     reason = results.get("abort_reason") or results.get("failure_reason")
     return reason if reason in SENSOR_FAULTS else None
 
 
-def gate(label: str, ready: bool, auto: bool, skippable: bool = False) -> str:
-    """'go', 'r' (re-perceive), 's' (skip this step; only if skippable) or 'q' (stop the episode)."""
+def gate(label: str, ready: bool, auto: bool, skippable: bool = False, can_next: bool = False) -> str:
+    """'go', 'r' (re-perceive), 's' (skip this step; only if skippable), 'n' (next-best
+    contact; only if can_next) or 'q' (stop the episode)."""
     if auto:
         return "go" if ready else "q"
-    skip = ", s = skip it" if skippable else ""
+    skip = (", s = skip it" if skippable else "") + (", n = next option" if can_next else "")
     prompt = (f"\n[pipeline] Next: {label}. Enter = go, r = re-perceive{skip}, q = stop episode: " if ready else
               f"\n[pipeline] Can't run {label} on this snapshot. r = re-perceive{skip}, q = stop episode: ")
     while True:
@@ -226,7 +265,7 @@ def gate(label: str, ready: bool, auto: bool, skippable: bool = False) -> str:
             return "q"
         if answer == "" and ready:
             return "go"
-        if answer in ("r", "q") or (answer == "s" and skippable):
+        if answer in ("r", "q") or (answer == "s" and skippable) or (answer == "n" and can_next):
             return answer
 
 
@@ -301,8 +340,8 @@ def registration_ok(episode: Episode, args) -> bool:
 
 def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
     """The tip phase: attempts chosen by util/tip_cascade.py, each on the snapshot taken
-    after the one before, until one tips the object or none is left. In step mode only
-    the first attempt waits at the gate. A forward tip that slid the object is recorded
+    after the one before, until one tips the object or none is left. In step mode
+    every attempt waits at the gate. A forward tip that slid the object is recorded
     as the episode's slide interaction (its stage dir appended to `slides`). Returns the
     episode if it ended, else None."""
     history = []
@@ -315,29 +354,55 @@ def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
             episode.add_event(f"tip cascade done: {reason}")
             if history[-1]["outcome"] == "moved":
                 print("[pipeline] !!! The object moved or fell: check it before going on.")
+            if history[-1]["outcome"] == "stopped":
+                episode.set_outcome("aborted", reason)
+                return episode
             if history[-1]["outcome"] != "success":
                 episode.add_note(f"tip failed: {reason}")
                 if args.auto:
                     episode.set_outcome("aborted", reason)
                     return episode
             return None
-        kind, label = plan["kind"], describe(plan)
-        contact = press_contact(contacts, plan) if kind == PRESS else contacts.get("forward_tip") or {}
-        ready = bool(contact.get("available"))
-        print(f"\n[pipeline] tip attempt {len(history) + 1}/{MAX_ATTEMPTS}: {label} ({reason})")
-        if not history:
-            answer = gate(label, ready, args.auto)
-            if answer == "r":
-                take_snapshot(node, episode, label="retake")
-                continue
-            if answer == "q":
-                episode.set_outcome("aborted", f"stopped before {label}"
-                                    + ("" if ready else f": no usable {STEPS[kind][0]} contact"))
-                return episode
-        elif not ready:  # a retry whose contact is gone from the new snapshot
+        options, chosen, index = tip_options(plan, contacts, args), describe(plan), 0
+        print(f"\n[pipeline] tip attempt {len(history) + 1}/{MAX_ATTEMPTS}: {chosen} ({reason})")
+        while True:
+            plan = options[index]
+            kind, label = plan["kind"], describe(plan)
+            contact = press_contact(contacts, plan) if kind == PRESS else contacts.get("forward_tip") or {}
+            ready = bool(contact.get("available"))
+            if history and not ready and args.auto:  # a retry whose contact is gone from the new snapshot
+                break
+            answer = gate(label, ready, args.auto, can_next=len(options) > 1)
+            if answer != "n":
+                break
+            index = (index + 1) % len(options)
+            plan = options[index]
+            contact = press_contact(contacts, plan) if plan["kind"] == PRESS else contacts.get("forward_tip") or {}
+            print(f"\n[pipeline] option {index + 1}/{len(options)}: {describe(plan)}"
+                  + (f", contact {_mm(contact['point'])}" if contact.get("point") else "")
+                  + (f", {1000 * contact['along_edge_offset']:+.0f} mm from pivot center"
+                     if contact.get("along_edge_offset") is not None else ""))
+            image = option_image(episode, plan) if args.open_images else None
+            if image is not None:
+                subprocess.Popen(["xdg-open", str(image)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if history and not ready and args.auto:
             history.append(dict(attempt=plan, outcome="failed", stage=None, press_point=None,
                                 final_force=None, why=f"no usable {STEPS[kind][0]} contact on this snapshot"))
             continue
+        if answer == "r":
+            take_snapshot(node, episode, label="retake")
+            continue
+        if answer == "q":
+            episode.set_outcome("aborted", f"stopped before {label}"
+                                + ("" if ready else f": no usable {STEPS[kind][0]} contact"))
+            return episode
+        if index:
+            try:
+                why = input(f"Why {label} over the {chosen}? (Enter to skip): ").strip()
+            except EOFError:
+                why = ""
+            episode.add_event(f"operator override: {label} instead of {chosen}; "
+                              f"contact {np.round(contact['point'], 4).tolist()}; reason: {why or '-'}")
         episode.add_event(f"tip attempt {len(history) + 1}: {label} ({reason})")
 
         before = latest_object_cloud(episode)

@@ -85,3 +85,47 @@ def test_forward_slide_is_the_slide_interaction_then_press_pull(monkeypatch):
     monkeypatch.setattr(orchestrator, 'run_step', Mock(side_effect=AssertionError('pushed')))
     assert orchestrator.run_push(None, episode, args, slides[-1]) is None
     assert 'push: skipped' in episode.add_event.call_args.args[0]
+
+
+def test_step_mode_gates_every_attempt_and_logs_a_backup_pick(monkeypatch):
+    contacts = {'press': dict(available=True, point=[.58, 0., .1], along_edge_offset=-.015),
+                'press_alternatives': [],
+                'press_backups': [dict(available=True, rank=1, point=[.6, 0., .1], along_edge_offset=.001)],
+                'forward_tip': {'available': False, 'pivot_shape': {'shape': 'curved', 'reason': 't'}}}
+    answers = iter(['n', '', 'more centered', 'q'])
+    commands = []
+
+    def run_step(episode, kind, command):
+        commands.append(command)
+        return dict(dir='04_press_pull_tip', status='failed', results={'completed': False}), True
+
+    monkeypatch.setattr('builtins.input', lambda prompt='': next(answers))
+    monkeypatch.setattr(orchestrator, 'show_snapshot', lambda episode, open_images: contacts)
+    monkeypatch.setattr(orchestrator, 'latest_object_cloud', lambda episode: np.zeros((0, 3)))
+    monkeypatch.setattr(orchestrator, 'press_pull_slip_mm', lambda path: None)
+    monkeypatch.setattr(orchestrator, 'run_step', run_step)
+    episode = Mock(path=orchestrator.Path('/tmp/episode'))
+    args = SimpleNamespace(tip='auto', force_ref=5., open_images=False, auto=False,
+                           object='teal_cylinder', quality='h264')
+
+    assert orchestrator.run_tip_cascade(None, episode, args) is episode
+    assert len(commands) == 1 and commands[0][-2:] == ['--press-backup', '1']
+    events = [c.args[0] for c in episode.add_event.call_args_list]
+    assert any('operator override' in e and 'more centered' in e for e in events)
+    assert episode.set_outcome.call_args.args[0] == 'aborted'  # 'q' at the second attempt's gate
+
+
+def test_tip_options_cycle_from_a_forward_pick_to_press_and_backups():
+    from irb120_control.util.tip_cascade import FORWARD, PRESS, attempt
+    contacts = {'press': dict(available=True, point=[.58, 0., .1]),
+                'press_backups': [dict(available=True, rank=k, point=[.6, 0., .1]) for k in (1, 2, 3)],
+                'forward_tip': {'available': True}}
+    args = SimpleNamespace(tip='auto', force_ref=5.)
+    options = orchestrator.tip_options(attempt(FORWARD), contacts, args)
+    assert [(o['kind'], o['press_backup']) for o in options] == [
+        (FORWARD, 0), (PRESS, 0), (PRESS, 1), (PRESS, 2)]  # capped at MAX_TIP_OPTIONS
+    options = orchestrator.tip_options(attempt(PRESS, 0, 5.), contacts, args)
+    assert [(o['kind'], o['press_backup']) for o in options] == [
+        (PRESS, 0), (FORWARD, 0), (PRESS, 1), (PRESS, 2)]
+    assert len(orchestrator.tip_options(attempt(FORWARD), contacts,
+                                        SimpleNamespace(tip='forward', force_ref=5.))) == 1

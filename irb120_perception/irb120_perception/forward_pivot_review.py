@@ -23,7 +23,21 @@ from irb120_perception.depth_plane_audit import audit
 from irb120_perception.pivot_boundary_review import (
     fit_sensitivity, fit_support, project, screened_boundary, support_run)
 
+TABLE_Z = -.021  # configured table height in base_link (= experimental_view_check.TABLE_Z)
 CAMERA = 'cam3'
+# SAM-only fallback, when no edge pixel is within 2 cm of the object cloud: a large object
+# whose base the cloud cannot reach (the monitor's thin plate: cam1 cannot see its far half,
+# cam3 gets little depth on it). The mask then stands on its own if the cloud clearly voted
+# for it, its edge is within SAM_ONLY_ENVELOPE_M of the cloud, and the edge fits one
+# straight line; pixels with depth must still pass the depth check.
+SAM_ONLY_ENVELOPE_M = .10
+# Table-height error assumed for the X-sensitivity check. It was the table fit's p95 point
+# residual (2.5-5.5 mm), which is per-point scatter, not the error of a ~900-point fit; with
+# cam3's grazing view (3-4 mm of X per mm of height) that rejected nearly every object.
+# 1.5 mm ~ cam3's calibration after the 2026-10-20 depth recalibration.
+TABLE_HEIGHT_ERROR_MM = 1.5
+MAX_X_ERROR_MM = 10.
+SAM_ONLY_MIN_VOTES = 50
 OUTWARD = 1.  # the forward pivot is the +X edge
 # A straight pivot: the line's inliers span at least this much, and this fraction of
 # the support band. fit_support's robust line trims a curved support's flanks as
@@ -108,7 +122,9 @@ def evaluate(snapshot, contacts=None):
             raise ValueError('distorted aligned depth is not supported by table fitter')
         cloud = np.load(snapshot/'object_cloud.npz')['xyz']
         cloud = cloud[np.isfinite(cloud).all(axis=1)]
-        table = audit(snapshot, camera=CAMERA)['table']
+        # +-10 mm about the configured table: the default band also takes in a thin base plate
+        # missing from the object cloud (monitor), which fails the noise check below.
+        table = audit(snapshot, camera=CAMERA, table_band=(TABLE_Z - .01, TABLE_Z + .01))['table']
         report['evidence']['table_fit'] = table
         if not table['available'] or table['p95_abs_mm'] > 6:
             raise ValueError('insufficient or noisy measured table plane')
@@ -121,16 +137,28 @@ def evaluate(snapshot, contacts=None):
             raise ValueError('depth and mask dimensions differ')
         pixels, boundary, points, accepted, votes, depth_evidence = screened_boundary(
             mask, cloud, info, plane, depth)
+        envelope, sam_only = .02, False
+        try:
+            support_run(pixels, points, accepted, OUTWARD)
+        except ValueError as exc:
+            if votes >= SAM_ONLY_MIN_VOTES:
+                envelope, sam_only = SAM_ONLY_ENVELOPE_M, True
+                report['evidence']['strict_screen_failure'] = str(exc)
+                pixels, boundary, points, accepted, votes, depth_evidence = screened_boundary(
+                    mask, cloud, info, plane, depth, envelope=envelope, depth_optional=True)
+        report['support_mode'] = 'sam_only' if sam_only else 'cloud_checked'
         report.update(image_width=mask.shape[1], image_height=mask.shape[0])
         report['geometry'] = dict(object_table_boundary_px=boundary[accepted].tolist(),
                                   rejected_boundary_px=boundary[~accepted].tolist(),
                                   support_samples_base_m=points[accepted].tolist())
         report['evidence'].update(component_cloud_votes=votes, boundary_count=len(pixels),
-                                  accepted_count=int(accepted.sum()), envelope_threshold_m=.02,
+                                  accepted_count=int(accepted.sum()), envelope_threshold_m=envelope,
                                   depth_boundary_check=depth_evidence)
         try:
             run = support_run(pixels, points, accepted, OUTWARD)
             fit = fit_support(points[run], plane, OUTWARD)
+            if sam_only and fit['support_type'] != 'flat_edge':
+                raise ValueError(f"SAM-only edge is not one straight line ({fit['support_type']})")
             report['geometry'].update(candidate_pivot_base_m=fit['pivot'],
                                       pivot_edge_base_m=fit['edge'], tangent_base=fit['axis'])
             report['evidence']['support_fit'] = fit
@@ -139,9 +167,11 @@ def evaluate(snapshot, contacts=None):
                 pivot_delta_from_cloud_mm=None if baseline is None else
                 ((np.asarray(fit['pivot'])-np.asarray(baseline))*1000).tolist(),
                 x_shift_per_pixel_mm=pixel_sensitivity, x_shift_per_mm_table_height_mm=plane_sensitivity)
-            if plane_sensitivity*table['p95_abs_mm'] > 10:
+            report['evidence']['x_error_from_table_height_mm'] = plane_sensitivity*TABLE_HEIGHT_ERROR_MM
+            if plane_sensitivity*TABLE_HEIGHT_ERROR_MM > MAX_X_ERROR_MM:
                 report['candidate_status'] = 'rejected'
-                report['fallback_reason'] = 'table residual amplified beyond 10 mm in X'
+                report['fallback_reason'] = (f'{TABLE_HEIGHT_ERROR_MM} mm table-height error amplified '
+                                             f'beyond {MAX_X_ERROR_MM:.0f} mm in X')
             else:
                 report['candidate_status'] = 'reviewable'
                 report['shape'], report['shape_reason'] = pivot_shape(fit)

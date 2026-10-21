@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from irb120_control.util import tip_cascade
 from irb120_control.util.tip_cascade import (
     FORWARD, MAX_ATTEMPTS, PRESS, PRESS_FORCE_MAX_N, attempt, classify, first_attempt,
     next_attempt, object_change,
@@ -67,7 +68,8 @@ def test_object_change():
     assert object_change(cloud[:2], cloud) is None
 
 
-def test_slipping_press_goes_riskier_then_forward():
+def test_slipping_press_goes_riskier_then_forward(monkeypatch):
+    monkeypatch.setattr(tip_cascade, 'MAX_ATTEMPTS', 4)  # the rules past the default cap
     c = contacts()
     first, _ = first_attempt(c, force_ref=5.)
     assert first == attempt(PRESS, 0, 5.)
@@ -84,7 +86,8 @@ def test_slipping_press_goes_riskier_then_forward():
     assert plan == attempt(FORWARD) and 'no untried press contact' in reason
 
 
-def test_forward_runs_on_a_curved_pivot_but_only_once():
+def test_forward_runs_on_a_curved_pivot_but_only_once(monkeypatch):
+    monkeypatch.setattr(tip_cascade, 'MAX_ATTEMPTS', 4)
     history = [run(attempt(PRESS, 0, 5.), 'failed', point=[.58, 0., .1])]
     c = contacts(alternatives=())
     plan, _ = next_attempt(history, c)
@@ -103,7 +106,8 @@ def test_failed_forward_tip_goes_to_press_pull():
         assert plan == attempt(PRESS, 0, 6.)
 
 
-def test_missed_contact_retries_once_and_sensor_fault_retries():
+def test_missed_contact_retries_once_and_sensor_fault_retries(monkeypatch):
+    monkeypatch.setattr(tip_cascade, 'MAX_ATTEMPTS', 4)
     first = attempt(PRESS, 0, 5.)
     plan, _ = next_attempt([run(first, 'no_contact', point=[.58, 0., .1])], contacts())
     assert plan == dict(first, retry=True)
@@ -121,6 +125,23 @@ def test_stops_on_success_moved_and_attempt_limit():
     history = [run(first, 'sensor_fault')] * MAX_ATTEMPTS
     plan, reason = next_attempt(history, contacts())
     assert plan is None and f'{MAX_ATTEMPTS} attempts' in reason
+    assert MAX_ATTEMPTS == 2
+
+
+def test_operator_stop_ends_the_cascade_and_unarc_loss_is_a_tip():
+    outcome, _ = classify(PRESS, {'completed': False, 'abort_reason': 'operator'})
+    assert outcome == 'stopped'
+    assert next_attempt([run(attempt(PRESS, 0, 5.), outcome)], contacts())[0] is None
+    outcome, why = classify(PRESS, {'completed': True, 'balance_reached': True, 'unarc_lost_contact_deg': 4.8})
+    assert outcome == 'success' and 'UNARC' in why
+
+
+def test_press_backup_contact():
+    c = dict(contacts(), press_backups=[dict(press(.6), rank=1, along_edge_offset=.001)])
+    plan = attempt(PRESS, 0, 5., press_backup=1)
+    assert tip_cascade.press_contact(c, plan)['point'] == [.6, 0., .1]
+    assert 'B1' in tip_cascade.describe(plan)
+    assert tip_cascade.press_contact(c, attempt(PRESS, 0, 5., press_backup=2)) == {}
 
 
 def test_forced_modes_keep_to_one_tip():

@@ -13,6 +13,9 @@ cloud also box-prompts a mask in a review camera, at the same time as the cam1
 mask (each camera has its own predictor; the model weights are shared). That
 mask culls nothing; it is published on ~/review_sam_* with the same cloud stamp
 for the perception snapshot's forward-tip pivot fit (the far edge only cam3 sees).
+The review box covers only the object's base (review_prompt_points): that fit needs
+only where the object meets the table, and a whole-object box on a large object (a
+monitor) fills cam3's frame and segments the background instead.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +38,22 @@ except ImportError as exc:  # pragma: no cover - depends on optional venv
     SamPredictor = None
     sam_model_registry = None
     _SAM_IMPORT_ERROR = exc
+
+
+REVIEW_BASE_BAND_M = 0.04   # the lowest 4 cm of the cloud is the object's base
+REVIEW_BASE_PAD_M = 0.03    # padded sideways: a thin base plate can be missing from the cloud
+REVIEW_TABLE_REACH_M = 0.015  # and down, so the box reaches the table
+
+
+def review_prompt_points(points):
+    """The 8 corners of a box around the cloud's base (its lowest REVIEW_BASE_BAND_M),
+    padded by REVIEW_BASE_PAD_M in x/y and reaching REVIEW_TABLE_REACH_M below the lowest
+    point; base_link. Projected, they give the review camera's SAM box."""
+    z0 = points[:, 2].min()
+    base = points[points[:, 2] <= z0 + REVIEW_BASE_BAND_M, :2]
+    lo, hi = base.min(axis=0) - REVIEW_BASE_PAD_M, base.max(axis=0) + REVIEW_BASE_PAD_M
+    return np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                     for z in (z0 - REVIEW_TABLE_REACH_M, z0 + REVIEW_BASE_BAND_M)])
 
 
 def _image_to_rgb(msg: Image) -> np.ndarray:
@@ -160,7 +179,8 @@ class DBSCANSAMCuller(ObjectDetectorBase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             cam1_job = pool.submit(self._cull, source, color_msg, self._info, cam_tf)
             review_job = None if review is None else pool.submit(
-                self._box_mask, source, review[0], review[2], review[3], self._review_predictor)
+                self._box_mask, review_prompt_points(source), review[0], review[2], review[3],
+                self._review_predictor)
             kept = cam1_job.result()
             review_boxed = None
             if review_job is not None:
@@ -248,7 +268,7 @@ class DBSCANSAMCuller(ObjectDetectorBase):
             'camera': review['name'],
             'cloud_stamp': [cloud_stamp.sec, cloud_stamp.nanosec],
             'color_stamp': color_msg.header.stamp.sec + color_msg.header.stamp.nanosec*1e-9,
-            'mask_source': 'live MobileSAM review mask, box from the DBSCAN cloud',
+            'mask_source': 'live MobileSAM review mask, box around the DBSCAN cloud\'s base',
             'depth_paired_at_source': depth_msg is not None,
         }
         if depth_msg is not None:

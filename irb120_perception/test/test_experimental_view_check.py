@@ -133,3 +133,18 @@ def test_press_alternatives_need_more_torque_little_sideways_and_spacing():
     np.testing.assert_allclose(alternatives[0]['ball_center'], [.59, 0., .11])
     assert alternatives[0]['torque_gain'] == pytest.approx(.02)
     assert alternatives[1]['lateral_offset_m'] == pytest.approx(-.005)
+
+
+def test_press_backups_are_passing_contacts_most_centered_first():
+    from irb120_perception.experimental_view_check import press_backups
+    press = dict(point=[.6, .015, .1], ball_center=[.6, .015, .11],
+                 geometry=dict(axis=[0., -1., 0.], pivot=[.57, 0., 0.]))
+    rows = [dict(point=[.6, .015, .1], decision='pass', torque_per_pull_N_m=.10),   # the press itself
+            dict(point=[.62, .001, .1], decision='pass', torque_per_pull_N_m=.08),  # B1: 1 mm off center
+            dict(point=[.625, .004, .1], decision='pass'),                          # too close to B1
+            dict(point=[.61, 0., .1], decision='reject'),                           # failed the check
+            dict(point=[.6, -.02, .1], decision='pass', torque_per_pull_N_m=.09)]   # B2: 20 mm off
+    backups = press_backups(rows, press, lambda p: [0., 0., 1.])
+    assert [b['point'].tolist() for b in backups] == [[.62, .001, .1], [.6, -.02, .1]]
+    assert backups[0]['along_edge_offset'] == pytest.approx(-.001)
+    np.testing.assert_allclose(backups[0]['ball_center'], [.62, .001, .11])

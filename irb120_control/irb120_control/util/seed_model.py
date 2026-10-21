@@ -116,10 +116,10 @@ def moved_pivot_report(report: dict, fit: dict, source_stage: str) -> dict:
     R = np.asarray(fit["R"])
     geometry = out.get("geometry") or {}
     for key in ("candidate_pivot_base_m", "pivot_edge_base_m", "support_samples_base_m"):
-        if geometry.get(key) is not None:
+        if geometry.get(key):  # None or [] (a rejected review) stays as it is
             geometry[key] = apply(fit, geometry[key]).tolist()
     for key in ("tangent_base",):
-        if geometry.get(key) is not None:
+        if geometry.get(key):
             geometry[key] = (np.asarray(geometry[key], float) @ R.T).tolist()
     for key in [k for k in geometry if k.endswith("_px")]:
         geometry.pop(key)

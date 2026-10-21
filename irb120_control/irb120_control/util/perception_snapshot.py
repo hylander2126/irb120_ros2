@@ -710,6 +710,11 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
         montage = _final_selection_montage(review_frames, contacts, record.get("rgb_pivot") or {})
         if montage is not None and cv2.imwrite(str(out / "final_selection.jpg"), montage):
             record["final_selection"] = {"file": "final_selection.jpg"}
+        # One image per press backup, opened only when the operator switches to it ('n').
+        for backup in contacts.get("press_backups") or []:
+            montage = _final_selection_montage(review_frames, dict(contacts, press=backup), {})
+            if montage is not None:
+                cv2.imwrite(str(out / f"final_selection_B{backup['rank']}.jpg"), montage)
     except (ValueError, KeyError, OSError, cv2.error) as exc:
         node.get_logger().warn(f"[snapshot] final selection montage: {exc}")
 

@@ -227,6 +227,7 @@ def select_contact_points(clouds, *, normals=None,
                           press_score_fraction=0.0,
                           push_max_normal_angle_deg=20.0,
                           push_height_band=0.010,
+                          forward_max_lateral=0.030,
                           experimental_press_filter=None,
                           press_pivot_override=None):
     """Return three independent selections and their estimated pivot geometry.
@@ -385,6 +386,8 @@ def select_contact_points(clouds, *, normals=None,
             counts['direction'] = int(feasible.sum())
             if mode == 'forward_tip':
                 feasible &= (normals @ direction <= -0.2) & (np.abs(normals[:, 2]) <= 0.5)
+                # Near the pivot's centre line: an off-centre push yaws a wide object instead of tipping it.
+                feasible &= np.abs((points - geometry['pivot']) @ geometry['axis']) <= forward_max_lateral
             else:
                 feasible &= normals[:, 2] >= 0.7
             counts['surface'] = int(feasible.sum())

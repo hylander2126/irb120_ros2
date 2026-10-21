@@ -48,7 +48,8 @@ def depth_to_base(depth_mm, info, stride=2):
     return base[(depth>0)&np.isfinite(base).all(axis=-1)]
 
 
-def audit(snapshot, camera='cam2'):
+def audit(snapshot, camera='cam2', table_band=(-.08, .04)):
+    """table_band: base_link z range the table points are taken from."""
     snapshot=Path(snapshot)
     saved=np.load(snapshot/f'{camera}_aligned_depth.npz')
     info=json.loads((snapshot/f'{camera}_camera_info.json').read_text())
@@ -76,7 +77,7 @@ def audit(snapshot, camera='cam2'):
                &(points[:,2]<=obj[:,2].max()+.025)]
     near=((points[:,0]>=low[0]-.30)&(points[:,0]<=high[0]+.30)
           &(points[:,1]>=low[1]-.30)&(points[:,1]<=high[1]+.30))
-    table=points[near&~object_xy&(points[:,2]>=-.08)&(points[:,2]<=.04)]
+    table=points[near&~object_xy&(points[:,2]>=table_band[0])&(points[:,2]<=table_band[1])]
     result=dict(snapshot=str(snapshot.resolve()),camera=camera,
                 depth_stamp=float(saved['stamp']),depth_shape=list(saved['depth_mm'].shape),
                 table=fit_plane(table),object_top=fit_plane(top),

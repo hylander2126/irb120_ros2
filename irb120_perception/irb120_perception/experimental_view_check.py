@@ -186,6 +186,34 @@ def press_alternatives(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING
     return result
 
 
+def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, limit=MAX_ALTERNATIVES):
+    """Next-best press contacts the operator can pick at run_pipeline's gate ('n'): any
+    candidate that passed the camera check, at least `spacing` from the chosen press and
+    from one another, most centered over the pivot (along the pivot axis) first."""
+    primary = np.asarray(press['point'], dtype=float)
+    pivot = np.asarray(press['geometry']['pivot'], dtype=float)
+    axis = np.asarray(press['geometry']['axis'], dtype=float)
+    radius = float(np.linalg.norm(np.asarray(press['ball_center']) - primary))
+    passed = [c for c in candidates if c['decision'] == 'pass']
+    taken, result = [primary], []
+    for candidate in sorted(passed, key=lambda c: abs((np.asarray(c['point']) - pivot) @ axis)):
+        point = np.asarray(candidate['point'], dtype=float)
+        if min(np.linalg.norm(point - other) for other in taken) < spacing:
+            continue
+        normal = np.asarray(normal_at(point), dtype=float)
+        if not np.isfinite(normal).all():
+            normal = np.array([0., 0., 1.])
+        result.append(dict(available=True, rank=len(result) + 1, point=point, normal=normal,
+                           ball_center=point + radius * normal,
+                           torque_per_pull_N_m=candidate.get('torque_per_pull_N_m'),
+                           along_edge_offset=float((point - pivot) @ axis),
+                           geometry=press['geometry']))
+        taken.append(point)
+        if len(result) == limit:
+            break
+    return result
+
+
 def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
             press_pivot_override=None):
     """Return an experimental contacts copy and evidence, preserving baseline.
@@ -332,6 +360,8 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
         report['selected_point'] = report['selected_point'].tolist()
     if rule == 'top_support_v1' and result['press'].get('available'):
         result['press_alternatives'] = press_alternatives(
+            report['candidates'], result['press'], lambda point: normals[tree.query(point)[1]])
+        result['press_backups'] = press_backups(
             report['candidates'], result['press'], lambda point: normals[tree.query(point)[1]])
     # JSON-friendly output, including newly selected numpy geometry.
     result = json.loads(json.dumps(result, default=lambda value: value.tolist()))

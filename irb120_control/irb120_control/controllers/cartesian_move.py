@@ -48,8 +48,9 @@ def plan_and_execute_cartesian(
     min_fraction: float = DEFAULT_MIN_FRACTION,
     execute_timeout_sec: float = 60.0,
     execution_check: Callable[[], bool] | None = None,
+    plan_only: bool = False,
 ) -> bool:
-    """Plan a Cartesian straight-line path and execute it.
+    """Plan a Cartesian straight-line path and execute it (plan_only: just check it plans).
 
     Args:
         node:              ROS node (used for logging and spinning).
@@ -101,6 +102,8 @@ def plan_and_execute_cartesian(
             f"(required {min_fraction * 100:.0f}%) — aborting"
         )
         return False
+    if plan_only:
+        return True
 
     from irb120_control.controllers.moveit_single_shot import reached_trajectory_end
     for attempt in (1, 2):  # JTC command-timeout race: see moveit_single_shot.execute_checked_plan

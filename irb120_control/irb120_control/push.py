@@ -9,7 +9,10 @@ Runs as the 'push' stage of an episode (util/episode.py):
   2. MoveIt approach to the pre-push pose: the detected planar_push contact's
      finger-ball center, PUSH_STANDOFF back along the horizontal inward normal.
   3. Operator confirmation, F/T tare.
-  4. Continuous horizontal push with initial reaction-force validation.
+  4. Continuous horizontal push: the straight path is planned (collision/IK check only),
+     then driven by MoveIt Servo at PUSH_SPEED, so it can stop on any tick. Contact must
+     be felt within PUSH_CONTACT_MARGIN past the predicted contact, then the push goes
+     PUSH_DISTANCE from where it was felt. Needs the stack launched with start_servo:=true.
   5. Cartesian return, then home, then a second snapshot of the pushed object.
 
 F/T + pose from step 4, metadata and videos go into the stage folder.
@@ -36,6 +39,7 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from irb120_control.controllers.cartesian_move import plan_and_execute_cartesian
+from irb120_control.controllers.servo_command_publisher import ServoCommandPublisher
 from irb120_control.controllers.moveit_single_shot import plan_and_execute_joint_goal, plan_and_execute_pose_goal
 from irb120_control.util.egm_client import ensure_egm_active, deactivate_egm
 from irb120_control.util.episode import Episode, write_json_atomic
@@ -59,7 +63,7 @@ BASE_FRAME = "base_link"
 EE_LINK    = "finger_ball_center"
 GROUP_NAME = "manipulator"
 
-PUSH_DISTANCE            = 0.080   # m
+PUSH_DISTANCE            = 0.050   # m, measured from where contact is felt
 PUSH_STANDOFF            = 0.040   # m, pre-push ball center sits this far behind the detected contact (~14 mm clear of the object's collision box)
 # Finger pitched tip-down about base +Y. Horizontal (0 deg), the 90 mm F/T stack hangs 45 mm
 # below the shaft and hits the table, which forced ball centres >= 81 mm above it
@@ -101,12 +105,22 @@ TARE_WAIT_SEC = 3.0   # netft_preprocessor accumulates TARE_SAMPLES=200 asynchro
                        # rather than a completion signal (none is exposed).
 
 # Validate contact during continuous motion, without changing the push direction.
-# Stop if no reaction is confirmed by 5 mm past the predicted contact.
+# Stop if no reaction is confirmed by PUSH_CONTACT_MARGIN past the predicted contact.
 PUSH_CONTACT_FORCE_N = 0.3
 PUSH_FORCE_ANGLE_DEG = 45.0
 PUSH_FORCE_LIMIT_N = 20.0
-PUSH_CONTACT_MARGIN = 0.005
+PUSH_CONTACT_MARGIN = 0.050  # generous: the cloud has put the face ~30 mm early (orange_robot)
 PUSH_FORCE_WINDOW_SEC = 0.10
+# Servo push: the planned path is only a gut check; Servo drives it and can stop any tick.
+PUSH_SPEED = 0.009          # m/s along the push vector (what the old planned push actually ran)
+PUSH_CONTROL_HZ = 50.0
+PUSH_LINE_GAIN = 1.0        # 1/s: pulls the finger back onto the push line
+# Servo on this rig moves at ~57% of the commanded speed (press-pull arcs too), so the push
+# tracks a target advancing at PUSH_SPEED instead of trusting the command.
+PUSH_TRACK_GAIN = 2.0       # 1/s on the lag behind that target
+PUSH_MAX_CMD_SPEED = 0.025  # m/s cap on the command while catching up
+PUSH_SETTLE_SEC = 0.5       # zero twists after the push before pausing Servo
+SERVO_FRAME = "base_link"   # MoveIt Servo requires base_link as the twist command frame
 
 PUSH_VIDEO_QUALITY = "h264"   # camera_hull_recorder's "h264" mode now encodes via a
                                # direct ffmpeg/libx264 CRF pipe (see _FfmpegH264Writer),
@@ -134,6 +148,8 @@ class Push(Node):
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._cartesian_client  = self.create_client(GetCartesianPath, "/compute_cartesian_path")
         self._execute_client    = ActionClient(self, ExecuteTrajectory, "/execute_trajectory")
+        self._servo_cmd         = ServoCommandPublisher(self, "/servo_node/delta_twist_cmds", SERVO_FRAME)
+        self._pause_servo_client = self.create_client(SetBool, "/servo_node/pause_servo")
 
         self._wrench            = (0.0,) * 6
         self._have_force        = False
@@ -307,8 +323,63 @@ class Push(Node):
             return False
         return True
 
+    def _set_servo_paused(self, paused: bool) -> bool:
+        if not self._pause_servo_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error("pause_servo service not available (launch with start_servo:=true)")
+            return False
+        future = self._pause_servo_client.call_async(SetBool.Request(data=paused))
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        return bool(future.done() and future.result() is not None and future.result().success)
+
+    def _servo_push(self, ball, travel) -> bool:
+        """Drive the push line with MoveIt Servo until _check_moving_contact says stop, or
+        the finger reaches the planned end (`travel` from the pre-push pose). Stopping is a
+        zero twist on the next tick, not a trajectory cancel. True if it ran to a stop
+        cleanly; the caller reads _force_check for why."""
+        start, direction = np.asarray(self._pre_push_pos, dtype=float), self._push_direction
+        deadline = time.monotonic() + travel / PUSH_SPEED + 10.
+        if not self._set_servo_paused(False):
+            self._force_check = dict(status="rejected", reason="could not resume MoveIt Servo")
+            return False
+        ok = True
+        try:
+            next_tick = t0 = time.monotonic()
+            while rclpy.ok():
+                next_tick += 1. / PUSH_CONTROL_HZ
+                while time.monotonic() < next_tick:
+                    rclpy.spin_once(self, timeout_sec=.002)
+                if not self._check_moving_contact(ball):
+                    break
+                pose = self._lookup_ee_pose()
+                if pose is None:
+                    self._force_check = dict(status="rejected", reason="missing pose during servo push")
+                    break
+                offset = np.array([pose.position.x, pose.position.y, pose.position.z]) - start
+                along = float(offset @ direction)
+                if along >= travel:
+                    break  # end of the planned (gut-checked) path
+                if time.monotonic() > deadline:
+                    self._force_check = dict(self._force_check, status="rejected", reason="servo push timed out")
+                    break
+                lag = PUSH_SPEED * (time.monotonic() - t0) - along
+                speed = min(PUSH_MAX_CMD_SPEED, max(0., PUSH_SPEED + PUSH_TRACK_GAIN * lag))
+                v = speed * direction - PUSH_LINE_GAIN * (offset - along * direction)
+                if not self._servo_cmd.publish_twist(*v, state="PUSH"):
+                    self._force_check = dict(status="rejected", reason="servo command not accepted")
+                    ok = False
+                    break
+        finally:
+            settle = time.monotonic() + PUSH_SETTLE_SEC
+            while time.monotonic() < settle:
+                self._servo_cmd.publish_zero("PUSH")
+                rclpy.spin_once(self, timeout_sec=.02)
+            if not self._set_servo_paused(True):
+                self.get_logger().error("Servo pause unconfirmed; not commanding further motion")
+                self._motion_uncertain = True
+        return ok
+
     def _cartesian_move(self, distance: float, velocity_scale: float, *, target_position=None,
-                        max_speed=PUSH_MAX_CARTESIAN_SPEED, execution_check=None) -> bool:
+                        max_speed=PUSH_MAX_CARTESIAN_SPEED, execution_check=None, plan_only=False) -> bool:
         """Move along the fixed push vector, or retrace to an explicit position."""
         start_pose = self._lookup_ee_pose()
         if start_pose is None:
@@ -330,7 +401,8 @@ class Push(Node):
                 base_frame=BASE_FRAME, waypoints=[target], velocity_scale=velocity_scale,
                 max_cartesian_speed=max_speed, max_step=CARTESIAN_MAX_STEP,
                 jump_threshold=CARTESIAN_JUMP_THRESH, avoid_collisions=True,
-                execute_timeout_sec=length/max_speed + 30., execution_check=execution_check)
+                execute_timeout_sec=length/max_speed + 30., execution_check=execution_check,
+                plan_only=plan_only)
         except RuntimeError as exc:
             self._motion_uncertain = True
             self.get_logger().error(str(exc))
@@ -353,7 +425,18 @@ class Push(Node):
     def _check_moving_contact(self, ball):
         """Validate initial reaction from a rolling window while the finger moves."""
         if self._force_check.get("status") == "validated":
-            return True  # Initial check only. Never steer or keep changing the direction.
+            # Never steer or keep changing the direction; only stop after PUSH_DISTANCE.
+            pose = self._lookup_ee_pose()
+            if pose is None:
+                return True  # the trajectory end bounds the push anyway
+            pos = np.array([pose.position.x, pose.position.y, pose.position.z])
+            pushed = float((pos - np.asarray(self._force_check["contact_pos"])) @ self._push_direction)
+            self._force_check["pushed_m"] = pushed
+            samples = [f for t, f in self._force_samples if time.monotonic() - t <= PUSH_FORCE_WINDOW_SEC]
+            if samples and np.linalg.norm(np.mean(samples, axis=0)) > PUSH_FORCE_LIMIT_N:
+                self._force_check.update(status="rejected", reason=f"force over {PUSH_FORCE_LIMIT_N:.0f} N during push")
+                return False
+            return pushed < PUSH_DISTANCE
         now = time.monotonic()
         samples = [(t, f) for t, f in self._force_samples if now-t <= PUSH_FORCE_WINDOW_SEC]
         if not samples or now-samples[-1][0] > .1:
@@ -366,18 +449,21 @@ class Push(Node):
             self._force_check = dict(status=status, reason=reason, force_base_n=force.tolist())
             if status == "rejected":
                 return False
-            if status == "validated":
-                self.get_logger().info(f"Push vector validated during motion: {reason}; direction stays fixed")
-                return True
         pose = self._lookup_ee_pose()
         if pose is None:
             self._force_check = dict(status="rejected", reason="missing pose during contact check")
             return False
         pos = np.array([pose.position.x, pose.position.y, pose.position.z])
         offset = float((pos-np.asarray(ball)) @ self._push_direction)
+        if self._force_check.get("status") == "validated":
+            # Where contact was felt: the push distance counts from here.
+            self._force_check.update(contact_pos=pos.tolist(), contact_offset_m=offset, pushed_m=0.)
+            self.get_logger().info(f"Push vector validated during motion: {self._force_check['reason']}; "
+                                   f"contact {offset * 1000:+.1f} mm from predicted; direction stays fixed")
+            return True
         if offset > PUSH_CONTACT_MARGIN:
-            self._force_check = dict(status="rejected", reason="no contact within 5 mm of predicted contact",
-                                     probe_offset_m=offset)
+            self._force_check = dict(status="rejected", probe_offset_m=offset,
+                                     reason=f"no contact within {PUSH_CONTACT_MARGIN * 1000:.0f} mm of predicted contact")
             return False
         return True
 
@@ -391,8 +477,13 @@ class Push(Node):
             return False
         self._force_check = dict(status="waiting", reason="approaching contact")
         endpoint = np.asarray(self._pre_push_pos) + travel*self._push_direction
-        ok = self._cartesian_move(0., PUSH_VELOCITY_SCALE, target_position=endpoint,
-                                 execution_check=lambda: self._check_moving_contact(ball))
+        # Gut check: the whole line must plan collision-free; Servo then drives it.
+        if not self._cartesian_move(0., PUSH_VELOCITY_SCALE, target_position=endpoint, plan_only=True):
+            self._force_check = dict(status="rejected", reason="push line does not plan")
+            return False
+        ok = self._servo_push(ball, travel)
+        if self._force_check["status"] == "validated" and self._force_check.get("pushed_m", 0.) >= PUSH_DISTANCE:
+            return True  # stopped on purpose, PUSH_DISTANCE past the felt contact
         if ok and self._force_check["status"] != "validated":
             self._force_check = dict(status="rejected", reason="motion ended without validated contact")
             return False
@@ -466,10 +557,13 @@ def main(args=None) -> int:
             return 1
         node._object_xyz = latest_object_cloud(episode)
         node._pre_push_pos, push_travel = push_approach(
-            ball, node._object_xyz, PUSH_STANDOFF, PUSH_DISTANCE, node._push_direction)
+            ball, node._object_xyz, PUSH_STANDOFF, PUSH_CONTACT_MARGIN + PUSH_DISTANCE, node._push_direction)
         node.get_logger().info(f"planar_push contact ball center {ball}; pre-push {node._pre_push_pos}")
 
         if not ensure_egm_active(node):
+            return 1
+        if not node._servo_cmd.has_subscribers() or not node._set_servo_paused(True):
+            node.get_logger().error("MoveIt Servo not running (launch with start_servo:=true) -- not moving.")
             return 1
 
         # show_hull=False: push videos don't need the object-hull overlay.
@@ -498,8 +592,7 @@ def main(args=None) -> int:
         node._recording_ft = True
         node.get_logger().info(
             f"Pushing {push_travel*1000:.0f}mm along {node._push_direction.tolist()}  "
-            f"velocity_scale={PUSH_VELOCITY_SCALE}  "
-            f"cartesian_ceiling={PUSH_MAX_CARTESIAN_SPEED*1000:.1f}mm/s"
+            f"by MoveIt Servo at {PUSH_SPEED*1000:.1f} mm/s"
         )
         push_ok = node._validated_push(ball, push_travel)
         node._recording_ft = False
@@ -541,6 +634,7 @@ def main(args=None) -> int:
                 home_ok = False
             if not home_ok:
                 node.get_logger().error("Return home failed -- skipping the post-push snapshot.")
+        node._servo_cmd.close()
         deactivate_egm(node)
         if stage is not None and node._approach_diag:
             try:

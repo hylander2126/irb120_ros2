@@ -15,20 +15,21 @@ attempt on the snapshot taken after it:
       -> press-pull (the conservative contact, then riskier ones) -> stop
   contact missed -> the same attempt once more, then as a failure
   sensor fault   -> the same attempt again
+  operator typed q at arc_static's own prompt -> stop
   object moved or fell over -> stop (a forward-tip slide that left it upright is
       not "moved": the slide was the push, and press-pull runs on the new snapshot)
   success        -> stop
 
 Each tip runs at most once per cascade except for those retries, and there are at
 most MAX_ATTEMPTS attempts in all. Inside one press-pull, arc_static itself steps the
-press force by 1.25x on each lost contact, up to PRESS_FORCE_MAX_N.
+press force by 1.25x on a lost contact in ARC, at most once (arc_static.ADAPTIVE_MAX_ATTEMPTS).
 """
 
 import numpy as np
 
 from irb120_control.util.tip_choice import NOSLIP_TOL_MM, choose_tip
 
-MAX_ATTEMPTS = 4
+MAX_ATTEMPTS = 2
 MOVED_MM = 10.0           # object centroid shift (in the table plane) that stops the cascade
 HEIGHT_CHANGE_MM = 10.0   # change in the object's top height: left tilted, or fell over
 SAME_CONTACT_M = .01      # press contacts closer than this are the same contact
@@ -38,27 +39,33 @@ SENSOR_FAULTS = {"ft_stale", "stale_force", "missing_or_stale_pose", "nonfinite_
 
 PRESS, FORWARD = "press_pull_tip", "forward_tip"
 # Outcomes that end the cascade, and those after which the same attempt runs again.
-FINAL = ("success", "moved")
+FINAL = ("success", "moved", "stopped")
 
 
 def attempt(kind: str, press_candidate: int = 0, force_ref: float | None = None,
-            retry: bool = False) -> dict:
+            retry: bool = False, press_backup: int = 0) -> dict:
     """One planned attempt. press_candidate: 0 = the snapshot's press contact, K >= 1 its
-    K-th press_alternatives entry. force_ref: press-pull's starting press force."""
-    return dict(kind=kind, press_candidate=press_candidate, force_ref=force_ref, retry=retry)
+    K-th press_alternatives entry. press_backup: K >= 1 its K-th press_backups entry
+    instead (the operator's pick at the gate). force_ref: press-pull's starting press force."""
+    return dict(kind=kind, press_candidate=press_candidate, force_ref=force_ref, retry=retry,
+                press_backup=press_backup)
 
 
 def describe(plan: dict) -> str:
     if plan["kind"] == FORWARD:
         return "forward tip" + (" (retry)" if plan["retry"] else "")
-    contact = "conservative contact" if not plan["press_candidate"] else \
-        f"riskier contact #{plan['press_candidate']}"
+    contact = (f"operator's backup contact B{plan['press_backup']}" if plan.get("press_backup")
+               else "conservative contact" if not plan["press_candidate"]
+               else f"riskier contact #{plan['press_candidate']}")
     return (f"press-pull, {contact}, from {plan['force_ref']:.2f} N"
             + (" (retry)" if plan["retry"] else ""))
 
 
 def press_contact(contacts: dict, plan: dict) -> dict:
     """The press contact `plan` would use on this snapshot ({} if there is none)."""
+    if plan.get("press_backup"):
+        backups = contacts.get("press_backups") or []
+        return backups[plan["press_backup"] - 1] if plan["press_backup"] <= len(backups) else {}
     if plan["press_candidate"] == 0:
         return contacts.get("press") or {}
     alternatives = contacts.get("press_alternatives") or []
@@ -120,19 +127,24 @@ def _classify_step(kind: str, results: dict | None, slip_mm: float | None = None
     if results is None:
         return "failed", "the step left no result"
     fault = results.get("abort_reason") or results.get("failure_reason")
+    if fault == "operator":
+        return "stopped", "the operator stopped the step"
     if fault in SENSOR_FAULTS:
         return "sensor_fault", fault
     if kind == PRESS:
         if results.get("completed"):
             if slip_mm is not None and slip_mm > NOSLIP_TOL_MM:
                 return "slip", f"tipped, but the finger slipped ({slip_mm:.1f} mm > {NOSLIP_TOL_MM:.0f} mm)"
+            lost = results.get("unarc_lost_contact_deg")
             return "success", "tipped" + ARC_EXIT_NOTES.get(
                 results.get("arc_exit") or ("balance" if results.get("balance_reached", True) else None),
-                " (stopped before the balance point)")
+                " (stopped before the balance point)") + (
+                f" (lost contact {lost:.1f} deg before the end of UNARC)" if lost is not None else "")
         if results.get("contact_missed"):
             return "no_contact", "no press force where the contact was expected"
         if results.get("force_cap_reached"):
-            return "slip", f"lost contact at {results.get('final_force_ref_n', PRESS_FORCE_MAX_N):.2f} N, the force cap"
+            return "slip", (f"lost contact {results.get('attempts', '?')}x in ARC, last at "
+                            f"{results.get('final_force_ref_n', PRESS_FORCE_MAX_N):.2f} N: no force step left")
         return "failed", fault or f"press-pull {results.get('status', 'failed')}"
     if results.get("completed"):
         return "success", "tipped"

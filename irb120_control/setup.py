@@ -30,16 +30,12 @@ setup(
     entry_points={
         'console_scripts': [
             'estimate_params        = irb120_control.estimation.estimate_params:main',
-            'fbd_plot               = irb120_control.estimation.fbd_plot:main',
-            'tst                    = irb120_control.estimation.tst:main',
             'netft_preprocessor     = irb120_control.monitoring.netft_preprocessor:main',
             'camera_hull_recorder   = irb120_control.monitoring.camera_hull_recorder:main',
             'egm_handler            = irb120_control.util.egm_handler:main',
             'calibrate_ft_sensor    = irb120_control.util.calibrate_ft_sensor:main',
             'arc_static             = irb120_control.arc_static:main',
-            'fwd_arc = irb120_control.fwd_arc:main',
-            'fwd_tip                = irb120_control.fwd_tip:main',
-            'arc_static_batch       = irb120_control.arc_static_batch:main',
+            'fwd_arc                = irb120_control.fwd_arc:main',
             'push                   = irb120_control.push:main',
             'keyboard_jog           = irb120_control.keyboard_jog:main',
             'episode                = irb120_control.util.episode:main',

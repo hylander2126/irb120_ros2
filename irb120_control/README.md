@@ -171,7 +171,7 @@ other way round). Reasons:
 
 - The tip is non-destructive by design: it returns the object to rest, so the
   push afterwards still sees roughly the original pose. The push moves the
-  object 80 mm and can yaw it, and the press contact and pivot are selected
+  object 50 mm and can yaw it, and the press contact and pivot are selected
   for the pose the object started in. Non-destructive measurements first.
 - The push can tip the object instead of sliding it: its lowest allowed ball
   center is 81 mm above the table (`MIN_BALL_CENTER_Z`), high relative to the
@@ -218,7 +218,7 @@ the spread is over 4 mm (`estimate_params.NOSLIP_TOL_MM`), that counts as a slip
 
 After a failed tip, the tip cascade (`util/tip_cascade.py`; design notes in
 `runtime_logs/ADAPTIVE_PRESS_IDEAS.md`) picks the next attempt from why it failed,
-each on the snapshot taken after the one before, up to 4 attempts:
+each on the snapshot taken after the one before, up to 2 attempts:
 
 - press-pull slipped (lost contact at the 13 N cap, or spread > 4 mm) or failed:
   a riskier press contact from the snapshot's `press_alternatives` (more torque per
@@ -231,13 +231,24 @@ each on the snapshot taken after the one before, up to 4 attempts:
   skipped under `--auto`, or offered as skippable (`s`) in step mode. A full-travel
   push after which the upright object shifted more than 10 mm also counts as `slid`.
 - contact missed: the same attempt once more. Sensor fault: the same attempt again.
+- `q` at arc_static's own approach prompt: stop (episode aborted).
 - object moved more than 10 mm (other than a forward-tip slide) or its top height
   changed more than 10 mm: stop.
 
 An arc that ends before the tangent-force flip (arc limit, or the tangent force
-collapsing) counts as a tip; the summary says which (`arc_exit` in the stage results). In step mode
-only the first attempt waits at the gate. `--tip press|forward` keeps the cascade
-to that tip. `arc_static --press-candidate K` runs the K-th press alternative.
+collapsing) counts as a tip; the summary says which (`arc_exit` in the stage results). So does
+a contact lost during UNARC: the ARC is whole, so arc_static retracts without pressing
+again (`unarc_lost_contact_deg` in the stage results) and the log is estimated as usual.
+Inside one press-pull, a contact lost in ARC is retried once at 1.25x force
+(`ADAPTIVE_MAX_ATTEMPTS = 2`).
+
+In step mode every attempt waits at the gate. There `n` cycles through up to 4 tip
+options: the cascade's pick, the other tip, then the snapshot's `press_backups`
+(passing press contacts, most centered over the pivot first). Each switch opens that
+option's image (`final_selection_B<k>.jpg` for a backup). Running an option other
+than the cascade's pick asks why; pick and reason are logged as an `operator override` event.
+`--tip press|forward` keeps the cascade to that tip. `arc_static --press-candidate K`
+runs the K-th press alternative, `--press-backup K` the K-th backup.
 
 `estimate_params` reads episode logs as well as the older
 `<object>/push` and `<object>/arc_squash` folders.
@@ -277,11 +288,15 @@ Candidates must have inward normals within 20 degrees of +X, at any y; among
 candidates in the lowest 10 mm height band, prefer a line through the observed
 footprint center. There is no force steering. After the operator confirms the
 unloaded pre-pose, session tare must succeed. Fresh tool0-axis forces are rotated
-to base_link. The push is continuous, with a rolling 0.1 s force window checked
+to base_link. The push line is planned with MoveIt only as a collision/IK check, then
+driven by MoveIt Servo at 9 mm/s (Servo is on by default), so every stop below is a
+zero twist on the next 50 Hz tick, not a trajectory cancel (cancels were ignored: the arm
+ran to the planned end). A rolling 0.1 s force window is checked
 while moving. At least 0.3 N horizontally and within 45 degrees opposite the
 fixed push vector validates initial contact. Missing/stale force or TF, a 20 N
-mean load before validation, misaligned reaction, or reaching 5 mm past predicted
-contact without validation cancels the trajectory. Cancellation must reach a
+mean load before validation, misaligned reaction, or reaching 50 mm past predicted
+contact without validation stops the push; so does a mean force over 20 N after contact. Once validated, the push goes
+50 mm from where contact was felt (`contact_offset_m`, `pushed_m` in `force_check`). Cancellation must reach a
 terminal result before retreat; if stopping cannot be confirmed, EGM is stopped
 and no further motion is commanded. There is no force steering or ongoing force
 limit after initial validation. These thresholds still need live validation.

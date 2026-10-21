@@ -98,7 +98,7 @@ def test_depth_paired_at_the_same_moment_as_color_not_after_the_sam_call(monkeyp
 
 
 def test_review_mask_from_dbscan_cloud_with_its_own_predictor(monkeypatch):
-    """The cam3 review mask is prompted by the DBSCAN cloud (not the culled one), with
+    """The cam3 review mask is prompted by the DBSCAN cloud's base (not the culled cloud), with
     the review camera's own predictor, alongside the cam1 cull; it carries the cloud
     stamp and cam1's metadata announces it so the snapshot waits."""
     source = np.array([[0., 0, 1], [.01, 0, 1], [.02, 0, 1], [.5, 0, 1]])
@@ -131,7 +131,8 @@ def test_review_mask_from_dbscan_cloud_with_its_own_predictor(monkeypatch):
 
     def box_mask(points, rgb, info, tf, predictor=None):
         assert rgb is review_color and predictor is review_predictor
-        np.testing.assert_array_equal(points, source)  # DBSCAN cloud, not the culled one
+        # A box around the DBSCAN cloud's base (not the culled cloud, not the whole object).
+        np.testing.assert_array_equal(points, module.review_prompt_points(source))
         return mask, None, None, None
 
     node._cull = cull
@@ -150,3 +151,13 @@ def test_review_mask_from_dbscan_cloud_with_its_own_predictor(monkeypatch):
     assert metadata['camera'] == 'cam3' and metadata['cloud_stamp'] == [15, 678]
     np.testing.assert_array_equal(np.frombuffer(saved_mask.data, np.uint8).reshape(2, 3), mask*255)
     review['depth_pub'].publish.assert_not_called()
+
+
+def test_review_prompt_box_covers_only_the_base_padded_down_to_the_table():
+    tall = np.array([[.6, -.2, -.01], [.75, .2, -.01], [.68, 0., .3], [.65, .1, .02]])
+    corners = module.review_prompt_points(tall)
+    assert corners.shape == (8, 3)
+    np.testing.assert_allclose(corners[:, 2].min(), -.025)   # 15 mm below the lowest point
+    np.testing.assert_allclose(corners[:, 2].max(), .03)     # 4 cm band: the 30 cm top is left out
+    np.testing.assert_allclose(corners[:, 0].min(), .57)     # padded 3 cm
+    np.testing.assert_allclose(corners[:, 0].max(), .78)

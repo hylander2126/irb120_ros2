@@ -157,9 +157,11 @@ def fit_support(points, plane, outward=-1.):
                 line_rms_mm=line_rms*1000, quadratic_rms_mm=curve_rms*1000)
 
 
-def screened_boundary(mask, cloud, info, plane, depth):
+def screened_boundary(mask, cloud, info, plane, depth, envelope=.02, depth_optional=False):
     """Lowest mask pixel per column, intersected with the table and screened.
 
+    envelope: max distance (m, table plane) from the object cloud. depth_optional: a pixel
+    with no usable depth around it passes the depth check (one with depth must still pass).
     Returns (pixels, boundary, points, accepted, votes, depth_evidence).
     """
     pixels, votes = lower_boundary(mask, cloud, info)
@@ -169,7 +171,9 @@ def screened_boundary(mask, cloud, info, plane, depth):
     distances = np.full(len(points), np.inf)
     distances[valid] = cKDTree(cloud[:, :2]).query(points[valid, :2])[0]
     depth_ok, depth_evidence = boundary_depth_evidence(pixels, depth, info, plane)
-    accepted = valid & (distances <= .02) & depth_ok & (pixels[:, 1] < mask.shape[0]-6)
+    if depth_optional:
+        depth_ok = depth_ok | ~np.asarray(depth_evidence['valid_neighborhood'])
+    accepted = valid & (distances <= envelope) & depth_ok & (pixels[:, 1] < mask.shape[0]-6)
     return pixels, boundary, points, accepted, votes, depth_evidence
 
 

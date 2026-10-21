@@ -2,6 +2,7 @@
 import ast
 from pathlib import Path
 from types import SimpleNamespace as NS
+from collections import deque
 from unittest.mock import Mock
 
 import numpy as np
@@ -18,8 +19,10 @@ def method(name, **extra):
     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
     constants = [n for n in tree.body if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id in {
-                     'PUSH_CONTACT_MARGIN', 'PUSH_CONTACT_FORCE_N', 'PUSH_FORCE_WINDOW_SEC',
+                     'PUSH_CONTACT_MARGIN', 'PUSH_DISTANCE', 'PUSH_CONTACT_FORCE_N', 'PUSH_FORCE_WINDOW_SEC',
                      'PUSH_FORCE_ANGLE_DEG', 'PUSH_FORCE_LIMIT_N', 'PUSH_VELOCITY_SCALE',
+                     'PUSH_SPEED', 'PUSH_CONTROL_HZ', 'PUSH_LINE_GAIN', 'PUSH_SETTLE_SEC',
+                     'PUSH_TRACK_GAIN', 'PUSH_MAX_CMD_SPEED',
                      'APPROACH_VELOCITY_SCALE', 'PUSH_APPROACH_LIFT', 'PUSH_DESCENT_SPEED'} for t in n.targets)]
     env = dict(np=np, BASE_FRAME='base_link', force_push_check=force_push_check, **extra)
     exec(compile(ast.Module(body=[*constants, fn], type_ignores=[]), str(SOURCE), 'exec'), env)
@@ -31,7 +34,7 @@ def moving_node(force, *, offset=0., stale=False):
     ball = np.array([.6, .01, .04])
     p = ball + offset*d
     samples = [(10.+i*.01, np.asarray(force)) for i in range(9)] if not stale else [(9., force)]
-    node = NS(_push_direction=d, _force_samples=samples, _force_check={'status': 'waiting'},
+    node = NS(_push_direction=d, _force_samples=deque(samples), _force_check={'status': 'waiting'},
               _lookup_ee_pose=lambda: NS(position=NS(x=p[0], y=p[1], z=p[2])),
               get_logger=Mock(return_value=Mock()))
     return node, ball
@@ -51,7 +54,7 @@ def test_force_direction_checked_while_moving(force, status):
 
 
 def test_no_contact_stops_after_bounded_distance_and_stale_force_rejects():
-    for stale, offset in [(False, .006), (True, 0.)]:
+    for stale, offset in [(False, .051), (True, 0.)]:
         node, ball = moving_node([0., 0., 0.], offset=offset, stale=stale)
         assert not method('_check_moving_contact', time=NS(monotonic=lambda: 10.09))(node, ball)
         assert node._force_check['status'] == 'rejected'
@@ -65,25 +68,69 @@ def test_unvalidated_contact_may_continue_before_contact_margin():
 
 def test_validation_is_latched_and_does_not_steer():
     node, ball = moving_node([0., 1., 0.], offset=.02)
-    node._force_check = dict(status='validated')
+    node._force_check = dict(status='validated', contact_pos=ball.tolist())
     assert method('_check_moving_contact', time=NS(monotonic=lambda: 10.09))(node, ball)
     assert node._force_check['status'] == 'validated'
 
 
-def test_one_continuous_push_uses_execution_check_and_original_endpoint():
+def test_contact_felt_late_is_accepted_and_push_stops_50mm_after_it():
+    check = method('_check_moving_contact', time=NS(monotonic=lambda: 10.09))
+    node, ball = moving_node([-.48, .14, 0.], offset=.012)  # felt 12 mm past the prediction
+    assert check(node, ball) and node._force_check['status'] == 'validated'
+    assert node._force_check['contact_offset_m'] == pytest.approx(.012)
+    contact = np.asarray(node._force_check['contact_pos'])
+    for pushed, going in [(.03, True), (.051, False)]:
+        p = contact + pushed*node._push_direction
+        node._lookup_ee_pose = lambda p=p: NS(position=NS(x=p[0], y=p[1], z=p[2]))
+        assert check(node, ball) == going
+    assert node._force_check['pushed_m'] == pytest.approx(.051)
+    # The motion was cancelled on purpose: _validated_push reports success.
+    node._pre_push_pos = ball - .04*node._push_direction
+    node._mean_contact_force = lambda: np.zeros(3)
+    node._cartesian_move = lambda *a, **kw: kw['plan_only']
+    def servo(b, travel):
+        node._force_check.update(status='validated', pushed_m=.05)
+        return True
+    node._servo_push = servo
+    assert method('_validated_push')(node, ball, .065)
+
+
+def test_push_line_is_only_planned_then_servoed_to_a_stop_50mm_after_contact():
     node, ball = moving_node([-.48, .14, 0.])
     node._pre_push_pos = ball - .04*node._push_direction
     node._mean_contact_force = lambda: np.zeros(3)
-    node._check_moving_contact = lambda b: method('_check_moving_contact',
-                                               time=NS(monotonic=lambda: 10.09))(node, b)
     moves = []
-    def move(*args, **kwargs):
-        moves.append(kwargs)
-        return kwargs['execution_check']()
-    node._cartesian_move = move
-    assert method('_validated_push')(node, ball, .08)
-    assert len(moves) == 1
-    np.testing.assert_allclose(moves[0]['target_position'], ball + .04*node._push_direction)
+    node._cartesian_move = lambda *a, **kw: moves.append(kw) or True
+    # Fake Servo: each tick moves the finger by the commanded twist and stamps a fresh
+    # wrench (reaction once the ball passes the predicted contact).
+    clock = NS(now=10.)
+    state = NS(pos=np.asarray(node._pre_push_pos, dtype=float), twists=[], paused=[])
+    def spin_once(n, timeout_sec):
+        clock.now += timeout_sec
+    def publish_twist(vx, vy, vz, state=''):
+        v = np.array([vx, vy, vz])
+        state_.twists.append(v)
+        state_.pos = state_.pos + .57 * v / 50.  # this rig's Servo: ~57% of the command
+        touching = (state_.pos - ball) @ node._push_direction > -.005
+        node._force_samples.append((clock.now, np.array([-.48, .14, 0.]) if touching else np.zeros(3)))
+        return True
+    state_ = state
+    node._servo_cmd = NS(publish_twist=publish_twist, publish_zero=lambda *a: True)
+    node._lookup_ee_pose = lambda: NS(position=NS(x=state_.pos[0], y=state_.pos[1], z=state_.pos[2]))
+    node._set_servo_paused = lambda paused: state_.paused.append(paused) or True
+    node._motion_uncertain = False
+    env = dict(time=NS(monotonic=lambda: clock.now), rclpy=NS(ok=lambda: True, spin_once=spin_once))
+    node._check_moving_contact = lambda b: method('_check_moving_contact', **env)(node, b)
+    node._servo_push = lambda b, travel: method('_servo_push', **env)(node, b, travel)
+    assert method('_validated_push')(node, ball, .2)
+    assert len(moves) == 1 and moves[0]['plan_only']
+    np.testing.assert_allclose(moves[0]['target_position'], ball + .16*node._push_direction)
+    assert state_.paused == [False, True]
+    assert node._force_check['pushed_m'] == pytest.approx(.05, abs=.001)
+    pushed = (state_.pos - np.asarray(node._force_check['contact_pos'])) @ node._push_direction
+    assert pushed == pytest.approx(.05, abs=.001)  # stopped there, not at the planned end
+    speeds = [.57 * np.linalg.norm(v) for v in state_.twists[-50:]]
+    assert np.mean(speeds) == pytest.approx(.009, rel=.05)  # tracks PUSH_SPEED despite the 57%
 
 
 def test_no_full_motion_without_fresh_unloaded_force_or_validated_contact():
@@ -95,6 +142,7 @@ def test_no_full_motion_without_fresh_unloaded_force_or_validated_contact():
     node._pre_push_pos = ball - .04*node._push_direction
     node._mean_contact_force = lambda: np.zeros(3)
     node._cartesian_move = Mock(return_value=True)
+    node._servo_push = Mock(return_value=True)
     assert not method('_validated_push')(node, ball, .08)
     assert node._force_check['status'] == 'rejected'
 
