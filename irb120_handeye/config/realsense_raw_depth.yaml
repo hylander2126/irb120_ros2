@@ -12,3 +12,4 @@ enable_infra2: true
 decimation_filter.enable: false
 spatial_filter.enable: false
 temporal_filter.enable: false
+hole_filling_filter.enable: false

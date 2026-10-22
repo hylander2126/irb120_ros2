@@ -20,7 +20,7 @@ Verify it's alive:
 """
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import IfElseSubstitution, LaunchConfiguration, PathJoinSubstitution
 
@@ -30,18 +30,37 @@ from launch.substitutions import IfElseSubstitution, LaunchConfiguration, PathJo
 CAM3_SERIAL = "'213622073793'"
 
 
+def validate_clip_distance(context):
+    import math
+    value = LaunchConfiguration('clip_distance').perform(context)
+    try:
+        valid = math.isfinite(float(value))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f'clip_distance must be a finite number, e.g. -1.0, not {value!r}')
+    return []
+
+
 def generate_launch_description() -> LaunchDescription:
     calibration_arg = DeclareLaunchArgument(
         "calibration",
         default_value="false",
         description="Use the hand-eye calibration profile (1280x720 color, depth off).",
     )
+    diagnostics_arg = DeclareLaunchArgument(
+        "depth_diagnostics", default_value="false",
+        description="Enable both infrared streams and disable depth postprocessing for a controlled diagnostic capture.")
+    clip_arg = DeclareLaunchArgument(
+        "clip_distance", default_value="1.4",
+        description="Maximum depth in metres; a negative value disables this software cutoff. Default unchanged.")
     realsense_yaml = PathJoinSubstitution([
         get_package_share_directory("irb120_handeye"), "config",
         IfElseSubstitution(
             LaunchConfiguration("calibration"),
             "realsense_calibration.yaml",
-            "realsense_common.yaml",
+            IfElseSubstitution(LaunchConfiguration("depth_diagnostics"),
+                               "realsense_raw_depth.yaml", "realsense_common.yaml"),
         ),
     ])
 
@@ -58,7 +77,7 @@ def generate_launch_description() -> LaunchDescription:
             "camera_name": "realsense3",
             "camera_namespace": "",
             "serial_no": CAM3_SERIAL,
-            "clip_distance": "1.4",
+            "clip_distance": LaunchConfiguration("clip_distance"),
             "config_file": realsense_yaml,
         }.items(),
     )
@@ -73,6 +92,9 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         calibration_arg,
+        diagnostics_arg,
+        clip_arg,
+        OpaqueFunction(function=validate_clip_distance),
         realsense3_launch,
         cam3_tf,
     ])
