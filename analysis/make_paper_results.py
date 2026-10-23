@@ -327,7 +327,7 @@ def figures(endpoints, out, methods=PAPER_CANDIDATES):
         axes[1].set_xticks(range(len(objects)), objects, rotation=45, ha='right')
         axes[0].legend(fontsize=8, ncol=3)
         axes[0].set_title('Tier 1: one point per trial endpoint (clipped at ±80%)')
-        fig.savefig(out / 'tier1_errors.png', dpi=150); fig.savefig(out / 'tier1_errors.pdf'); plt.close(fig)
+        fig.savefig(out / 'tier1_errors.png', dpi=150); plt.close(fig)
     tier2 = [r for r in endpoints if r['tier'] == 2]
     if tier2:
         objects = sorted({r['object'] for r in tier2})
@@ -341,7 +341,7 @@ def figures(endpoints, out, methods=PAPER_CANDIDATES):
                     ax.plot([i] * len(vals), vals, marker, alpha=.8, color='C0' if marker == 'o' else 'C1')
             ax.set_xticks(range(len(objects)), objects, rotation=45, ha='right'); ax.set_title(label, fontsize=9); ax.grid(alpha=.2)
         fig.suptitle('Tier 2: estimates only (no reference); spread across trials is repeatability')
-        fig.savefig(out / 'tier2_estimates.png', dpi=150); fig.savefig(out / 'tier2_estimates.pdf'); plt.close(fig)
+        fig.savefig(out / 'tier2_estimates.png', dpi=150); plt.close(fig)
 
 
 def summary_table(endpoints, methods=METHODS):

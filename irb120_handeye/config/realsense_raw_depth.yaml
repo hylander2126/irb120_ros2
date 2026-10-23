@@ -1,6 +1,7 @@
 # Diagnostic profile: retain production streams while disabling post-processing.
 # Use only for controlled raw-vs-filtered snapshots, not as a tuned production profile.
 pointcloud.enable: true
+depth_module.emitter_enabled: 1
 enable_depth: true
 align_depth.enable: true
 enable_sync: true
