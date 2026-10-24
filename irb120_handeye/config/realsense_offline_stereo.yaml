@@ -1,0 +1,16 @@
+# Offline stationary capture. No continuous neural inference or dense ROS clouds.
+enable_depth: true
+enable_color: true
+enable_infra1: true
+enable_infra2: true
+enable_sync: true
+depth_module.depth_profile: 1280x720x6
+depth_module.infra_profile: 1280x720x6
+rgb_camera.color_profile: 1280x720x6
+depth_module.emitter_enabled: 1
+pointcloud.enable: false
+align_depth.enable: false
+decimation_filter.enable: false
+spatial_filter.enable: false
+temporal_filter.enable: false
+hole_filling_filter.enable: false

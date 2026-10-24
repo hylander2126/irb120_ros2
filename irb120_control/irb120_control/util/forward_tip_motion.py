@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from irb120_control.util.push_geometry import (
     APPROACH_CLEARANCE, BALL_RADIUS, OBJECT_PADDING,
@@ -11,6 +12,31 @@ from irb120_control.util.push_geometry import (
 
 
 TIP_STANDOFF = .02  # ball-centre standoff; tip_targets raises it if needed to clear the padded box
+
+# A handful of isolated stray points (sensor noise, a stereo mismatch) can otherwise blow the
+# padded box out by hundreds of mm, forcing a needlessly (sometimes absurdly) distant pre-tip
+# approach. Genuine object surface is never isolated -- it has many nearby neighbors, since it's
+# a surface, not speckle -- so a point only counts toward the box if it isn't alone. This can
+# only make the computed box smaller/tighter, never larger, so it can only reduce a clearance
+# that was inflated by noise; it never invents clearance the (dense, real) geometry doesn't ask
+# for in the first place.
+_ROBUST_BOUNDS_RADIUS_M = .01     # neighbor search radius: well under real surfaces' point spacing
+_ROBUST_BOUNDS_MIN_NEIGHBORS = 2  # including itself; isolated noise measured at 1, real surface >=4
+                                   # at this radius on an actual capture -- wide, clean separation
+
+
+def _robust_bounds(cloud):
+    """(min, max) of `cloud` ignoring points with fewer than _ROBUST_BOUNDS_MIN_NEIGHBORS other
+    points within _ROBUST_BOUNDS_RADIUS_M -- see the module comment above. Falls back to the
+    plain min/max when there are too few points to tell noise from signal (also keeps this a
+    no-op on small/synthetic clouds, e.g. in tests)."""
+    if len(cloud) < _ROBUST_BOUNDS_MIN_NEIGHBORS * 4:
+        return cloud.min(axis=0), cloud.max(axis=0)
+    counts = cKDTree(cloud).query_ball_point(cloud, _ROBUST_BOUNDS_RADIUS_M, return_length=True)
+    dense = cloud[counts >= _ROBUST_BOUNDS_MIN_NEIGHBORS]
+    if not len(dense):
+        return cloud.min(axis=0), cloud.max(axis=0)
+    return dense.min(axis=0), dense.max(axis=0)
 
 
 def tip_targets(contact, xyz, standoff=0.04):
@@ -52,8 +78,9 @@ def tip_targets(contact, xyz, standoff=0.04):
         raise ValueError('Edge-normal motion does not push into the selected face')
     if (pivot - ball) @ direction <= 0:
         raise ValueError('Forward-tip contact must be behind its tipping edge')
-    lo = cloud.min(axis=0) - OBJECT_PADDING
-    hi = cloud.max(axis=0) + OBJECT_PADDING
+    lo, hi = _robust_bounds(cloud)
+    lo = lo - OBJECT_PADDING
+    hi = hi + OBJECT_PADDING
     # Minimum projection of the actual axis-aligned collision box, not just
     # the cloud. This also handles diagonally oriented tipping edges.
     box_min = np.where(direction >= 0, lo, hi) @ direction

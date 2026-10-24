@@ -69,6 +69,7 @@ from irb120_control.util.episode import write_json_atomic
 from irb120_control.util.seed_model import apply as seed_apply, moved_pivot_report, register_planar
 from irb120_control.util.tip_choice import choose_tip
 from irb120_perception.contact_point_selector import select_contact_points
+from irb120_perception.contact_graphics import CONTACT_COLORS
 
 CAMERAS = {"cam1": "realsense", "cam2": "realsense2", "cam3": "realsense3"}
 BASE_FRAME = "base_link"
@@ -106,7 +107,8 @@ MIN_BALL_CENTER_Z = 0.06
 # MoveIt still collision-checks the table on the approach and on the Cartesian push.
 PUSH_MIN_BALL_CENTER_Z = -0.021 + 0.01325 + 0.010
 
-CONTACT_COLORS = {"planar_push": (0, 200, 0), "forward_tip": (13, 140, 255), "press": (255, 0, 255)}  # BGR
+# CONTACT_COLORS now lives in irb120_perception.contact_graphics (shared with the offline
+# FFS contact adapter's montage/3D rendering); imported above.
 
 
 def _stamp(msg) -> float:
@@ -305,44 +307,9 @@ def _crop_panel(img, point, info, half=110, size=320, label=""):
     return panel
 
 
-def _final_selection_montage(review_frames, contacts, pivot_record):
-    """Full camera views of the final contacts, keeping the pivot in context."""
-    from irb120_perception.contact_graphics import contact_graphic, DepthDrawing
-    press = contacts.get("press") or {}
-    if not press.get("available"):
-        return None
-    panels = []
-    for cam in ("cam1", "cam2", "cam3"):
-        if cam not in review_frames:
-            continue
-        color, depth, info = review_frames[cam]
-        img = contact_graphic(color, depth, info, press, press.get("geometry"))
-        drawing = DepthDrawing(img, depth, info, occlusion=False)
-        for mode, label, shade in [("planar_push", "PUSH", (0, 230, 0)),
-                                   ("forward_tip", "FORWARD TIP", (0, 140, 255))]:
-            selected = contacts.get(mode) or {}
-            if not selected.get("available"):
-                continue
-            point = np.asarray(selected["point"])
-            drawing.marker(point, shade)
-            geometry = selected.get("geometry") or {}
-            if mode == "forward_tip" and geometry.get("pivot") is not None:
-                pivot, axis = np.asarray(geometry["pivot"]), np.asarray(geometry["axis"])
-                drawing.line(pivot - .04*axis, pivot + .04*axis, shade)
-                drawing.marker(pivot, shade)
-            direction = (selected.get("geometry") or {}).get("direction", selected.get("direction"))
-            if direction is not None:
-                drawing.line(point, point+.04*np.asarray(direction), shade, arrow=True)
-            uv, z = drawing.project([point])
-            if z[0] > .05 and np.isfinite(uv).all():
-                offset = [8, 20] if mode == "forward_tip" else [8, -6]
-                cv2.putText(drawing.image, label, tuple(np.rint(uv[0]+offset).astype(int)),
-                            cv2.FONT_HERSHEY_SIMPLEX, .4, shade, 1, cv2.LINE_AA)
-        panels.append(drawing.image)
-    if not panels:
-        return None
-    height = min(p.shape[0] for p in panels)
-    return np.hstack([cv2.resize(p, (int(p.shape[1]*height/p.shape[0]), height)) for p in panels])
+# _final_selection_montage moved to irb120_perception.contact_graphics.final_selection_montage
+# so the offline FFS contact adapter (scripts/select_stereo_contacts.py) renders identically
+# instead of reinventing its own, simpler version.
 
 
 def _seed_model(episode):
@@ -682,10 +649,12 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
             graphics.setdefault("errors", {})[cam] = str(exc)
             node.get_logger().warn(f"[snapshot] contact graphics: {exc}")
     forward = contacts.get("forward_tip") or {}
+    forward_pre = None  # reused below by final_selection_montage, so it isn't computed twice
     if forward.get("available"):
         from irb120_control.util.forward_tip_motion import TIP_STANDOFF, tip_targets
         try:
             pre = tip_targets(forward, obj, TIP_STANDOFF)[3]
+            forward_pre = pre
         except ValueError as exc:  # fwd_tip would refuse this contact too; draw without a pre-tip
             pre = np.asarray(forward["ball_center"])
             graphics.setdefault("errors", {})["forward_pre_tip"] = str(exc)
@@ -693,7 +662,8 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
             name = f"{cam}_forward_contact_review.png"
             try:
                 img = contact_graphic(color, depth, info, forward, forward.get("geometry"),
-                                      pre=pre, reference_arrow=False)
+                                      pre=pre, reference_arrow=False,
+                                      mode_color=CONTACT_COLORS["forward_tip"])
                 if not cv2.imwrite(str(out / name), img):
                     raise OSError(f"could not write {name}")
                 graphics["files"].append(name)
@@ -707,12 +677,13 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
     # its press point when applied, else the cloud-pivot fallback) -- the
     # same three-camera view for every contact.
     try:
-        montage = _final_selection_montage(review_frames, contacts, record.get("rgb_pivot") or {})
+        from irb120_perception.contact_graphics import final_selection_montage
+        montage = final_selection_montage(review_frames, contacts, forward_pre=forward_pre)
         if montage is not None and cv2.imwrite(str(out / "final_selection.jpg"), montage):
             record["final_selection"] = {"file": "final_selection.jpg"}
         # One image per press backup, opened only when the operator switches to it ('n').
         for backup in contacts.get("press_backups") or []:
-            montage = _final_selection_montage(review_frames, dict(contacts, press=backup), {})
+            montage = final_selection_montage(review_frames, dict(contacts, press=backup), forward_pre=forward_pre)
             if montage is not None:
                 cv2.imwrite(str(out / f"final_selection_B{backup['rank']}.jpg"), montage)
     except (ValueError, KeyError, OSError, cv2.error) as exc:

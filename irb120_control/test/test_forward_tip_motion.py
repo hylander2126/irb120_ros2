@@ -32,6 +32,25 @@ def test_oblique_edge_not_sloped_face_sets_horizontal_line_and_box_clearance(ang
     assert pre @ direction <= np.where(direction >= 0, lo, hi) @ direction - BALL_RADIUS - APPROACH_CLEARANCE + 1e-12
 
 
+def test_isolated_outliers_do_not_inflate_the_pre_tip_clearance():
+    """A couple of stray points (sensor noise, a stereo mismatch) far from the real surface
+    must not blow out the padded box the pre-tip standoff has to clear. Real surface points are
+    never isolated like this -- dense grid here stands in for one, well above the robust-bounds
+    neighbor threshold so none of it gets excluded either."""
+    grid = np.stack(np.meshgrid(np.arange(.35, .45, .003), np.arange(.05, .15, .003),
+                                 [.2]), axis=-1).reshape(-1, 3)
+    outliers = np.array([[.05, .1, .2], [.08, .11, .19]])  # isolated, ~300-350 mm from the grid
+    saved = contact()
+    clean = tip_targets(saved, grid)[3]
+    with_outliers = tip_targets(saved, np.vstack([grid, outliers]))[3]
+    assert np.allclose(clean, with_outliers)
+    # Sanity check the outliers really would have moved it, proving the filter is load-bearing
+    # here and not just inactive (e.g. the grid alone already clearing by coincidence).
+    lo = outliers.min(axis=0)[0] - OBJECT_PADDING
+    naive_clearance = (saved['ball_center'][0] - lo) + BALL_RADIUS + APPROACH_CLEARANCE
+    assert naive_clearance > 2 * np.linalg.norm(clean - saved['ball_center'])
+
+
 @pytest.mark.parametrize('field,value', [('axis', [0., 0., 0.]),
                                        ('direction', [0., 0., 1.]),
                                        ('pivot', [float('nan'), 0., 0.])])

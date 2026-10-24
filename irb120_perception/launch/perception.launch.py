@@ -104,22 +104,35 @@ def generate_launch_description() -> LaunchDescription:
         executable='object_detector_dbscan',
         name='object_detector',
         output='screen',
+        # sklearn isn't installed for the system interpreter irb120_perception is built
+        # under (a gap from the 2026-10 lab PC migration); it lives in the venv, so route
+        # this node through it too, same prefix/thread-cap pattern as the SAM cull below.
+        prefix=[os.path.expanduser('~/.virtualenvs/irb_venv/bin/python3')],
+        additional_env={'OMP_NUM_THREADS': '4', 'OPENBLAS_NUM_THREADS': '4', 'MKL_NUM_THREADS': '4'},
         parameters=[dbscan_params, active_param],
     )
 
     # ---- SAM cull of DBSCAN's cloud -------------------------------------------
-    # MobileSAM needs torch, so this one node runs on ~/irb_venv's Python with
-    # BLAS threads capped (see README: an uncapped venv numpy once knocked out EGM).
+    # MobileSAM needs torch, so this one node runs on ~/.virtualenvs/irb_venv's Python
+    # with BLAS threads capped (see README: an uncapped venv numpy once knocked out EGM).
     sam_checkpoint_arg = DeclareLaunchArgument(
         'sam_checkpoint',
-        default_value=os.path.expanduser('~/irb120_ws_models/mobile_sam/mobile_sam.pt'),
+        default_value=os.path.expanduser('~/Documents/irb120_ws_models/mobile_sam/mobile_sam.pt'),
+    )
+    sam_device_arg = DeclareLaunchArgument(
+        'sam_device', default_value='cuda',
+        description=(
+            "MobileSAM device. Verified working on this RTX 4060 (~60 MB VRAM, warm inference "
+            "~0.06-0.15s/frame vs ~0.85s/frame on CPU; see scripts/STEREO_OFFLINE.md). "
+            "Set to 'cpu' to restore the old default."
+        ),
     )
     sam_cull_node = Node(
         package='irb120_perception',
         executable='object_detector_dbscan_sam_cull',
         name='object_detector_dbscan_sam_cull',
         output='screen',
-        prefix=[os.path.expanduser('~/irb_venv/bin/python3')],
+        prefix=[os.path.expanduser('~/.virtualenvs/irb_venv/bin/python3')],
         additional_env={'OMP_NUM_THREADS': '8', 'OPENBLAS_NUM_THREADS': '8', 'MKL_NUM_THREADS': '8'},
         parameters=[{
             'base_frame': 'base_link',
@@ -127,7 +140,7 @@ def generate_launch_description() -> LaunchDescription:
             'color_topic': '/realsense/color/image_raw',
             'camera_info_topic': '/realsense/color/camera_info',
             'sam_checkpoint': LaunchConfiguration('sam_checkpoint'),
-            'sam_device': 'cpu',
+            'sam_device': LaunchConfiguration('sam_device'),
             'box_padding_px': 12,
             'min_cull_interval_sec': 2.0,
             # cam3 mask for the forward-tip (far-edge) pivot fit; culls nothing.
@@ -158,6 +171,7 @@ def generate_launch_description() -> LaunchDescription:
         cam3_cloud_arg,
         active_at_start_arg,
         sam_checkpoint_arg,
+        sam_device_arg,
         dbscan_node,
         sam_cull_node,
         twin_node,

@@ -1,14 +1,22 @@
-# Diagnostic profile: retain production streams while disabling post-processing.
-# Use only for controlled raw-vs-filtered snapshots, not as a tuned production profile.
+# Default high-resolution stationary FFS capture profile (2026-10-23).
+# Retain legacy aligned depth/cloud topics; offline-only launch omits them.
 pointcloud.enable: true
 enable_depth: true
 align_depth.enable: true
 enable_sync: true
 
-# Publish one rectified infrared view so stereo texture/projector coverage can be inspected.
+# Calibrated rectified stereo pair for offline FFS.
 enable_infra1: true
 enable_infra2: true
 
 decimation_filter.enable: false
 spatial_filter.enable: false
 temporal_filter.enable: false
+hole_filling_filter.enable: false
+
+# Best tested capture resolution; 6 Hz is acquisition, not FFS processing rate.
+enable_color: true
+depth_module.depth_profile: 1280x720x6
+depth_module.infra_profile: 1280x720x6
+rgb_camera.color_profile: 1280x720x6
+depth_module.emitter_enabled: 1

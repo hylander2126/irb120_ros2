@@ -49,7 +49,7 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 # The venv holding torch/mobile_sam — see this file's docstring, "Interpreter".
-VENV_PYTHON = os.path.expanduser('~/irb_venv/bin/python3')
+VENV_PYTHON = os.path.expanduser('~/.virtualenvs/irb_venv/bin/python3')
 
 
 def generate_launch_description() -> LaunchDescription:

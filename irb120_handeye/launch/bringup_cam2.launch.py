@@ -40,7 +40,7 @@ def generate_launch_description() -> LaunchDescription:
         "raw_depth",
         default_value="true",
         description=(
-            "Disable decimation/spatial/temporal filters and publish IR. Enabled by default; "
+            "1280x720 stereo/RGB at 6 Hz, emitter on, unfiltered depth. Default; "
             "set false to restore the filtered profile."
         ),
     )

@@ -361,10 +361,10 @@ def generate_launch_description():
     )
     perception_active_at_start_arg = DeclareLaunchArgument(
         'perception_active_at_start',
-        default_value='true',
+        default_value='false',
         description=(
             'Whether object_detector starts out processing '
-            'immediately (default) or idle until the first perception snapshot '
+            'immediately or idle (default) until the first perception snapshot '
             'switches it on — see irb120_perception/perception.launch.py.'
         ),
     )
