@@ -19,7 +19,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
-from vision_msgs.msg import Detection3DArray
 from visualization_msgs.msg import Marker, MarkerArray
 
 from irb120_control.util.video_stamps import frame_stamps_path
@@ -108,7 +107,7 @@ class CameraHullRecorder(Node):
 
         self.declare_parameter("image_topic", "/realsense/color/image_raw")
         self.declare_parameter("camera_info_topic", "/realsense/color/camera_info")
-        self.declare_parameter("marker_topic", "/object_detector/markers")
+        self.declare_parameter("marker_topic", "/perception/markers")
         self.declare_parameter("contact_marker_topic", "/contact_point_selector/markers")
         self.declare_parameter("annotated_image_topic", "~/annotated_image")
         self.declare_parameter("recording_service", "~/set_recording")
@@ -208,7 +207,6 @@ class CameraHullRecorder(Node):
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._ft_sub = self.create_subscription(WrenchStamped, self.get_parameter("ft_topic").value, self._on_wrench, 10)
-        self._det_sub = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._annotated_pub = self.create_publisher(Image, self._annotated_image_topic, 10)
         self._recording_srv = self.create_service(SetBool, self._recording_service_name, self._on_set_recording)
 
@@ -224,24 +222,6 @@ class CameraHullRecorder(Node):
         self._ft_fy = msg.wrench.force.y
         self._ft_fz = msg.wrench.force.z
         self._ft_received = True
-
-    def _on_detection(self, msg: Detection3DArray) -> None:
-        if not msg.detections:
-            return
-        hyp = msg.detections[0].results[0] if msg.detections[0].results else None
-        if hyp is None:
-            return
-        q = hyp.pose.pose.orientation
-        # Convert quaternion → RPY (intrinsic XYZ / extrinsic ZYX)
-        sinr = 2.0 * (q.w * q.x + q.y * q.z)
-        cosr = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
-        sinp = 2.0 * (q.w * q.y - q.z * q.x)
-        siny = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self._obj_roll_deg  = math.degrees(math.atan2(sinr, cosr))
-        self._obj_pitch_deg = math.degrees(math.asin(max(-1.0, min(1.0, sinp))))
-        self._obj_yaw_deg   = math.degrees(math.atan2(siny, cosy))
-        self._obj_pose_received = True
 
     def _on_contact_markers(self, msg: MarkerArray) -> None:
         """Keep the selector contacts and pivot geometry for RGB projection.

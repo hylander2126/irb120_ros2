@@ -1,3 +1,5 @@
+> Historical snapshot, archived 2026-10-24. Superseded by the current package README. Commands and status below are not current instructions.
+
 World, looking at it from side profile, +X to the right, +Z up, +Y into the page.
 
 Regular Box-shaped object resting on surface. Object frame same orientation as world, but located at the TIPPING EDGE of the object.

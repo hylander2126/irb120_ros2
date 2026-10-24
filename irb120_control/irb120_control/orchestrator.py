@@ -207,7 +207,7 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
     else:
         print(f"  planar_push  NONE: {push.get('reason')}")
 
-    image = next((folder / n for n in ("final_selection.jpg", "cam1_overlay.png") if (folder / n).exists()), None)
+    image = next((folder / n for n in ("final_selection.png", "final_selection.jpg", "cam1_overlay.png") if (folder / n).exists()), None)
     if image is not None:
         print(f"    image: {image}")
         if open_images:
@@ -302,7 +302,10 @@ def run_episode(node, args, note: str) -> Episode:
     episode.add_event(f"pipeline: order {args.order}, force_ref {args.force_ref} N, "
                       f"{'auto' if args.auto else 'step'} mode"
                       + (", OFFICIAL" if args.official_info else ""))
-    take_snapshot(node, episode, label="initial")
+    snapshot = take_snapshot(node, episode, label="initial")
+    if not snapshot["ok"]:
+        episode.set_outcome("aborted", snapshot["reason"])
+        return episode
     if not registration_ok(episode, args):
         episode.set_outcome("aborted", "camera agreement check failed before any motion")
         return episode

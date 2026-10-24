@@ -45,7 +45,6 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
-from vision_msgs.msg import Detection3DArray
 
 from irb120_control.controllers.force_controller import PIDForceController
 from irb120_perception.press_targets import press_targets, PRESS_STANDOFF
@@ -215,7 +214,6 @@ class ArcStatic(Node):
         self._tf_listener     = TransformListener(self._tf_buffer, self)
         self._servo_cmd       = ServoCommandPublisher(self, "/servo_node/delta_twist_cmds", SERVO_FRAME)
         self._wrench_sub      = self.create_subscription(WrenchStamped, "/netft_data_transformed", self._on_wrench, 10)
-        self._det_sub         = self.create_subscription(Detection3DArray, "/object_detector/detections", self._on_detection, 10)
         self._move_group_client = ActionClient(self, MoveGroup, "/move_action")
         self._timer = None
 
@@ -478,40 +476,6 @@ class ArcStatic(Node):
         ])
         if self._force_z > 0.25 and t - self._last_wrench_log_time > 0.2:
             self._last_wrench_log_time = t
-
-    def _on_detection(self, msg: Detection3DArray) -> None:
-        if not msg.detections:
-            return
-        hyp = msg.detections[0].results[0] if msg.detections[0].results else None
-        if hyp is None:
-            return
-        t = self._now_s()
-        p = hyp.pose.pose.position
-        q = hyp.pose.pose.orientation
-
-        # The perception stack publishes in 'base_link' (see perception.launch.py) but
-        # every other stream in this log — EE pose, ft pose, the arc centre — is in
-        # BASE_FRAME ('world'). Those differ by the 21 mm bracket under the robot base,
-        # so logging the detection raw would put the object 21 mm low in z relative to
-        # everything the estimator compares it against.
-        src = msg.header.frame_id
-        if src and src != BASE_FRAME:
-            try:
-                tf = self._tf_buffer.lookup_transform(BASE_FRAME, src, rclpy.time.Time())
-            except TransformException as exc:
-                self._warn_throttled(f"Dropping detection: no TF {src} -> {BASE_FRAME}: {exc}")
-                return
-            tr, ro = tf.transform.translation, tf.transform.rotation
-            rq = (ro.x, ro.y, ro.z, ro.w)
-            rx, ry, rz = _quat_rotate(rq, (p.x, p.y, p.z))
-            px, py, pz = rx + tr.x, ry + tr.y, rz + tr.z
-            qx, qy, qz, qw = _quat_mul(rq, (q.x, q.y, q.z, q.w))
-        else:
-            px, py, pz = p.x, p.y, p.z
-            qx, qy, qz, qw = q.x, q.y, q.z, q.w
-
-        obj_pitch = quat_to_pitch(qx, qy, qz, qw)
-        self._obj_pose_log.append([t, px, py, pz, qx, qy, qz, qw, obj_pitch])
 
     # ------------------------------------------------------------------ #
     #  TF / helpers

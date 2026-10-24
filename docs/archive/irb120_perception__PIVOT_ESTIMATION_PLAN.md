@@ -1,3 +1,5 @@
+> Historical snapshot, archived 2026-10-24. Superseded by the current package README. Commands and status below are not current instructions.
+
 # Pivot Estimation Plan
 
 ## Goal
@@ -197,7 +199,7 @@ alone cannot reconstruct the silhouette. Replay scripts and evidence are in
 
 ### Validation outcome — do not promote online
 
-See [the visual report](../../../runtime_logs/pivot_boundary_validation_20261007/REPORT.md).
+See [the visual report](../../../../runtime_logs/pivot_boundary_validation_20261007/REPORT.md).
 
 - 18 real bag-frame mask replays, 6 episodes / 4 geometries; 17 RGB-D pairs within
   40 ms. Within-episode candidate X ranges are 0.01–0.50 mm. Repeatability is

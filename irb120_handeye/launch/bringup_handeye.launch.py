@@ -32,7 +32,7 @@ rclpy.init()
 node = rclpy.create_node("rsp_description_updater")
 client = node.create_client(SetParameters, "/robot_state_publisher/set_parameters")
 if not client.wait_for_service(timeout_sec=30.0):
-    sys.exit("robot_state_publisher not found; did abb_control.launch.py start?")
+    sys.exit("robot_state_publisher not found; is abb_control.launch.py (T2) running?")
 with open(sys.argv[1]) as f:
     urdf = f.read()
 os.remove(sys.argv[1])
@@ -65,14 +65,9 @@ def _push_robot_description(context, urdf_path):
 
 
 def generate_launch_description():
-    bringup_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution(
-                [get_package_share_directory("irb120_control"), "launch", "abb_control.launch.py"]
-            )
-        )
-    )
-
+    # Same terminal layout as bringup_stack.launch.py: T1 abb_rws.launch.py and
+    # T2 abb_control.launch.py must already be running; this is T3. Starting a second
+    # abb_control here would duplicate /controller_manager and robot_state_publisher.
     # Same EGM startup handler as bringup_stack.launch.py (egm_cond_time:= passes through).
     egm_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -151,7 +146,6 @@ def generate_launch_description():
             "cameras", default_value="cam1,cam2,cam3",
             description="Cameras to start, e.g. cam2 to calibrate only cam2 "
                         "(see bringup_cams.launch.py)."),
-        bringup_launch,
         egm_launch,
         rsp_description_update,
         move_group_node,

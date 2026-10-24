@@ -27,7 +27,10 @@ A successful reversal requires five fresh samples at or below 10% of the
 experienced peak absolute pivot-axis torque, after the existing minimum tip
 travel and contact loading checks. `--reverse-fraction` changes this fraction.
 Torque uses the full wrench, including sensor moment and the sensor-to-pivot
-moment arm, with the same +82.25 mm tool0-X sensor origin as the estimator.
+moment arm. The current arc controller still uses the historical +82.25 mm
+tool0-X wrench-origin offset; the estimator now derives its reference from the
+ball-to-mount geometry. That discrepancy needs a separate mechanical review
+before interpreting their torque values as identical.
 `fwd_arc_*` logs include pivot torque, peak torque, arc angle, actual contact
 anchor, path error, and trajectory geometry in a `forward_arc` episode stage.
 The recorded arc angle describes finger motion; it is not independently measured

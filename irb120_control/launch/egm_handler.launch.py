@@ -14,7 +14,7 @@ def generate_launch_description():
         default_value='360.0',
         description=(
             'EGM CondTime in seconds (RobotWare-side hard stop — see egm_handler.launch.py). '
-            'Raise it for a long unattended batch (e.g. arc_static_batch) so EGM does not '
+            'Raise it for a long interaction/calibration session so EGM does not '
             'bail mid-run: egm_cond_time:=1200.0'
         ),
     )

@@ -1,3 +1,5 @@
+> Historical snapshot, archived 2026-10-24. Superseded by the current package README. Commands and status below are not current instructions.
+
 # Resume: experimental camera-filtered press selection, 2026-10-05
 
 > **Status (2026-10-09):** historical resume notes. The camera-validated

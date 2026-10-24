@@ -14,7 +14,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml') + glob('config/*.json')),
-        ('share/' + package_name + '/handeye_calibrations', glob('handeye_calibrations/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -41,7 +40,6 @@ setup(
             'keyboard_jog           = irb120_control.keyboard_jog:main',
             'episode                = irb120_control.util.episode:main',
             'run_pipeline           = irb120_control.orchestrator:main',
-            'offline_tsdf           = irb120_control.offline_tsdf_launcher:main',
         ],
     },
 )

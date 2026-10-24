@@ -1,187 +1,70 @@
-# Contact point selection
+# Contact and pivot selection
 
-`contact_point_selector.py` is a geometry selector for one segmented object.
-The pure Python function needs NumPy and SciPy, not ROS. The pipeline calls it
-on the DBSCAN -> SAM cull cloud in every perception snapshot (see "How the
-pipeline uses it" below).
+This document describes the supported FFS snapshot policy. Older selection
+studies and rollout chronology live in [the development archive](../docs/archive/README.md).
 
-## Current camera coverage
+## Input contract
 
-cam1 and cam2 are on the robot side of the object; cam3 (added 2026-09) looks
-at it from the far side, so the far support boundary used for forward tipping
-is now in view when cam3 sees the object's base. How accurate the far pivot is
-with cam3 has not been validated yet.
+One stationary segmented object, observed points in metres in `base_link`,
+calibrated camera transforms, color-grid metric depth and SAM masks. The nominal
+level table is z = -0.021 m; ball radius is 13.25 mm. Camera registration and depth
+quality must support the requested contact accuracy. Do not mix observations from
+before/after movement or from independent objects.
 
-The script currently closes a convex hull around the **observed** low points.
-Its far-facing hull edge can therefore be an artificial boundary of the partial
-cloud, not the object's actual far tipping edge. Treat the orange pivot/axis as
-an unverified geometric hypothesis. `available: true` means a candidate passed
-the implemented filters; it does not establish visibility or pivot accuracy.
-There is no visibility/confidence flag or hidden-surface reconstruction yet.
+`sam_shadow` segments calibrated FFS views and builds the observed cloud.
+`select_stereo_contacts.py` keeps an actual observation per 3 mm voxel, retaining
+source indices. Contacts do not come from mesh closure or averaged invented
+surfaces. TSDF mesh rendering is a review artifact; it does not establish accuracy
+of the cloud bounds used by a motion primitive.
 
-The high, robot-facing forward-push contact may still be useful even when the
-far pivot is wrong. For the horizontal directions and `axis = up × direction`
-used here, the PDF's moment score simplifies to contact height above the pivot.
-Consequently, a plausible high contact does **not** validate the pivot's XY
-location. Do not use this far-axis estimate to define an executed tipping arc
-without additional geometry evidence. The near-side press/pull pivot is more
-observable, but still depends on adequate points close to the table.
+## Selection
 
-```python
-from irb120_perception.contact_point_selector import select_contact_points
+`select_contact_points` supplies planar-push, forward-tip and press candidates.
+Each mode records `available` and rejection reasons. Press selection screens
+clearance, direction, surface normal, signed moment and footprint inset before
+camera agreement and final score/edge-centering decisions. The contact report
+shows the candidate funnel spatially and numerically.
 
-result = select_contact_points([camera1_object_xyz, camera2_object_xyz], table_z=-0.021)
-if result['planar_push']['available']:
-    contact = result['planar_push']['point']
-    fingertip_center = result['planar_push']['ball_center']
-```
+The FFS adapter calls `experimental_view_check.evaluate(..., rule='view_check_v2')`.
+Each press must be supported by usable local depth-view evidence; unusable or
+conflicting views can abstain/reject. The adapter intentionally excludes inferred
+horizontal top caps from `top_support_v1`. The underlying older rule helpers remain
+for analysis/replay; they are not production backends.
 
-Clouds must describe the same stationary object in one common Z-up frame, in
-metres. Register and segment them before calling; do not concatenate independent
-objects or observations from before and after object motion. Duplicate points are
-removed. Optional `normals=` accepts outward normals in concatenated input order.
-Otherwise local PCA estimates them and orients them away from the cloud median.
-This orientation assumes a reasonably observed, approximately convex object;
-concavities and strongly partial views may need externally supplied normals.
+The near press pivot can be replaced by a reviewable RGB-mask/table-plane boundary
+fit (`pivot_boundary_review`); the far pivot uses cam3 evidence
+(`forward_pivot_review`). If evidence is unavailable, geometry retains its stated
+fallback rather than silently claiming a validated physical edge. Pivot geometry
+and straight/curved classification feed the tip-choice/cascade helpers.
 
-After building/sourcing `irb120_perception`:
+## Geometry and motion contract
 
-```bash
-ros2 run irb120_perception contact_point_selector                    # one message from /object_detector/object_points
-ros2 run irb120_perception contact_point_selector cloud1.npy cloud2.npy   # or Nx3 .npy files already in base_link
-```
+The surface contact `point` differs from the ball-center target `ball_center`.
+`press_targets.pre_press_center` and `forward_tip_motion.tip_targets` determine
+pre-contact centers. Frame transforms must be explicit; `world` and `base_link`
+differ by the robot base/table installation offset.
 
-Markers are always published (snapshot, until Ctrl-C). When the normal stack
-bringup is running, their selected spheres are also projected onto both RGB
-streams at `/contact_point_selector/camera1_overlay` and
-`/contact_point_selector/camera2_overlay`; add either `sensor_msgs/Image`
-topic in RViz to inspect the contacts, signed axes, and observed hull support
-edges in camera space. The edge is an estimate, not ground truth.
+Green denotes planar push, orange forward tip and magenta press. Contact reports
+embed the multi-camera comparison and optional mesh viewer, plus diagnostic JSON.
+`available: true` means the implemented filters found a candidate. It does not
+certify reachability, complete swept-volume collision clearance, visibility of
+hidden support, or no slip.
 
-In RViz, use **Add → By topic → /contact_point_selector/markers → MarkerArray**.
-Use `base_link` as the Fixed Frame, or `world` with the stack's TF available.
-Green is planar push, orange is forward tip, and magenta is press. Spheres mark
-the **surface contact**, not the fingertip center. Arrows at contacts show the
-push/pull direction (the press arrow shows the subsequent pull); arrows at the
-table show the signed tipping axes, lifted 8 mm for visibility only. Axes remain
-visible even when their contact is unavailable and are labeled accordingly.
-The JSON reports the rejecting filter and candidate counts after each stage.
+The pipeline uses the forward arc primitive (`fwd_arc`) for its forward-tip step.
+Its shared implementation lives in `fwd_tip.py`; that module remains necessary.
+A failed/partial MoveIt plan must not be treated as an executable contact motion.
+The separate shove feasibility check has its own timing/scene limitations.
 
-This displays one **snapshot**, republished once per second until Ctrl-C, so
-RViz can be opened later. Rerun after moving the object. Markers expire within
-three seconds after stopping. No robot motion is commanded.
+## Remaining limits
 
-The topic path reads one message and prints JSON, then publishes markers. It does
-not enable the perception stack. Use `--object-id N` for a labeled cloud containing
-multiple objects. Incoming frames must be `base_link`; no silent TF conversion
-occurs. File inputs must be Nx3 `.npy` arrays in that frame. All tuning values
-(table height -0.021, finger radius, bands, etc.) are the fixed defaults of
-`select_contact_points()`; call it from Python to change them.
-
-## Heuristics
-
-The tipping score follows *Probing for Properties*, supplied as `main.pdf`,
-Section IV, equations (2)–(7): screen by `direction · normal <= epsilon`, then
-maximize `axis · ((point - pivot) × direction)`. Planar-push clearance, footprint
-estimation, side/top filtering and the inset are implementation heuristics.
-The PDF assumes an expected pivot; this script's partial-cloud hull is an
-approximation used to supply one. The PDF's interaction-mode selection in
-Section IV-C is not implemented: the script reports candidates for all modes.
-
-- **Planar push:** search the whole object, at any y, for a low contact whose
-  inward normal is within 20 degrees of +X and whose fingertip clears the table.
-  Within 10 mm of the lowest eligible contact, prefer a horizontal inward-normal
-  line passing closest to the observed footprint bounding-box center, then normal
-  alignment. The push direction is that horizontal inward normal. Points remain
-  actual sensed points; y is not forced to zero off the observed surface.
-- **Pivot and direction:** build a 2D convex hull using only points within 20 mm
-  above the table (3 mm below is allowed for noise). The facing hull edge nearest
-  +X supplies the forward-tip preference; -X supplies the press-and-pull preference.
-  `preferred_direction_v1` preserves those directions and their Y-parallel axes.
-  Flat alternatives must be at least 30 mm long, within 15 degrees of the preference,
-  and supported by at least eight distinct observed XY samples (1 mm deduplication)
-  within 1.5 mm of the hull segment, occupying all six longitudinal bins. A fitted
-  line must have <=1 mm RMS residual and <=3 degree orientation change when each
-  bin is omitted. These are evidence thresholds, not calibrated confidence.
-  Alternatives over 1 degree remain diagnostic for the fixed-plane controller.
-  An accepted edge within 1 degree supplies lateral centering, while the commanded
-  axis stays exact. Otherwise the pivot lies on the observed extreme support plane,
-  centered laterally using the median of points within 3 mm of that plane.
-  `position_evidence` records support count and lateral span; it does not certify
-  pivot accuracy or recover missing boundary. The signed axis is `up × direction`.
-- **Forward tip:** maximize the PDF's `axis · ((point - pivot) × direction)` on
-  inward-facing side surfaces. This retains the PDF's zero normal tolerance and
-  additionally excludes tangential/top contacts that cannot provide a side push.
-- **Press:** use the same score for the estimated pull geometry, normal tolerance
-  0.1, and upward-facing surfaces. Inset the feasible top region's XY convex hull
-  by `press_inset`, then **double-score** the remaining candidates: (1) the pull
-  moment arm (`scores`, height above the pivot — maximize, i.e. favor the top of
-  the object) combined with (2) the anti-tipping moment arm, `axis · ((point -
-  pivot) × [0, 0, -1])` — how far "inboard" of the pivot edge the point sits
-  along the pull direction (minimize, i.e. favor points near the edge, since the
-  object's own mass between the pivot and the contact resists tipping over that
-  edge). These are summed (weighted by `press_pivot_weight`, default `1.0`) into
-  one combined score and the band within 3 mm of its max is retained — a single
-  weighted score, not a height-first filter with pivot-proximity as a subordinate
-  tie-break. That distinction matters: a strict height-first filter can exclude
-  every true near-edge point once a noisy high point elsewhere on the top sits
-  more than 3 mm above them, even though the near-edge point is the physically
-  better contact; the combined score lets pivot-proximity outweigh a height
-  deficit larger than the 3 mm tolerance instead of being blocked from
-  competing at all. For an extended support edge, retain the candidate closest
-  to that edge's midpoint **along the edge direction**; this centers the press
-  without assuming a world-frame Y coordinate. The inset is a simple heuristic
-  for contact-patch room.
-
-Every mode returns `available`, `point`, `normal`, `ball_center`, and `score` when
-successful. For press, `score` is the pull moment and `press_score` is the signed
-moment from a unit downward press; an extended-edge press also reports its
-`edge_midpoint` and signed `along_edge_offset`. Tip and press also return `geometry` with `pivot`, `axis`, `direction`,
-`kind` and edge endpoints (or null for isolated pivots). Scores have metre units
-per unit applied force; the planar score is negative height above the table.
-Failures return `available: false` and a reason rather than inventing a contact.
-No mode is automatically executed or chosen from the three results.
-
-## Clearance and limits
-
-The fingertip radius is 13.25 mm from `irb120_with_finger.xacro`. For each candidate,
-`ball_center = contact + radius * outward_normal` must be at least radius + 3 mm
-above the table. `--min-ball-center-z` can raise this floor to a known safe tool
-height for a chosen orientation. Radius, buffer, bands and tolerances are CLI
-options / function keywords; see `--help`.
-
-This checks the spherical fingertip only. It does **not** calculate home/downward
-orientation, IK, wrist/FT-body clearance, reachability or approach-path collisions.
-Those depend on the robot configuration and must be checked by MoveIt when this
-selector is connected to motion. A downward shaft orientation can allow a lower
-contact, but is not assumed to make the full robot collision-free.
-
-The low observed band approximates the support footprint; sloped bases, feet,
-occlusion and outliers can bias it. Insufficient or degenerate low-band points
-make tipping selections unavailable. A partial but nondegenerate band can still
-produce an incorrect pivot, particularly on the hidden far side described above.
-There is no fallback to the object's full silhouette. Convex hulls do not model
-holes or concave top boundaries. A 5 mm inset
-is not a contact mechanics or finite-patch guarantee. Refresh observations after
-the initial planar push before using a tipping contact or pivot.
-
-## How the pipeline uses it
-
-`irb120_control/util/perception_snapshot.py` runs the selector on the culled
-cloud (base_link, default `table_z`) and saves the full output as
-`contacts.json` in the episode's perceive stage. The motion scripts then take
-their targets from it, with no hardcoded poses:
-
-- `push`: approach `PUSH_STANDOFF` behind the `planar_push` ball center along the
-  horizontal inward normal, validate initial contact force, then push on that fixed line.
-- `arc_static`: approach `SQUASH_STANDOFF` above the `press` ball center; the
-  arc is centered on the `press` pivot (transformed to `world`).
-
-- `fwd_tip`: pushes the `forward_tip` contact normal to its pivot axis.
-
-The snapshot re-fits the forward pivot from a cam3 SAM mask
-(`forward_pivot_review.py`, the cam1 press-pivot fit mirrored to the +X edge). It
-moves `forward_tip.geometry.pivot` to that fit and records
-`forward_tip.pivot_shape` (straight / curved / unknown). The orchestrator uses
-that shape to choose the first tip. The cloud classification (`kind`) is
-almost always `isolated_point` here, so it does not separate straight from curved.
+- Low grazing views, occlusion, SAM boundary error, depth bias and table-plane
+  error can shift pivots. Repeatability and reprojection RMS alone do not prove
+  metric support accuracy. The new cam2 extrinsic did not fix its observed FFS
+  table-depth bias; see the superseding update in the workflow diagnostics.
+- A convex hull closes partial observations; its extreme is not necessarily the
+  physical support edge. Rounded bases can migrate during tipping.
+- An observed flat contact, geometric torque score or smooth mesh is not evidence
+  of successful manipulation or absolute object tilt.
+- Preserve acquisition timestamps, source capture identity and the review packet.
+  Any object motion invalidates the frozen geometry; reacquire before another
+  interaction. Explicit unchanged-scene imports do not waive motion gates.

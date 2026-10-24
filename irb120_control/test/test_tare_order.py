@@ -15,11 +15,10 @@ if not SOURCE_DIR.exists():
     SOURCE_DIR = Path(__file__).parents[1] / 'irb120_control'
 
 
-@pytest.mark.parametrize('batch', [False, True])
 @pytest.mark.parametrize('legacy', [False, True])
 @pytest.mark.parametrize('failure', [None, 'move', 'tare'])
-def test_tare_order_and_failures(batch, legacy, failure):
-    filename = 'arc_static_batch.py' if batch else 'arc_static.py'
+def test_tare_order_and_failures(legacy, failure):
+    filename = 'arc_static.py'
     source = SOURCE_DIR / filename
     tree = ast.parse(source.read_text())
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
@@ -65,7 +64,7 @@ def test_tare_order_and_failures(batch, legacy, failure):
         if failure == 'move' and not legacy:
             assert 'tare' not in order
         return
-    count = 3 if batch else 1
+    count = 1
     assert order.count('tare') == (1 if legacy else count)
     assert order.count('run') == count
     assert order.index('confirm') < order.index('resume')
@@ -100,6 +99,5 @@ def test_metadata_uses_only_recent_wrench_and_records_failure():
     assert event['success'] is False
 
 
-@pytest.mark.parametrize('batch', [False, True])
-def test_failed_pause_prevents_tare_and_resume(batch):
-    test_tare_order_and_failures(batch, False, 'pause')
+def test_failed_pause_prevents_tare_and_resume():
+    test_tare_order_and_failures(False, 'pause')

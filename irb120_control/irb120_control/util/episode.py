@@ -189,18 +189,34 @@ def main() -> None:
                    help="snapshot: object name; note: the text; outcome: " + "/".join(OUTCOMES))
     p.add_argument("--reason", default="", help="outcome reason")
     p.add_argument("--episode", default=None, help="episode folder (default: the most recent one)")
+    p.add_argument("--ffs-run", type=Path, help="Reviewed FFS run containing capture/, recon/, contacts/")
+    p.add_argument("--reviewed-unchanged", action="store_true",
+                   help="Confirm contact review and no scene movement since FFS capture")
     args = p.parse_args()
 
     if args.command == "snapshot":
-        import rclpy
-        from irb120_control.util.perception_snapshot import take_snapshot
-        rclpy.init()
-        node = rclpy.create_node("episode_snapshot")
-        episode = Episode.create(args.text, node, "snapshot only",
-                                 allow_unconfigured_object=True)
-        take_snapshot(node, episode, label="manual")
-        node.destroy_node()
-        rclpy.shutdown()
+        from irb120_control.util.perception_snapshot import import_ffs_snapshot, take_snapshot
+        if args.ffs_run is not None and not args.reviewed_unchanged:
+            p.error("--ffs-run requires --reviewed-unchanged")
+        if args.reviewed_unchanged and args.ffs_run is None:
+            p.error("--reviewed-unchanged is only used with --ffs-run")
+        episode = (Episode(args.episode) if args.episode else
+                   Episode.create(args.text, note="FFS snapshot", allow_unconfigured_object=True))
+        if args.text and args.text != episode.load()['object']:
+            p.error("object name does not match the selected episode")
+        if args.ffs_run is not None:
+            import_ffs_snapshot(episode, args.ffs_run, reviewed_unchanged=True)
+        else:
+            import rclpy
+            rclpy.init()
+            node = rclpy.create_node("episode_snapshot")
+            try:
+                record = take_snapshot(node, episode, label="manual")
+                if not record['ok']:
+                    raise SystemExit(record['reason'])
+            finally:
+                node.destroy_node()
+                rclpy.shutdown()
         print(episode.summary())
         return
 

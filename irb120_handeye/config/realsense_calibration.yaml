@@ -1,5 +1,5 @@
 # Realsense driver params for hand-eye calibration (bringup_cams.launch.py profile:=calibration, used by bringup_handeye.launch.py).
-# Replaces realsense_common.yaml rather than layering on it: rs_launch.py applies config_file
+# Standalone profile rather than a layered override: rs_launch.py applies config_file
 # params after its launch args, so a launch arg can't override a value set in a yaml.
 
 # 16:9 is the D435 color sensor's native aspect: 1280x720 uses its full ~69 deg HFOV, where the

@@ -39,6 +39,8 @@ def _launch_setup(context, *args, **kwargs):
     gap_guard_voxels = LaunchConfiguration('gap_guard_voxels').perform(context)
     noise_radius_voxels = LaunchConfiguration('noise_radius_voxels').perform(context)
     noise_min_neighbors = LaunchConfiguration('noise_min_neighbors').perform(context)
+    cam2_cross_checks = LaunchConfiguration('cam2_cross_checks').perform(context).lower() == 'true'
+    cam2_z_offset_mm = LaunchConfiguration('cam2_z_offset_mm').perform(context)
 
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_dir = WORKSPACE / 'runtime_logs' / object_name / stamp
@@ -57,7 +59,8 @@ def _launch_setup(context, *args, **kwargs):
              str(capture_dir), '--output', str(recon_dir),
              '--gap-guard-voxels', gap_guard_voxels,
              '--noise-radius-voxels', noise_radius_voxels,
-             '--noise-min-neighbors', noise_min_neighbors],
+             '--noise-min-neighbors', noise_min_neighbors,
+             '--cam2-z-offset-mm', cam2_z_offset_mm] + (['--cam2-cross-checks'] if cam2_cross_checks else []),
     )
     report = ExecuteProcess(
         name='stereo_offline_report', output='screen',
@@ -101,7 +104,7 @@ def generate_launch_description():
             description='Seconds to wait for a stationary, matched capture (passed to stereo_offline capture).',
         ),
         DeclareLaunchArgument(
-            'gap_guard_voxels', default_value='6',
+            'gap_guard_voxels', default_value='0',
             description=(
                 'Voxels (3mm each) of clearance a cam2-only mesh triangle needs from cam1/cam3 '
                 'geometry to survive meshing; 0 disables the guard entirely. See '
@@ -117,6 +120,13 @@ def generate_launch_description():
                 'same-camera neighbors to look like real surface).'
             ),
         ),
+        DeclareLaunchArgument(
+            'cam2_z_offset_mm', default_value='0.0',
+            description='Extra base-Z shift (mm) for cam2 points on top of its TF; bringup_cams already '
+                        'applies its own cam2_z_offset_mm (default 6) to the TF itself.'),
+        DeclareLaunchArgument(
+            'cam2_cross_checks', default_value='false',
+            description='Re-enable dropping cam2 points that cam1/cam3 corroborate or conflict with.'),
         DeclareLaunchArgument(
             'noise_min_neighbors', default_value='4',
             description=(

@@ -21,7 +21,6 @@ def generate_launch_description():
     pkg_share = get_package_share_directory("irb120_control")
     moveit_cfg_pkg = get_package_share_directory("irb120_moveit_config")
     handeye_cfg_pkg = get_package_share_directory("irb120_handeye")
-    perception_pkg = get_package_share_directory("irb120_perception")
 
     urdf_path = os.path.join(get_package_share_directory("irb120_models"), "urdf", "irb120_with_finger.xacro")
     # Experiments only run with the finger; the ChArUco calibration model
@@ -98,15 +97,6 @@ def generate_launch_description():
         },
     )
 
-    perception_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([perception_pkg, "launch", "perception.launch.py"])
-        ),
-        launch_arguments={
-            'active_at_start': LaunchConfiguration('perception_active_at_start'),
-        }.items(),
-    )
-
     # FT sensor nodes (REALLY wants to be run as executable, not as Node)
     net_ft_node = ExecuteProcess(
         cmd=[os.path.join(get_package_prefix("netft_utils"), "lib", "netft_utils", "netft_node",),
@@ -133,13 +123,11 @@ def generate_launch_description():
         parameters=[
             {"image_topic": "/realsense/color/image_raw"},
             {"camera_info_topic": "/realsense/color/camera_info"},
-            {"marker_topic": "/object_detector/markers"},
-            {"contact_marker_topic": "/contact_point_selector/markers"},
             {"annotated_image_topic": "/contact_point_selector/camera1_overlay"},
             {"recording_service": "/camera_hull_recorder/set_recording"},
             {"filename_prefix": "camera_hull_overlay"},
             {"auto_start_recording": False},
-            {"show_hull": True},
+            {"show_hull": False},
             {"show_ft_hud": True},
         ],
     )
@@ -151,13 +139,11 @@ def generate_launch_description():
         parameters=[
             {"image_topic": "/realsense2/color/image_raw"},
             {"camera_info_topic": "/realsense2/color/camera_info"},
-            {"marker_topic": "/object_detector/markers"},
-            {"contact_marker_topic": "/contact_point_selector/markers"},
             {"annotated_image_topic": "/contact_point_selector/camera2_overlay"},
             {"recording_service": "/camera_hull_recorder2/set_recording"},
             {"filename_prefix": "camera_hull_overlay_cam2"},
             {"auto_start_recording": False},
-            {"show_hull": True},
+            {"show_hull": False},
             # No FT HUD on cam2 — this view is likely to get flipped/cropped in
             # post, and the readout would end up mirrored/misplaced or cut off.
             {"show_ft_hud": False},
@@ -171,13 +157,11 @@ def generate_launch_description():
         parameters=[
             {"image_topic": "/realsense3/color/image_raw"},
             {"camera_info_topic": "/realsense3/color/camera_info"},
-            {"marker_topic": "/object_detector/markers"},
-            {"contact_marker_topic": "/contact_point_selector/markers"},
             {"annotated_image_topic": "/contact_point_selector/camera3_overlay"},
             {"recording_service": "/camera_hull_recorder3/set_recording"},
             {"filename_prefix": "camera_hull_overlay_cam3"},
             {"auto_start_recording": False},
-            {"show_hull": True},
+            {"show_hull": False},
             # Far-side view, faces the robot: same reasoning as cam2 for no FT HUD.
             {"show_ft_hud": False},
         ],
@@ -239,9 +223,9 @@ def generate_launch_description():
     )
     camera_profile_arg = DeclareLaunchArgument(
         "camera_profile",
-        default_value="raw_depth",
-        choices=["raw_depth", "filtered"],
-        description="raw_depth: unfiltered depth + IR (default); filtered: post-processed depth.",
+        default_value="offline_stereo",
+        choices=["offline_stereo", "raw_depth"],
+        description="offline_stereo: native IR/RGB for FFS (default); raw_depth: also publish aligned depth/cloud for sensor diagnostics.",
     )
 
     start_servo_arg = DeclareLaunchArgument(
@@ -253,44 +237,18 @@ def generate_launch_description():
             'Arrow keys: ↑/↓ = +Z/-Z,  ←/→ = -X/+X.'
         ),
     )
-    perception_active_at_start_arg = DeclareLaunchArgument(
-        'perception_active_at_start',
-        default_value='false',
-        description=(
-            'Whether object_detector starts out processing '
-            'immediately or idle (default) until the first perception snapshot '
-            'switches it on — see irb120_perception/perception.launch.py.'
-        ),
-    )
-    digital_twin_rviz_arg = DeclareLaunchArgument(
-        'launch_digital_twin_rviz', default_value='false',
-        description='Open a separate RViz window for the live editable object twin.',
-    )
-    digital_twin_rviz = TimerAction(
-        period=7.0,
-        actions=[Node(
-            package='rviz2', executable='rviz2', name='object_digital_twin_rviz', output='log',
-            arguments=['-d', os.path.join(perception_pkg, 'rviz', 'object_digital_twin.rviz')],
-        )],
-        condition=IfCondition(LaunchConfiguration('launch_digital_twin_rviz')),
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument("ft_calibration_file", default_value="",
-                              description="Reviewed F/T calibration JSON; empty uses legacy constants"),
-        perception_active_at_start_arg,
+                              description="Reviewed F/T calibration JSON; empty uses config/ft_calibration.json"),
         cameras_arg,
         camera_profile_arg,
         start_servo_arg,
-        digital_twin_rviz_arg,
 
         egm_launch,
 
         move_group_node,
         rviz_node,
         camera_bringup_group,
-        perception_launch,
-        digital_twin_rviz,
         net_ft_node,
         netft_preprocessor_node,
         camera_hull_recorder_node,

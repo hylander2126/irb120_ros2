@@ -2,7 +2,7 @@
 
 Inputs are segmented observations of ONE stationary object, in metres in a
 common Z-up frame. Use select_contact_points() from Python, or run this module
-with .npy clouds / --topic. See ../CONTACT_SELECTION.md for assumptions.
+with recorded .npy clouds. See ../CONTACT_SELECTION.md for assumptions.
 """
 
 import argparse
@@ -12,7 +12,6 @@ import time
 import numpy as np
 from scipy.spatial import ConvexHull, QhullError, cKDTree
 
-DEFAULT_TOPIC = '/object_detector/object_points'
 FRAME = 'base_link'
 TIMEOUT = 5.0
 RELAXED_PULL_EPSILON = 0.5
@@ -513,44 +512,6 @@ def select_contact_points(clouds, *, normals=None,
     return result
 
 
-def read_topic(topic, frame, object_id, timeout):
-    """Read one labeled object cloud; ROS imports stay out of the pure API."""
-    import rclpy
-    from rclpy.qos import qos_profile_sensor_data
-    from sensor_msgs.msg import PointCloud2
-    from sensor_msgs_py import point_cloud2
-
-    rclpy.init(args=[])
-    node = rclpy.create_node('contact_point_selector')
-    received = []
-    node.create_subscription(PointCloud2, topic, received.append, qos_profile_sensor_data)
-    try:
-        deadline = time.monotonic() + timeout
-        while not received and rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.1)
-        if not received:
-            raise ValueError(f'No cloud on {topic} within {timeout}s; enable perception first')
-        msg = received[-1]
-        if msg.header.frame_id != frame:
-            raise ValueError(f'Expected frame {frame}, received {msg.header.frame_id}; transform first')
-        labeled = 'label' in {field.name for field in msg.fields}
-        fields = ('x', 'y', 'z', 'label') if labeled else ('x', 'y', 'z')
-        data = point_cloud2.read_points(msg, field_names=fields, skip_nans=True).reshape(-1)
-        if labeled:
-            labels = np.unique(data['label'])
-            if object_id is None:
-                if len(labels) != 1:
-                    raise ValueError('Cloud must contain one object; specify --object-id')
-                object_id = int(labels[0])
-            data = data[data['label'] == object_id]
-        elif object_id is not None:
-            raise ValueError('--object-id requires a labeled cloud')
-        return np.column_stack([data[field] for field in ('x', 'y', 'z')])
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-
 def build_contact_markers(result, frame, stamp):
     """Colored contact spheres, labels, motion arrows and signed pivot axes."""
     from geometry_msgs.msg import Point
@@ -586,10 +547,11 @@ def build_contact_markers(result, frame, stamp):
         if geometry:
             # Display-only lift so the table does not obscure the axis. The
             # computed pivot and geometry in JSON remain at table height.
-            pivot = geometry['pivot'] + np.array([0., 0., 0.008])
+            pivot = np.asarray(geometry['pivot'], dtype=float) + np.array([0., 0., 0.008])
+            axis_direction = np.asarray(geometry['axis'], dtype=float)
             axis = marker(3, Marker.ARROW)
-            axis.points = [point(pivot - 0.04 * geometry['axis']),
-                           point(pivot + 0.04 * geometry['axis'])]
+            axis.points = [point(pivot - 0.04 * axis_direction),
+                           point(pivot + 0.04 * axis_direction)]
             axis.scale.x, axis.scale.y, axis.scale.z = 0.004, 0.009, 0.012
             axis_label = marker(4, Marker.TEXT_VIEW_FACING)
             axis_label.pose.position = point(pivot + np.array([0., 0., 0.015]))
@@ -613,7 +575,7 @@ def build_contact_markers(result, frame, stamp):
         if not selected['available']:
             continue
 
-        position = selected['point']
+        position = np.asarray(selected['point'], dtype=float)
         sphere = marker(0, Marker.SPHERE)
         sphere.pose.position = point(position)
         sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.015
@@ -623,7 +585,7 @@ def build_contact_markers(result, frame, stamp):
         label.text = mode.replace('_', ' ')
 
         geometry = selected.get('geometry')
-        direction = geometry['direction'] if geometry else selected['direction']
+        direction = np.asarray(geometry['direction'] if geometry else selected['direction'], dtype=float)
         arrow = marker(2, Marker.ARROW)
         arrow.points = [point(position), point(position + 0.06 * direction)]
         arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.003, 0.007, 0.01
@@ -663,14 +625,10 @@ def visualize_result(result, frame):
 
 def main(args=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('clouds', nargs='*',
-                        help='Nx3 .npy file(s) in base_link; omit to read one message from '
-                             f'{DEFAULT_TOPIC}')
-    parser.add_argument('--object-id', type=int, help='Label to select if the cloud has several objects')
+    parser.add_argument('clouds', nargs='+', help='Nx3 .npy file(s) in base_link')
     options = parser.parse_args(args)
     try:
-        clouds = ([np.load(path, allow_pickle=False) for path in options.clouds] if options.clouds else
-                  read_topic(DEFAULT_TOPIC, FRAME, options.object_id, TIMEOUT))
+        clouds = [np.load(path, allow_pickle=False) for path in options.clouds]
         result = select_contact_points(clouds)
     except (ValueError, OSError) as exc:
         parser.exit(2, f'{exc}\n')

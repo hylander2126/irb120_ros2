@@ -1,3 +1,5 @@
+> Historical snapshot, archived 2026-10-24. Superseded by the current package README. Commands and status below are not current instructions.
+
 # Engineering Notes
 
 Running log of non-obvious findings, decisions, and open questions. Newest entry first.

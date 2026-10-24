@@ -133,7 +133,7 @@ MIN_CORNER_SPREAD_SQUARES = 0.6    # charuco only: detected corners' std. dev. a
 METHOD = 'park'                # see METHODS comment above; seeds the reprojection refinement
 OUTLIER_RATIO = 3.0            # flag a pose whose reprojection RMS is > this x the set's median...
 OUTLIER_MIN_PX = 2.0           # ...and above this floor (robot/intrinsics error alone gives ~0.5-1.5px)
-OUT_DIR = os.path.expanduser('~')
+OUT_DIR = os.path.expanduser('~/Documents/irb120_ws/runtime_logs/calibration/handeye')
 
 
 # --- SE(3) helpers -----------------------------------------------------
@@ -533,8 +533,7 @@ error; {n_samples} samples, RMS reprojection error {sol.rms_px:.2f} px
 (~{sol.rms_mm:.2f} mm at the board).
 
 Not wired into bringup automatically. Point this camera's CAMERAS entry in
-bringup_cams.launch.py at this file (or copy the values in) once you trust the result, and keep the previous
-cam_tf_*.launch.py around as a fallback per this package's README.
+bringup_cams.launch.py at this file (or copy the values in) once you trust the result, and retain previous solves in Git or the calibration-run archive as a fallback.
 """
 from launch import LaunchDescription
 from launch_ros.actions import Node
@@ -689,7 +688,8 @@ def main() -> int:
     board_yaml = BOARD_YAML_OVERRIDE or os.path.normpath(
         os.path.join(here, '..', 'calibrations', f'{BOARD_TYPE}_board.yaml'))
     min_features = MIN_FEATURES if MIN_FEATURES is not None else (DEFAULT_MIN_CHARUCO_CORNERS if BOARD_TYPE == 'charuco' else 3)
-    out_dir = OUT_DIR
+    from datetime import datetime
+    out_dir = os.path.join(OUT_DIR, datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
     cameras = ([c.strip() for c in args.cameras.split(',') if c.strip()]
                if args.cameras else sorted(CAMERA_LINK_FRAMES))
     for ns in cameras:
@@ -710,6 +710,12 @@ def main() -> int:
         print(f'Pose file not found: {pose_path}')
         return 1
     joint_names, joint_values = _load_pose_yaml(pose_path)
+    input_payloads = {}
+    for input_path in (board_yaml, pose_path):
+        with open(input_path, 'rb') as stream:
+            input_payloads[input_path] = stream.read()
+    with open(__file__, 'rb') as stream:
+        solver_payload = stream.read()
     pose_detections = _load_pose_detections(pose_path, len(joint_values))
     skip_idxs = {idx for idx, det in enumerate(pose_detections)
                  if det is not None and not any(det.get(ns, False) for ns in cameras)}
@@ -828,7 +834,22 @@ def main() -> int:
             return 0
 
         print('\nSolving...')
-        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(out_dir, exist_ok=False)
+        import hashlib
+        import json
+        provenance = dict(schema_version=1, cameras=cameras, method=METHOD,
+                          opencv_version=cv2.__version__, units='metres, radians; reprojection RMS in pixels',
+                          inputs={})
+        for source, filename in ((board_yaml, 'board.yaml'), (pose_path, 'poses.yaml')):
+            payload = input_payloads[source]
+            with open(os.path.join(out_dir, filename), 'wb') as stream:
+                stream.write(payload)
+            provenance['inputs'][filename] = dict(source=os.path.abspath(source),
+                                                  sha256=hashlib.sha256(payload).hexdigest())
+        provenance['solver_source_sha256'] = hashlib.sha256(solver_payload).hexdigest()
+        with open(os.path.join(out_dir, 'provenance.json'), 'w') as stream:
+            json.dump(provenance, stream, indent=2)
+            stream.write('\n')
         for ns, link, optical, *_ in active:
             s = samples[ns]
             n = len(s['R_g2b'])
@@ -849,7 +870,7 @@ def main() -> int:
             samples_path = os.path.join(out_dir, f'handeye_samples_{ns}.yaml')
             _write_samples_yaml(samples_path, ns, link, BOARD_TYPE, METHOD, s)
             print(f'  wrote {samples_path} (raw per-pose samples -- re-diagnose or re-solve with poses '
-                  f'excluded, no robot needed: ros2 run irb120_handeye diagnose_handeye_samples --in {samples_path})')
+                  f'excluded, no robot needed: ros2 run irb120_handeye handeye diagnose --in {samples_path})')
 
         return 0
     except KeyboardInterrupt:

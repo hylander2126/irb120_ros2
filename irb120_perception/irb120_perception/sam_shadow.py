@@ -226,7 +226,8 @@ def _keep_dense(points, radius, min_neighbors):
     return counts >= min_neighbors
 
 
-def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_neighbors=4):
+def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_neighbors=4,
+                   cam2_cross_checks=True):
     """Suppress cam2 only on matching visible faces; drop isolated/correlated-noise points from
     every camera independently (never compared across cameras).
 
@@ -242,6 +243,9 @@ def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_
     territory only cam2 observes, which is exactly where this matters most for cam2). Same
     reasoning and default scale as sam_shadow.protected_meshes's copy of this filter. 0 disables
     it -- every camera then passes through exactly as before this existed.
+
+    cam2_cross_checks=False keeps every cam2 point cam1/cam3 corroborate or conflict with (no
+    suppression or quarantine); the per-camera noise filter still applies. cam1/cam3 unchanged.
     """
     geometry = {v.camera: v.geometry() for v in views}
     normals = {}
@@ -279,7 +283,7 @@ def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_
         suppressed[ids] |= good & agreement & (abs(z[ids]-measured) <= tolerance) & (distance <= tolerance)
         # In front of a trusted face with agreeing orientation is disagreement.
         conflicts[ids] |= good & agreement & (z[ids] < measured-tolerance)
-    keep = ~(suppressed | conflicts)
+    keep = ~(suppressed | conflicts) if cam2_cross_checks else np.ones(len(points), bool)
     dense_cam2 = _keep_dense(points[keep], noise_radius_m, noise_min_neighbors)
     noise_filtered['cam2'] = int((~dense_cam2).sum())
     keep[np.flatnonzero(keep)[~dense_cam2]] = False

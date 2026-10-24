@@ -20,4 +20,3 @@ enable_color: true
 depth_module.depth_profile: 1280x720x6
 depth_module.infra_profile: 1280x720x6
 rgb_camera.color_profile: 1280x720x6
-depth_module.emitter_enabled: 1

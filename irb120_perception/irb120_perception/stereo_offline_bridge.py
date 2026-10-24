@@ -6,8 +6,7 @@ Subcommands: capture, reconstruct, report, contacts, worker.
 These scripts live in <workspace>/scripts and need the irb_venv interpreter
 (torch/open3d/pyrealsense2 aren't installed for the system interpreter this
 package is built under). Each subcommand here just re-execs the matching
-real script under that venv, the same prefix trick perception.launch.py uses
-for the live SAM nodes, so `ros2 run` works without the caller remembering
+real script under that venv, so `ros2 run` works without the caller remembering
 the venv path or script location. All arguments after the subcommand pass
 straight through to the real script's own argparse. See scripts/STEREO_OFFLINE.md.
 """

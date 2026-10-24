@@ -1,6 +1,6 @@
 # irb120_ros2
 
-ROS2 driver and application stack for the ABB IRB120 with IRC5 controller, two RealSense D400 cameras, and ATI net/ft sensor.
+ROS2 driver and application stack for the ABB IRB120 with IRC5 controller, three RealSense D400 cameras, and ATI net/ft sensor.
 
 ---
 
@@ -57,12 +57,8 @@ cd ~/Documents/irb120_ws
 sudo apt update
 rosdep update
 rosdep install --from-paths src --ignore-src -r -y --rosdistro jazzy
-sudo apt install python3-sklearn
 ```
 
-`python3-sklearn` is required by the DBSCAN perception node. It is listed
-separately because it is not currently represented by a rosdep dependency in
-`irb120_perception`.
 
 ### 4. Build and source the workspace
 
@@ -82,177 +78,47 @@ source ~/Documents/irb120_ws/install/setup.bash
 
 Optionally add those two lines to `~/.bashrc`.
 
-## Architecture overview
+## Supported workflow
 
-Three terminal groups run at different lifetimes:
-
-| Terminal | What runs | Lifetime |
-|---|---|---|
-| **T1 — RWS client** | `irb120_control/abb_rws.launch.py` | Always-on. Never kill unless rebooting the controller. |
-| **T2 — ABB hardware** | `irb120_control/abb_control.launch.py` (ros2_control + EGM handler) | Always-on during a session. |
-| **T3 — MoveIt stack** | `irb120_control/bringup_stack.launch.py` (move_group, perception, Servo, etc.) | Restart freely during development. |
-
-**T1 and T2 must stay up** so that EGM shutdown is sent cleanly on Ctrl+C. Killing T1 (rws_client) before T2 means `stop_egm` cannot reach the IRC5, which causes the FlexPendant to crash/reboot.
-
-The launch files in this repository are the supported entry points for the robot. They include and configure components from ABB and other third-party ROS 2 packages internally; those packages are still runtime dependencies, but their launch files should not be invoked directly for this setup.
-
----
-
-## Bringup sequence
-
-### Terminal 1 — RWS client (run once, leave running)
-
-```bash
-ros2 launch irb120_control abb_rws.launch.py
-```
-
-This local launch file configures the Robot Web Services connection for the IRC5 at `192.168.125.1` and includes the required ABB RWS implementation. Leave it running indefinitely; it must outlive everything else so EGM can be stopped cleanly on shutdown.
-
-### Terminal 2 — ABB hardware bringup (run once per session)
-
-```bash
-ros2 launch irb120_control abb_control.launch.py
-```
-
-This local launch file is the entry point for the cell-specific hardware configuration. It includes the required ABB bringup components with this repository's URDF, controller configuration, MoveIt configuration, and hardware settings.
-
-This starts:
-- `ros2_control_node` with the ABB hardware interface
-- `robot_state_publisher`
-- `joint_state_broadcaster`
-- `egm_handler` — clears any stale EGM session, applies EGM settings, starts a fresh EGM session, then gates the JTC spawner until EGM is confirmed live
-
-The terminal will show `EGM handler startup completed` when the robot is ready to receive joint trajectory commands. **Do not kill this terminal** while the robot is powered — always Ctrl+C cleanly so `egm_handler` can send `stop_egm` before the hardware interface drops the UDP socket.
-
-### Terminal 3 — MoveIt stack (restart freely)
-
-```bash
-ros2 launch irb120_control bringup_stack.launch.py
-```
-
-Optional arguments:
-
-| Argument | Default | Description |
-|---|---|---|
-| `start_servo` | `false` | Start MoveIt Servo for Cartesian motions |
-| `calibration` | `false` | Hand-eye calibration mode: ChArUco board + mount instead of the finger (MoveIt, RViz, and T2's `robot_state_publisher`), cameras at 1280x720 color with depth off, perception skipped |
-| `debug_perception` | `false` | Launch perception debugger + debug RViz config |
-| `perception_method` | `dbscan` | Segmentation backend: `dbscan` or `sam` |
-
-Example with Servo enabled:
-```bash
-ros2 launch irb120_control bringup_stack.launch.py start_servo:=true
-```
-
-This is the terminal you kill and relaunch during iteration. T1 and T2 remain untouched.
-
-This also brings up the RealSense cameras through `irb120_handeye`'s
-`bringup_cams.launch.py` (`cameras:=` / `camera_profile:=` select which and how),
-pairing each camera driver pinned to its serial number with its calibrated TF. See
-[Calibration results](#calibration-results) below for which camera is which.
-
----
-
-## Hand-eye calibration
-
-### Bringup
-
-```bash
-ros2 launch irb120_handeye bringup_handeye.launch.py
-```
-
-Starts the hardware stack with the handeye MoveIt config, RViz handeye plugin, and the RealSense
-cameras on the calibration profile (`cameras:=cam2` to start only one).
-
-### Run calibration poses
-
-```bash
-ros2 run irb120_handeye handeye run-poses
-```
-
-Options:
-```
---pose-file   YAML filename under share/irb120_handeye/calibrations/  (default: joints_20_14mm.yaml)
---pose-path   Absolute path to a pose YAML (overrides --pose-file)
---velocity-scaling  MoveIt velocity scaling; every move is planned collision-free by move_group  (default: 0.15)
---settle-time Seconds to settle after each move  (default: 1.5)
---auto-continue  Skip Enter prompts between poses
-```
-
-In RViz, use the HandEye Calibration panel to take samples manually at each pose.
-
-### Calibration results
-
-`share/irb120_handeye/launch/bringup_cams.launch.py` pairs each camera's driver with its
-solved TF (the `CAMERAS` table at the top of that file):
-- `cam1`: `realsense`, serial `243522072478`, `base` → `realsense_link`, `cam_tf_realsense_1.7px.launch.py`
-- `cam2`: `realsense2`, serial `750612071219`, `base` → `realsense2_link`, `cam_tf_realsense2_2.1px.launch.py`
-- `cam3`: `realsense3`, serial `213622073793`, `base` → `realsense3_link`, `cam_tf_realsense3_1.6px.launch.py`
-
-`bringup_stack.launch.py` and `bringup_handeye.launch.py` both include it. Run it on its own
-(`ros2 launch irb120_handeye bringup_cams.launch.py cameras:=cam2`) to verify cameras in
-isolation; a missing camera logs an error and the others keep running.
-
----
-
-## Press-pull tip
-
-Requires T1 + T2 + T3 with `start_servo:=true`.
-
-```bash
-ros2 launch irb120_control bringup_stack.launch.py start_servo:=true # default
-# then in another terminal:
-ros2 run irb120_control arc_static flashlight          # one press-pull tip
-ros2 run irb120_control run_pipeline flashlight        # or the full tip + push pipeline
-```
-
-The node:
-1. Takes a perception snapshot and uses its detected press contact and tipping pivot
-2. Uses MoveIt to plan to the pre-squash pose above the press contact
-3. Prompts for operator confirmation
-4. Presses down until the press force reference is met
-5. Pulls along an arc about the pivot while holding the radial press force (PI control),
-   then reverses the arc to set the object back down
-6. Retracts, returns home and takes another snapshot
-
-Tune constants at the top of [arc_static.py](irb120_control/irb120_control/arc_static.py).
-
----
-
-## EGM session recovery (occasional timeout)
-
-After a very long idle period, the IRC5 may time out the EGM session. The robot motors will stop whining (brakes engage). Recover without restarting anything:
-
-```bash
-# Stop the stale session (safe to call even if already stopped)
-ros2 service call /rws_client/stop_egm abb_robot_msgs/srv/TriggerWithResultCode '{}'
-
-# Start a fresh session
-ros2 service call /rws_client/start_egm_joint abb_robot_msgs/srv/TriggerWithResultCode '{}'
-```
-
-Expected response: `result_code: 1` (success). The robot motors will resume humming within a few seconds.
-
-If the JTC also needs to be respawned after recovery:
-```bash
-ros2 run controller_manager spawner joint_trajectory_controller -c /controller_manager
-```
-
----
-
-## Package layout
-
-| Package | Purpose |
+| Component | Entry point |
 |---|---|
-| `irb120_control` | Hardware bringup, controllers, EGM handler, application nodes (keyboard jog, press-pull tip, push, net/ft) |
-| `irb120_models` | Robot description (`urdf/irb120_with_finger.xacro`, ABB/finger/F/T meshes) and ground-truth object models (`objects/<name>/`) |
-| `irb120_moveit_config` | MoveIt config (SRDF, kinematics, OMPL, Servo, joint limits) |
-| `irb120_perception` | Object detection (DBSCAN / SAM2), robot mask filter, perception debugger |
-| `irb120_handeye` | Hand-eye calibration bringup, pose runner, calibration data files, and per-camera bringup (driver + solved TF) for both RealSense cameras |
-| `irb120_abb_hardware_interface` | Custom ros2_control hardware plugin for ABB EGM |
+| T1: RWS, once per session | `ros2 launch irb120_control abb_rws.launch.py` |
+| T2: hardware/controller stack, once per session | `ros2 launch irb120_control abb_control.launch.py` |
+| T3: MoveIt, Servo, cameras and recording | `ros2 launch irb120_control bringup_stack.launch.py` |
+| Perception or interaction | `ros2 run irb120_control episode snapshot OBJECT` or `ros2 run irb120_control run_pipeline OBJECT` |
 
----
+Keep T1/T2 running when restarting T3. For calibration, use
+`bringup_handeye.launch.py` **instead of** production T3; see
+[handeye instructions](irb120_handeye/README.md). Do not duplicate the hardware stack.
 
+Production T3 defaults: `start_servo:=true`, `cameras:=cam1,cam2,cam3`,
+`camera_profile:=offline_stereo`. The alternative `raw_depth` profile also publishes
+aligned depth/cloud for sensor diagnostics. Live DBSCAN/SAM detector launches,
+filtered-cloud perception and the old RealSense-only TSDF CLI are retired.
+
+Perception-only work needs no T1/T2/T3: start cameras with
+`ros2 launch irb120_handeye bringup_cams.launch.py profile:=offline_stereo`,
+then run `stereo_offline_pipeline.launch.py object_name:=OBJECT`. Do not start
+those drivers alongside an existing camera session.
+
+## Documentation map
+
+| Guide | Owns |
+|---|---|
+| [Control](irb120_control/README.md) | Primitives, automatic FFS episode snapshots, imports, recording and official data |
+| [Perception](irb120_perception/README.md) | Supported FFS path and environment contract |
+| [FFS workflow](irb120_perception/docs/STEREO_OFFLINE.md) | Capture/reconstruction/review commands and diagnostics |
+| [Contact selection](irb120_perception/CONTACT_SELECTION.md) | Current contact/pivot policy and limitations |
+| [Handeye](irb120_handeye/README.md) | Camera profiles, calibration procedure and result promotion |
+| [Models](irb120_models/README.md) | Robot/object frames, registry and generated assets |
+| [Analysis](analysis/README.md) | Methods, scoring and paper artifacts |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Durable cell diagnostics |
+| [Backlog](docs/BACKLOG.md) | Remaining work, with links to dated evidence |
+| [Archive](docs/archive/README.md) | Superseded plans and experiment history |
+
+The local `irb120_abb_hardware_interface` plugin is required for measured-state
+seeding and EGM guards. The six upstream dependencies remain pinned in
+`irb120_jazzy.repos`; their own documentation stays with their checkouts.
 
 ## Networking
 

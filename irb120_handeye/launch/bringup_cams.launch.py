@@ -5,7 +5,7 @@ its eye-to-hand static transform (base -> <camera_name>_link).
 
   ros2 launch irb120_handeye bringup_cams.launch.py                     # all three
   ros2 launch irb120_handeye bringup_cams.launch.py cameras:=cam2       # just cam2
-  ros2 launch irb120_handeye bringup_cams.launch.py cameras:=cam1,cam3 profile:=filtered
+  ros2 launch irb120_handeye bringup_cams.launch.py cameras:=cam1,cam3 profile:=offline_stereo
 
 Cameras are independent: a camera that is missing (not found within
 device_timeout) or whose driver dies is reported as an ERROR naming it, and
@@ -14,7 +14,6 @@ the others keep running.
 Profiles (config/realsense_<file>.yaml, applied to every selected camera):
   raw_depth       1280x720 stereo/RGB at 6 Hz, emitter on, unfiltered aligned depth,
                   point cloud, infra1/infra2 (default; what perception and FFS use)
-  filtered        realsense_common.yaml: decimated/spatial/temporal-filtered depth
   calibration     1280x720 color only, depth off (hand-eye calibration)
   offline_stereo  raw_depth's streams without point cloud/aligned depth, for the
                   stationary offline FFS capture; stop other camera drivers first
@@ -24,6 +23,7 @@ Verify:
   ros2 run tf2_ros tf2_echo base realsense2_link
 """
 import math
+import re
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -45,16 +45,25 @@ from launch_ros.actions import Node
 # serial_no parameter.
 CAMERAS = {
     "cam1": ("realsense", "'243522072478'", "cam_tf_realsense_1.7px.launch.py"),
-    "cam2": ("realsense2", "'750612071219'", "cam_tf_realsense2_2.1px.launch.py"),
+    "cam2": ("realsense2", "'750612071219'", "cam_tf_realsense2_1.2px.launch.py"),
     "cam3": ("realsense3", "'213622073793'", "cam_tf_realsense3_1.6px.launch.py"),
 }
 
 PROFILES = {
     "raw_depth": "realsense_raw_depth.yaml",
-    "filtered": "realsense_common.yaml",
     "calibration": "realsense_calibration.yaml",
     "offline_stereo": "realsense_offline_stereo.yaml",
 }
+
+
+def _static_tf(path, dz):
+    """static_transform_publisher for a cam_tf_*.launch.py calibration result, with dz (m) added
+    to its base Z. Reads the result's "--flag", "value" pairs so the calibration file stays the
+    single, untouched source of the solved transform."""
+    args = dict(re.findall(r'"(--[a-z-]+)",\s*"([^"]+)"', open(path).read()))
+    args["--z"] = f"{float(args['--z']) + dz:.6f}"
+    return Node(package="tf2_ros", executable="static_transform_publisher", output="log",
+                arguments=[x for pair in args.items() for x in pair])
 
 
 def _report_camera_exit(event, context):
@@ -98,6 +107,7 @@ def _launch_cameras(context):
         if not valid:
             raise ValueError(f"{arg} must be a finite number, e.g. -1.0, not {value!r}")
 
+    cam2_dz = float(LaunchConfiguration("cam2_z_offset_mm").perform(context)) / 1000
     actions = []
     for key in selected:
         name, serial, tf_launch = CAMERAS[key]
@@ -112,9 +122,7 @@ def _launch_cameras(context):
                 "config_file": f"{handeye_pkg}/config/{PROFILES[profile]}",
             }.items(),
         ))
-        actions.append(IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(f"{handeye_pkg}/launch/{tf_launch}")
-        ))
+        actions.append(_static_tf(f"{handeye_pkg}/launch/{tf_launch}", cam2_dz if key == "cam2" else 0.))
     return actions
 
 
@@ -130,6 +138,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "clip_distance", default_value="1.4",
             description="Maximum depth in metres; a negative value disables this software cutoff."),
+        DeclareLaunchArgument(
+            "cam2_z_offset_mm", default_value="6.0",
+            description="Raises cam2's static TF in base Z (mm). cam2's FFS depth reads about 6 mm deep "
+                        "at typical object-top height (drill_test3-6); 0 publishes the raw calibration."),
         DeclareLaunchArgument(
             "device_timeout", default_value="20.0",
             description="Seconds a driver waits for its camera before exiting with an error; "

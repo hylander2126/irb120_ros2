@@ -23,7 +23,7 @@ scaled the board by 0.5% shifts PnP distance by 0.5%. Set
 SQUARE_LENGTH_M_OVERRIDE in run_handeye_calibration.py to the caliper-measured
 value if it hasn't been.
 
-Needs depth on, i.e. the normal camera profile (not calibration:=true):
+Needs depth on, i.e. the normal camera profile (not bringup_cams profile:=calibration):
   ros2 run irb120_handeye handeye check-depth-pnp --camera realsense2
 """
 
@@ -171,7 +171,7 @@ def main() -> int:
         if node.info is None:
             print(f'  Nothing received on /{args.camera}/color/camera_info -- is the camera up?')
         elif not skipped:
-            print(f'  No aligned depth received -- is depth on (not the calibration:=true profile)?')
+            print(f'  No aligned depth received -- is depth on (not the bringup_cams profile:=calibration)?')
         for why, count in skipped.items():
             print(f'  {count} frame(s): {why}')
         return 1
