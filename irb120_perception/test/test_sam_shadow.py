@@ -86,6 +86,7 @@ def test_cam2_cannot_shift_preferred_tsdf(tmp_path):
     np.testing.assert_array_equal(np.asarray(a.triangles), np.asarray(b.triangles))
 
 
+<<<<<<< HEAD
 def test_combined_cannot_be_shifted_by_disagreeing_nearby_cam2(tmp_path):
     import pytest
     o3d = pytest.importorskip('open3d')
@@ -129,6 +130,8 @@ def test_combined_mesh_is_one_continuous_patch_where_only_cam2_has_coverage(tmp_
     assert len(counts) == 1  # one continuous surface, not a preferred patch glued to a separate cam2 patch
 
 
+=======
+>>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9
 def test_table_dominated_proposal_rejected_without_rejecting_outside_roi():
     from irb120_perception.sam_shadow import accept_proposal
     mask = np.ones((100, 100), bool)

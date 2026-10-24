@@ -1,4 +1,7 @@
-# Realsense driver params shared by both D435s, passed to rs_launch.py via its `config_file` argument. 
+# RealSense driver params shared by all three D435s, passed via config_file.
+
+# Explicit active stereo illumination; passive depth loses the monitor screen.
+depth_module.emitter_enabled: 1
 
 # Streams / point cloud
 pointcloud.enable: true

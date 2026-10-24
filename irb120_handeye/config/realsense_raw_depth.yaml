@@ -1,6 +1,7 @@
 # Default high-resolution stationary FFS capture profile (2026-10-23).
 # Retain legacy aligned depth/cloud topics; offline-only launch omits them.
 pointcloud.enable: true
+depth_module.emitter_enabled: 1
 enable_depth: true
 align_depth.enable: true
 enable_sync: true
@@ -13,6 +14,7 @@ decimation_filter.enable: false
 spatial_filter.enable: false
 temporal_filter.enable: false
 hole_filling_filter.enable: false
+<<<<<<< HEAD
 
 # Best tested capture resolution; 6 Hz is acquisition, not FFS processing rate.
 enable_color: true
@@ -20,3 +22,5 @@ depth_module.depth_profile: 1280x720x6
 depth_module.infra_profile: 1280x720x6
 rgb_camera.color_profile: 1280x720x6
 depth_module.emitter_enabled: 1
+=======
+>>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9

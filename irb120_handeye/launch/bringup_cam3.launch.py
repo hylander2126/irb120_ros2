@@ -49,9 +49,14 @@ def generate_launch_description() -> LaunchDescription:
         description="Use the hand-eye calibration profile (1280x720 color, depth off).",
     )
     diagnostics_arg = DeclareLaunchArgument(
+<<<<<<< HEAD
         "depth_diagnostics", default_value="true",
         description="1280x720 stereo/RGB at 6 Hz, emitter on, unfiltered depth. "
                     "Enabled by default; set false to restore the filtered, no-IR profile.")
+=======
+        "depth_diagnostics", default_value="false",
+        description="Enable both infrared streams and disable depth postprocessing for a controlled diagnostic capture.")
+>>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9
     clip_arg = DeclareLaunchArgument(
         "clip_distance", default_value="1.4",
         description="Maximum depth in metres; a negative value disables this software cutoff. Default unchanged.")

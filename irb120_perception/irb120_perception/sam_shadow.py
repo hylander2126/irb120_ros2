@@ -264,6 +264,7 @@ def priority_merge(views, masks, tolerance=.004):
         conflict_points=points[conflicts])
 
 
+<<<<<<< HEAD
 def _tsdf_volume(voxel):
     import open3d as o3d
     return o3d.pipelines.integration.ScalableTSDFVolume(voxel_length=voxel,
@@ -353,3 +354,40 @@ def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6):
     return dict(preferred_triangles=len(preferred.triangles), gap_triangles=len(gaps.triangles),
                 combined_triangles=len(combined.triangles),
                 cam2_integration_into_preferred_volume=False, gap_guard_m=gap_guard_voxels*voxel)
+=======
+def protected_meshes(views, masks, output, voxel=.003):
+    """Separate TSDF volumes prevent *all* cam2 updates to preferred voxels.
+
+    Export preferred and gap meshes plus a conservative concatenation. Cam2
+    triangles within the truncation guard of preferred mesh vertices are omitted;
+    no welding, blending or invented closure. Seams/holes are expected.
+    """
+    import open3d as o3d
+    meshes = []
+    for group in (('cam1', 'cam3'), ('cam2',)):
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(voxel_length=voxel,
+            sdf_trunc=4*voxel, color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8)
+        for v in views:
+            if v.camera not in group:
+                continue
+            d = np.where(masks[v.camera], v.depth, 0).astype(np.float32)
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(v.rgb),
+                o3d.geometry.Image(d), depth_scale=1., depth_trunc=3., convert_rgb_to_intensity=False)
+            h, w = d.shape
+            intrinsic = o3d.camera.PinholeCameraIntrinsic(w, h, v.K[0, 0], v.K[1, 1], v.K[0, 2], v.K[1, 2])
+            E = np.eye(4); E[:3, :3] = v.R; E[:3, 3] = v.t
+            volume.integrate(rgbd, intrinsic, E)
+        mesh = volume.extract_triangle_mesh()
+        mesh.compute_vertex_normals()
+        meshes.append(mesh)
+    preferred, gaps = meshes
+    if len(preferred.vertices) and len(gaps.triangles):
+        distance = cKDTree(np.asarray(preferred.vertices)).query(np.asarray(gaps.vertices))[0]
+        gaps.remove_triangles_by_mask(np.any(distance[np.asarray(gaps.triangles)] < 6*voxel, axis=1))
+        gaps.remove_unreferenced_vertices()
+    for name, mesh in [('preferred', preferred), ('gaps', gaps), ('combined', preferred+gaps)]:
+        if len(mesh.triangles):
+            o3d.io.write_triangle_mesh(str(output/f'{name}.ply'), mesh)
+    return dict(preferred_triangles=len(preferred.triangles), gap_triangles=len(gaps.triangles),
+                cam2_integration_into_preferred_volume=False, gap_guard_m=6*voxel)
+>>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9
