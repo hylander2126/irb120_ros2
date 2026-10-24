@@ -30,15 +30,18 @@ ros2 launch irb120_handeye bringup_handeye.launch.py
 
 This starts:
 - `abb_control.launch.py` (ros2_control + EGM handler — the hardware stack)
-- `move_group`, using the calibration-specific SRDF (`irb120_handeye.srdf.xacro`)
+- `move_group` with the ChArUco board + mount in place of the finger
+  (`irb120_with_charuco.xacro` + `irb120_handeye.srdf.xacro`), so collision checking
+  uses the calibration end effector, and `config/joint_limits_calibration.yaml`
+  (joint_6 widened to ABB's full ±400° instead of the ±60° cable limit). The same ChArUco URDF is pushed to abb_control's
+  `robot_state_publisher`, so TF and RViz's RobotModel match.
 - A dedicated RViz instance (`moveit_handeye.rviz`) with the `HandEyeCalibration`
-  panel and a `Camera` display already pointed at
-  `/handeye_calibration/target_detection`
-- The RealSense (`rs_launch.py`), at `848x480` depth / `640x480` color,
-  `align_depth` off, all post-processing filters off, `pointcloud.enable=true`,
-  `clip_distance=2.2` — this profile is independent of (and doesn't need to
-  match) whatever resolution `bringup_stack.launch.py` runs in production,
-  since extrinsic calibration doesn't depend on image resolution.
+  panel and `Camera` displays for all three cameras
+  (`/realsense{,2,3}/color/image_raw`)
+- All three cameras via `bringup_cam{1,2,3}.launch.py calibration:=true`
+  (serial-pinned, with their static TFs; `config/realsense_calibration.yaml`:
+  1280x720 color, depth off). Extrinsics don't depend on resolution, so results
+  stay valid at production resolution.
 
 ## 2. HandEyeCalibration panel parameters
 
@@ -71,16 +74,16 @@ the solved transform will be systematically off.
 ## 3. Run calibration poses
 
 ```bash
-ros2 run irb120_handeye run_calibration_poses
+ros2 run irb120_handeye handeye run-poses
 ```
 
 Options:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--pose-file` | `joints_5_6mm.yaml` | YAML filename under `share/irb120_handeye/calibrations/` |
+| `--pose-file` | `joints_custom.yaml` | YAML filename under `share/irb120_handeye/calibrations/` |
 | `--pose-path` | *(none)* | Absolute/relative path to a pose YAML — overrides `--pose-file` |
-| `--move-time` | `4.0` | Seconds per move |
+| `--velocity-scaling` | `0.15` | MoveIt max velocity scaling factor |
 | `--settle-time` | `1.5` | Seconds to wait after each move before prompting |
 | `--auto-continue` | off | Skip the Enter-key prompt between poses (use once you trust the target stays in view) |
 
@@ -122,18 +125,21 @@ practice than its reprojection error suggested.
 
 ## Calibration pose sets (`calibrations/`)
 
-Naming convention: `joints_<N>_<error>mm.yaml` — `N` is the pose count in
-that set, `<error>` is the reprojection error achieved the last time that set
-was run, kept in the filename so a pose set and the transform file it
-produced are easy to pair up.
+Older sets used the naming convention `joints_<N>_<error>mm.yaml` (pose
+count + the reprojection error achieved last time that set was run); both
+`joints_5_6mm.yaml` and `OLD_joints_20_14mm.yaml` it describes were replaced
+and deleted. The current default is:
 
-- `joints_5_6mm.yaml` — current default, 5 poses.
-- `OLD_joints_20_14mm.yaml` — previous 20-pose set, kept for reference; not
-  used by default anymore.
+- `joints_custom.yaml` — the live shared pose set (38 poses as of this
+  writing), used by `run_handeye_calibration.py --pose-file` and
+  `run_calibration_poses.py --pose-file` when neither flag is overridden.
+  Taught incrementally with `record_calibration_pose.py` as cameras were
+  added (cam1 first, cam2 and cam3 later) — see "Recalibrate ONE camera"
+  below for why that history matters if one camera's residual won't improve.
 
 ## Headless recalibration (`run_handeye_calibration.py`)
 
-`ros2 run irb120_handeye run_handeye_calibration` replaces steps 1-4 above
+`ros2 run irb120_handeye handeye calibrate` replaces steps 1-4 above
 with a scripted OpenCV solve — no MoveIt/RViz, no manual "Take Sample"
 clicks, and all cameras (the default; pass `--cameras realsense3` etc. to
 calibrate a subset) solved from one shared pose set instead of separate
@@ -151,11 +157,16 @@ docstring for the full recipe (`cv2.calibrateHandEye` in its documented
 eye-to-hand mode) and the calibrated ChArUco target definition in
 `generate_charuco_target.py`.
 
-Bring up the camera(s) you're calibrating first — either the per-camera
-`bringup_cam1.launch.py` / `bringup_cam2.launch.py` / `bringup_cam3.launch.py`
-(each also republishes that camera's existing TF, harmless to leave running
-during calibration) or the full `bringup_stack.launch.py`, plus
-`abb_control.launch.py`/`abb_rws.launch.py` for the arm itself.
+Run `abb_rws.launch.py` and **`bringup_handeye.launch.py`**, which brings up
+`abb_control.launch.py` and the cameras (`bringup_cams.launch.py profile:=calibration`,
+each also republishing that camera's existing TF, harmless during calibration)
+itself; don't run either separately. Pass `cameras:=cam2` to start only the camera
+you're calibrating. Do **not** use `bringup_stack.launch.py` for this —
+it's the production/experiments launch, has no calibration mode, and keeps
+the full `±60°` joint_6 FT-cable-protection limit active with no way to turn
+it off (see "Recalibrate ONE camera" below for what that limit is and why
+calibration needs `bringup_handeye.launch.py`'s own relaxed
+`joint_limits_calibration.yaml` instead).
 
 `record_calibration_pose.py` (the interactive MoveIt/RViz pose teacher) also
 defaults to all three cameras and shows a live per-camera detection status
@@ -184,8 +195,8 @@ you re-run the diagnostic, try dropping specific poses, and re-solve —
 **without moving the robot again**:
 
 ```bash
-ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml
-ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml \
+ros2 run irb120_handeye handeye diagnose --in ~/handeye_samples_realsense3.yaml
+ros2 run irb120_handeye handeye diagnose --in ~/handeye_samples_realsense3.yaml \
     --exclude-poses "4,9" --write-launch
 ```
 
@@ -207,21 +218,65 @@ Teach a fresh ChArUco-visible pose set, then run the headless calibrator with
 its default three-camera selection:
 
 ```bash
-ros2 run irb120_handeye record_calibration_pose --out ~/joints_charuco_2026.yaml
-ros2 run irb120_handeye run_handeye_calibration --pose-path ~/joints_charuco_2026.yaml
+ros2 run irb120_handeye handeye record-pose --out ~/joints_charuco_2026.yaml
+ros2 run irb120_handeye handeye calibrate --pose-file ~/joints_charuco_2026.yaml
 ```
 
 This independently solves `realsense`, `realsense2`, and `realsense3`. Review
 each generated transform/diagnostic before replacing the three active camera
 TF launch files.
 
-### Future work
+### Recalibrate ONE camera (e.g. cam2)
 
-- **Design a combined/multi-camera-aware pose set.** `joints_5_6mm.yaml` was
-  tuned for cam1's FOV; cam2 (steep/overhead) and cam3 likely each need
-  their own pose subset (board presented closer to face-on to that camera's
-  viewing angle, arm held/positioned accordingly) rather than reusing cam1's
-  poses as-is.
+`--cameras` restricts a `calibrate` run to just that camera's solve/output,
+e.g. `ros2 run irb120_handeye handeye calibrate --cameras realsense2` (camera
+names: `realsense`=cam1, `realsense2`=cam2, `realsense3`=cam3). **That alone
+is usually not the fix if one camera keeps coming back worse than the
+others** — restricting `--cameras` only changes which camera gets solved and
+written out, not which poses are driven through; it still walks the same
+shared `--pose-file` (`joints_custom.yaml` by default).
+
+`joints_custom.yaml`'s poses were originally taught against cam1's FOV (cam1
+came first; cam2/cam3 were added to the SAME pose set later, see
+"Calibration pose sets" above). cam2 is mounted steeply/overhead, a visibly
+different angle from cam1 and cam3 — so even though cam2 gets its own
+independent solve, it's only ever fed a narrower, more oblique subset of
+poses that happened to also be visible to it, not poses chosen for its own
+geometry. Re-running `--cameras realsense2` against this same pose file
+repeats that same ceiling every time, which is the likely reason cam2's
+residual (2.12px / 18 samples, the worst of the three — see
+`cam_tf_realsense2_2.1px.launch.py`) hasn't improved across repeated
+attempts, even though the solver itself (`cv2.calibrateHandEye` Park seed +
+joint reprojection refinement with Huber loss + automatic outlier-pose
+flagging; validated against synthetic ground truth, see the `METHODS`
+comment in `run_handeye_calibration.py`) is sound and the same for every
+camera.
+
+**The actual fix is to teach cam2 its own pose set**, watching only cam2's
+live detection status while jogging so every saved pose is one where cam2
+specifically has a good, close-to-face-on, well-spread view of the board —
+not a pose that happened to also catch cam2's edge of frame while chasing
+cam1's geometry:
+
+```bash
+ros2 run irb120_handeye handeye record-pose --cameras realsense2 \
+    --out ~/joints_realsense2.yaml
+ros2 run irb120_handeye handeye calibrate --cameras realsense2 \
+    --pose-file ~/joints_realsense2.yaml
+```
+
+Then sanity-check the factory color intrinsics weren't themselves the issue
+(informational only — does not change the written transform):
+
+```bash
+ros2 run irb120_handeye handeye diagnose \
+    --in ~/handeye_samples_realsense2.yaml --fit-focal
+```
+
+Once you trust the new `cam_tf_realsense2_<err>px.launch.py`, it's wired in
+at exactly one place: the `cam2` entry of `CAMERAS` in
+`irb120_handeye/launch/bringup_cams.launch.py`, which every bringup (production,
+calibration, and the FFS offline capture — see `scripts/STEREO_OFFLINE.md`) uses.
 
 ## Gotcha: check the parent frame before trusting a new result
 

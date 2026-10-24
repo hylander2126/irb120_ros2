@@ -5,9 +5,8 @@ EYE-TO-HAND: base_link -> realsense2_link. Seeded with cv2.calibrateHandEye
 error; 18 samples, RMS reprojection error 2.12 px
 (~1.60 mm at the board).
 
-Not wired into bringup automatically. Point the matching
-bringup_camN.launch.py's cameraN_tf.launch.py include at this file (or copy
-the values in) once you trust the result, and keep the previous
+Not wired into bringup automatically. Point this camera's CAMERAS entry in
+bringup_cams.launch.py at this file (or copy the values in) once you trust the result, and keep the previous
 cam_tf_*.launch.py around as a fallback per this package's README.
 """
 from launch import LaunchDescription

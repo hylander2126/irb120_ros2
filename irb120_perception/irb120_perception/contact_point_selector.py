@@ -182,6 +182,14 @@ def pivot_geometry(pivot, preferred_direction):
                 pivot_source='rgb_sam_override')
 
 
+def _scatter(ids, n):
+    """Full-length boolean mask, True at `ids` -- turns a surviving-index array back into a
+    per-point mask so a stage's survivors can be plotted/compared against the full cloud."""
+    mask = np.zeros(n, bool)
+    mask[ids] = True
+    return mask
+
+
 def _press_band(points, ids, scores, geometry, press_pivot_weight, score_tolerance,
                 press_score_fraction):
     """Boolean mask into `ids`: the double-scored press candidate band.
@@ -229,7 +237,8 @@ def select_contact_points(clouds, *, normals=None,
                           push_height_band=0.010,
                           forward_max_lateral=0.030,
                           experimental_press_filter=None,
-                          press_pivot_override=None):
+                          press_pivot_override=None,
+                          diagnostics=None):
     """Return three independent selections and their estimated pivot geometry.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
@@ -260,6 +269,15 @@ def select_contact_points(clouds, *, normals=None,
     is affected -- its axis/direction/kind stay the cloud estimate's, and
     forward_tip/planar_push are untouched. This moves the SELECTED press
     point itself, not just a downstream rotation center.
+
+    diagnostics: optional dict; when given, filled with {mode: {stage_name: bool_mask, ...,
+    'selected_index': int|None}} for forward_tip/press -- a full-length (same order as the
+    deduplicated `points` this function builds internally) boolean survivor mask per funnel
+    stage (clearance/direction/surface/positive_moment/inset/camera_agreement/best_score_band/
+    centered_on_edge/centered_edgeward/topmost_fallback, whichever apply to that mode and run),
+    so a caller can show WHERE on the object each stage accepted or rejected points, not just
+    the counts already in candidate_counts. None (default) skips this entirely -- no behavior or
+    performance change for existing callers.
     """
     scalars = [table_z, finger_radius, table_buffer, support_band,
                min_edge_length, press_inset, score_tolerance,
@@ -300,6 +318,8 @@ def select_contact_points(clouds, *, normals=None,
     points, unique = np.unique(points, axis=0, return_index=True)
     if len(points) < 6:
         raise ValueError('Need at least six distinct finite object points')
+    if diagnostics is not None:
+        diagnostics['points'] = points  # the deduplicated order every stage mask below indexes into
     if supplied is None:
         normals = estimate_normals(points, radius=normal_radius)
     else:
@@ -382,8 +402,10 @@ def select_contact_points(clouds, *, normals=None,
             epsilons = [pull_normal_epsilon]
         for epsilon in epsilons:
             counts = {'clearance': int(clear.sum())}
+            stages = {'clearance': clear}
             feasible = clear & (normals @ direction <= epsilon)
             counts['direction'] = int(feasible.sum())
+            stages['direction'] = feasible.copy()
             if mode == 'forward_tip':
                 feasible &= (normals @ direction <= -0.2) & (np.abs(normals[:, 2]) <= 0.5)
                 # Near the pivot's centre line: an off-centre push yaws a wide object instead of tipping it.
@@ -391,23 +413,28 @@ def select_contact_points(clouds, *, normals=None,
             else:
                 feasible &= normals[:, 2] >= 0.7
             counts['surface'] = int(feasible.sum())
+            stages['surface'] = feasible.copy()
             scores = np.cross(points - geometry['pivot'], direction) @ geometry['axis']
             feasible &= scores > 0
             ids = np.flatnonzero(feasible)
             counts['positive_moment'] = len(ids)
+            stages['positive_moment'] = feasible.copy()
             # Inset the full feasible top region BEFORE selecting the best moment
             # band. A narrow high strip on a sloping/noisy top is not the face edge.
             if len(ids) and mode == 'press' and press_inset > 0:
                 ids = inset_top(ids)
             counts['inset'] = len(ids)
+            stages['inset'] = _scatter(ids, len(points))
             if mode == 'press' and experimental_press_filter is not None:
                 ids = ids[experimental_press_filter(points[ids], direction)]
                 counts['camera_agreement'] = len(ids)
+                stages['camera_agreement'] = _scatter(ids, len(points))
             if len(ids):
                 ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight,
                                       score_tolerance, press_score_fraction)
                           if mode == 'press' else scores[ids] >= scores[ids].max() - score_tolerance]
             counts['best_score_band'] = len(ids)
+            stages['best_score_band'] = _scatter(ids, len(points))
             if len(ids):
                 break
         # Last resort for tiny rounded tops where no neighborhood is flat enough for a
@@ -423,13 +450,19 @@ def select_contact_points(clouds, *, normals=None,
             if len(ids) and press_inset > 0:
                 ids = inset_top(ids)
             counts['topmost_fallback'] = len(ids)
+            stages['topmost_fallback'] = _scatter(ids, len(points))
             if len(ids):
                 ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight,
                                       score_tolerance, press_score_fraction)]
                 topmost = True
+                stages['topmost_score_band'] = _scatter(ids, len(points))
+        if diagnostics is not None:
+            diagnostics[mode] = stages
         if not len(ids):
             failed = next(stage for stage, count in counts.items() if count == 0)
             result[mode] = missing(f'No candidates after {failed} filter')
+            if diagnostics is not None:
+                diagnostics[mode]['selected_index'] = None
         else:
             # `best_score_band` above already double-scores height and pivot
             # proximity together for press. What remains here is centering
@@ -442,6 +475,8 @@ def select_contact_points(clouds, *, normals=None,
                 # own coordinate system, rather than in a world axis.
                 ids = ids[np.abs(along_edge) <= np.abs(along_edge).min() + 1e-10]
                 counts['centered_on_edge'] = len(ids)
+                if diagnostics is not None:
+                    diagnostics[mode]['centered_on_edge'] = _scatter(ids, len(points))
                 # If several points are equally centered, keep the most
                 # edgeward one; the median below then only resolves truly
                 # equivalent samples instead of drifting inward.
@@ -449,10 +484,14 @@ def select_contact_points(clouds, *, normals=None,
                     points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
                 ids = ids[centered_press_scores >= centered_press_scores.max() - 1e-10]
                 counts['centered_edgeward'] = len(ids)
+                if diagnostics is not None:
+                    diagnostics[mode]['centered_edgeward'] = _scatter(ids, len(points))
             target = np.median(points[ids], axis=0)
             if mode == 'forward_tip':
                 target[1] = 0.0
             i = ids[np.argmin(np.linalg.norm(points[ids] - target, axis=1))]
+            if diagnostics is not None:
+                diagnostics[mode]['selected_index'] = int(i)
             result[mode] = contact(i, scores[i])
             if mode == 'press':
                 result[mode]['press_score'] = float(

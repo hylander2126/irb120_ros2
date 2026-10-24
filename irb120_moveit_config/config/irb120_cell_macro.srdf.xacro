@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SRDF shared by every end effector (see irb120_models/urdf/irb120_cell.xacro): the manipulator
+     group, virtual joint, and collision pairs for the arm, cell and F/T stack. irb120.srdf.xacro
+     (finger) and irb120_handeye.srdf.xacro (ChArUco mount) add the tip and end-effector pairs. -->
 <robot xmlns:xacro="http://wiki.ros.org/xacro">
-  <xacro:macro name="irb120_handeye_srdf">
+  <xacro:macro name="irb120_cell_srdf" params="tip_link">
     <group name="manipulator">
-      <chain base_link="base_link" tip_link="tool0"/>
+      <chain base_link="base_link" tip_link="${tip_link}"/>
     </group>
 
     <group_state name="all_zero" group="manipulator">
@@ -30,14 +33,13 @@
     <disable_collisions link1="link_4" link2="link_5" reason="Adjacent"/>
     <disable_collisions link1="link_4" link2="link_6" reason="Never"/>
     <disable_collisions link1="link_5" link2="link_6" reason="Adjacent"/>
+    <disable_collisions link1="link_5" link2="adapter_sensor" reason="Adjacent"/> <!-- Recall the adapter 'sticks into' the tool0 to be secure. This avoids collision.-->
     <disable_collisions link1="link_6" link2="adapter_robot" reason="Adjacent"/>
-    <disable_collisions link1="link_5" link2="tool_stack_collision" reason="Adjacent"/> <!-- tool-stack cylinder, see irb120_with_finger.xacro -->
+    <disable_collisions link1="link_5" link2="tool_stack_collision" reason="Adjacent"/> <!-- tool-stack cylinder, see irb120_cell.xacro -->
     <disable_collisions link1="link_6" link2="tool_stack_collision" reason="Adjacent"/>
-    <disable_collisions link1="tool_stack_collision" link2="charuco_mount" reason="Adjacent"/>
     <disable_collisions link1="link_6" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_robot" link2="adapter_sensor" reason="Adjacent"/>
     <disable_collisions link1="adapter_sensor" link2="sensor_plate" reason="Adjacent"/>
-    <disable_collisions link1="sensor_plate" link2="sensor_body" reason="Adjacent"/>
-    <disable_collisions link1="sensor_body" link2="charuco_mount" reason="Adjacent"/>
+    <disable_collisions link1="sensor_body" link2="sensor_plate" reason="Adjacent"/>
   </xacro:macro>
 </robot>

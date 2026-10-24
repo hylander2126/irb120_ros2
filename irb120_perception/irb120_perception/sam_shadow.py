@@ -215,12 +215,33 @@ def surface_normals(xyz, depth):
     return np.divide(n, length[..., None], out=np.zeros_like(n), where=good[..., None])
 
 
-def priority_merge(views, masks, tolerance=.004):
-    """Keep exact preferred samples; suppress cam2 only on matching visible faces.
+def _keep_dense(points, radius, min_neighbors):
+    """Boolean mask: True for a point with >= min_neighbors other `points` (including itself)
+    within `radius` of it. Correlated depth noise rarely forms as dense a neighborhood as real,
+    densely-sampled surface -- same reasoning as irb120_control's
+    forward_tip_motion._robust_bounds. min_neighbors<=0 or an empty input keeps everything."""
+    if min_neighbors <= 0 or not len(points):
+        return np.ones(len(points), bool)
+    counts = cKDTree(points).query_ball_point(points, radius, return_length=True)
+    return counts >= min_neighbors
+
+
+def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_neighbors=4):
+    """Suppress cam2 only on matching visible faces; drop isolated/correlated-noise points from
+    every camera independently (never compared across cameras).
 
     Missing masks, out-of-view and occluded samples never constitute rejection.
     Oppositely oriented thin faces remain separate. Visible free-space conflicts
     are quarantined rather than averaging them into preferred observations.
+
+    noise_radius_m/noise_min_neighbors: a point survives only if it has at least
+    noise_min_neighbors other points of its OWN camera (including itself) within noise_radius_m
+    -- see _keep_dense. Applied to cam1/cam3 up front, so a noise point is never treated as
+    "preferred" (unconditionally trusted) in the first place, and to cam2 after the
+    corroboration/conflict checks below (there's nothing to corroborate/conflict against in
+    territory only cam2 observes, which is exactly where this matters most for cam2). Same
+    reasoning and default scale as sam_shadow.protected_meshes's copy of this filter. 0 disables
+    it -- every camera then passes through exactly as before this existed.
     """
     geometry = {v.camera: v.geometry() for v in views}
     normals = {}
@@ -230,6 +251,7 @@ def priority_merge(views, masks, tolerance=.004):
         n[np.sum(n*toward, axis=-1) < 0] *= -1
         normals[v.camera] = n
     xyz, source = [], []
+    noise_filtered = {}
     points = geometry['cam2'][masks['cam2']]
     ns = normals['cam2'][masks['cam2']]
     suppressed = np.zeros(len(points), bool)
@@ -238,6 +260,9 @@ def priority_merge(views, masks, tolerance=.004):
         if v.camera == 'cam2':
             continue
         preferred = geometry[v.camera][masks[v.camera]]
+        dense = _keep_dense(preferred, noise_radius_m, noise_min_neighbors)
+        noise_filtered[v.camera] = int((~dense).sum())
+        preferred = preferred[dense]
         xyz.append(preferred); source.append(np.full(len(preferred), int(v.camera[-1]), np.uint8))
         optical = points@v.R.T+v.t
         z = optical[:, 2]
@@ -255,16 +280,19 @@ def priority_merge(views, masks, tolerance=.004):
         # In front of a trusted face with agreeing orientation is disagreement.
         conflicts[ids] |= good & agreement & (z[ids] < measured-tolerance)
     keep = ~(suppressed | conflicts)
+    dense_cam2 = _keep_dense(points[keep], noise_radius_m, noise_min_neighbors)
+    noise_filtered['cam2'] = int((~dense_cam2).sum())
+    keep[np.flatnonzero(keep)[~dense_cam2]] = False
     xyz.append(points[keep]); source.append(np.full(keep.sum(), 2, np.uint8))
     result_masks = {key: value.copy() for key, value in masks.items()}
     result_masks['cam2'][masks['cam2']] = keep
     return np.concatenate(xyz), np.concatenate(source), result_masks, dict(
         corroborating_cam2=int(suppressed.sum()), conflicting_cam2=int(conflicts.sum()),
+        noise_filtered=noise_filtered,
         gap_cam2=int(keep.sum()), preferred_displacement_m=0.,
         conflict_points=points[conflicts])
 
 
-<<<<<<< HEAD
 def _tsdf_volume(voxel):
     import open3d as o3d
     return o3d.pipelines.integration.ScalableTSDFVolume(voxel_length=voxel,
@@ -288,7 +316,24 @@ def _extract(volume):
     return mesh
 
 
-def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6):
+def _drop_isolated_depth(view, masked_depth, radius, min_neighbors):
+    """Zero out pixels of `masked_depth` whose back-projected 3-D point has fewer than
+    min_neighbors other surviving pixels of this SAME camera within radius -- see _keep_dense.
+    Returns (filtered_depth, filtered_pixel_count). min_neighbors<=0 is a no-op."""
+    if min_neighbors <= 0 or not masked_depth.any():
+        return masked_depth, 0
+    valid = masked_depth > 0
+    dense = _keep_dense(view.geometry()[valid], radius, min_neighbors)
+    filtered = int((~dense).sum())
+    if not filtered:
+        return masked_depth, 0
+    isolated_pixels = np.zeros(masked_depth.shape, bool)
+    isolated_pixels[valid] = ~dense
+    return np.where(isolated_pixels, 0, masked_depth), filtered
+
+
+def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6,
+                      noise_radius_voxels=3, noise_min_neighbors=4):
     """One shared TSDF volume for the actual output mesh -- cam1+cam3 integrate first, then cam2,
     with any cam2 pixel masked to zero (treated as no depth there, exactly as if it were outside
     its SAM mask) if it sits within gap_guard_voxels*voxel of preferred geometry AND the surface
@@ -304,36 +349,58 @@ def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6):
     how the gap guard was tuned (confirmed on real captures, see STEREO_OFFLINE.md). 0 disables
     cam2 depth masking entirely (cam2 integrates everywhere, same as 0 did before).
 
-    Still builds and exports preferred.ply (cam1+cam3 only) and gaps.ply (cam2 only) from their
-    own fully isolated volumes, unaffected by anything above -- unchanged from before, for the
-    SAM-shadow-ablation review tooling and as the untouched-preferred regression test's reference.
-    combined.ply is the new single jointly-integrated mesh, not preferred+gaps concatenated.
+    Before any integration, every camera's own masked depth is independently noise-filtered -- a
+    pixel survives only if it has at least noise_min_neighbors other surviving pixels of the SAME
+    camera within noise_radius_voxels*voxel (see _keep_dense/_drop_isolated_depth; same reasoning
+    as priority_merge's copy of this filter and irb120_control's
+    forward_tip_motion._robust_bounds). This is strictly per-camera -- it never compares across
+    cameras, so it never interacts with the cross-camera gap guard above -- but it does mean
+    cam1/cam3 ("preferred") no longer pass through completely untouched: a correlated-noise clump
+    that cam1 or cam3 themselves measured is now dropped before it's ever trusted, same as cam2's.
+    Only ever removes a pixel -- never adds, moves, or interpolates one -- so it cannot invent
+    closure the sensors didn't report; it only withholds a pixel whose neighborhood doesn't look
+    like measured surface yet. 0 disables it (every camera's raw masked depth integrates
+    untouched, as before this existed).
+
+    preferred.ply/gaps.ply still come from their own fully isolated per-camera volumes -- cam2
+    still can never shift preferred.ply (the untouched-preferred regression test's guarantee,
+    unaffected since this filter never compares cameras) -- but, like combined.ply, now reflect
+    this per-camera noise filter rather than raw depth. combined.ply is the single
+    jointly-integrated mesh, not preferred+gaps concatenated.
     """
+    radius = noise_radius_voxels*voxel
+    filtered_depth = {}
+    noise_filtered = {}
+    for v in views:
+        masked = np.where(masks[v.camera], v.depth, 0).astype(np.float32)
+        filtered_depth[v.camera], noise_filtered[v.camera] = _drop_isolated_depth(
+            v, masked, radius, noise_min_neighbors)
+
     preferred_volume = _tsdf_volume(voxel)
     for v in views:
         if v.camera in ('cam1', 'cam3'):
-            _integrate(preferred_volume, v, np.where(masks[v.camera], v.depth, 0))
+            _integrate(preferred_volume, v, filtered_depth[v.camera])
     preferred = _extract(preferred_volume)
 
     gaps_volume = _tsdf_volume(voxel)
     cam2 = next(v for v in views if v.camera == 'cam2')
-    cam2_depth = np.where(masks['cam2'], cam2.depth, 0).astype(np.float32)
+    cam2_depth = filtered_depth['cam2']
     _integrate(gaps_volume, cam2, cam2_depth)
     gaps = _extract(gaps_volume)
 
     joint_volume = _tsdf_volume(voxel)
     for v in views:
         if v.camera in ('cam1', 'cam3'):
-            _integrate(joint_volume, v, np.where(masks[v.camera], v.depth, 0))
+            _integrate(joint_volume, v, filtered_depth[v.camera])
     masked_cam2_depth = cam2_depth
     if gap_guard_voxels > 0 and len(preferred.vertices) and cam2_depth.any():
-        geometry = cam2.geometry()
-        normals = surface_normals(geometry, cam2.depth)
-        toward = -cam2.t@cam2.R - geometry
+        cam2_geometry = cam2.geometry()
+        normals = surface_normals(cam2_geometry, cam2.depth)
+        toward = -cam2.t@cam2.R - cam2_geometry
         normals[np.sum(normals*toward, axis=-1) < 0] *= -1
         pv = np.asarray(preferred.vertices); pn = np.asarray(preferred.vertex_normals)
         valid = cam2_depth > 0
-        distance, nearest = cKDTree(pv).query(geometry[valid])
+        distance, nearest = cKDTree(pv).query(cam2_geometry[valid])
         unreliable = np.linalg.norm(normals[valid], axis=-1) < 1e-9
         # Safety-conservative: an unreliable (depth-discontinuity) cam2 normal is never grounds
         # to *exempt* a close pixel from masking -- that exemption requires positive evidence of
@@ -353,41 +420,6 @@ def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6):
             o3d.io.write_triangle_mesh(str(output/f'{name}.ply'), mesh)
     return dict(preferred_triangles=len(preferred.triangles), gap_triangles=len(gaps.triangles),
                 combined_triangles=len(combined.triangles),
-                cam2_integration_into_preferred_volume=False, gap_guard_m=gap_guard_voxels*voxel)
-=======
-def protected_meshes(views, masks, output, voxel=.003):
-    """Separate TSDF volumes prevent *all* cam2 updates to preferred voxels.
-
-    Export preferred and gap meshes plus a conservative concatenation. Cam2
-    triangles within the truncation guard of preferred mesh vertices are omitted;
-    no welding, blending or invented closure. Seams/holes are expected.
-    """
-    import open3d as o3d
-    meshes = []
-    for group in (('cam1', 'cam3'), ('cam2',)):
-        volume = o3d.pipelines.integration.ScalableTSDFVolume(voxel_length=voxel,
-            sdf_trunc=4*voxel, color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8)
-        for v in views:
-            if v.camera not in group:
-                continue
-            d = np.where(masks[v.camera], v.depth, 0).astype(np.float32)
-            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(v.rgb),
-                o3d.geometry.Image(d), depth_scale=1., depth_trunc=3., convert_rgb_to_intensity=False)
-            h, w = d.shape
-            intrinsic = o3d.camera.PinholeCameraIntrinsic(w, h, v.K[0, 0], v.K[1, 1], v.K[0, 2], v.K[1, 2])
-            E = np.eye(4); E[:3, :3] = v.R; E[:3, 3] = v.t
-            volume.integrate(rgbd, intrinsic, E)
-        mesh = volume.extract_triangle_mesh()
-        mesh.compute_vertex_normals()
-        meshes.append(mesh)
-    preferred, gaps = meshes
-    if len(preferred.vertices) and len(gaps.triangles):
-        distance = cKDTree(np.asarray(preferred.vertices)).query(np.asarray(gaps.vertices))[0]
-        gaps.remove_triangles_by_mask(np.any(distance[np.asarray(gaps.triangles)] < 6*voxel, axis=1))
-        gaps.remove_unreferenced_vertices()
-    for name, mesh in [('preferred', preferred), ('gaps', gaps), ('combined', preferred+gaps)]:
-        if len(mesh.triangles):
-            o3d.io.write_triangle_mesh(str(output/f'{name}.ply'), mesh)
-    return dict(preferred_triangles=len(preferred.triangles), gap_triangles=len(gaps.triangles),
-                cam2_integration_into_preferred_volume=False, gap_guard_m=6*voxel)
->>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9
+                cam2_integration_into_preferred_volume=False, gap_guard_m=gap_guard_voxels*voxel,
+                noise_filtered_pixels=noise_filtered, noise_guard_m=radius,
+                noise_min_neighbors=noise_min_neighbors)

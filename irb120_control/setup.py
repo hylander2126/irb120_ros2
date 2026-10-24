@@ -37,6 +37,7 @@ setup(
             'arc_static             = irb120_control.arc_static:main',
             'fwd_arc                = irb120_control.fwd_arc:main',
             'push                   = irb120_control.push:main',
+            'shove                  = irb120_control.shove:main',
             'keyboard_jog           = irb120_control.keyboard_jog:main',
             'episode                = irb120_control.util.episode:main',
             'run_pipeline           = irb120_control.orchestrator:main',

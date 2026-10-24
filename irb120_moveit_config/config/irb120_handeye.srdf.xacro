@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Hand-eye calibration SRDF, paired with irb120_models/urdf/irb120_with_charuco.xacro. Tip at the
+     board center so RViz's interactive marker drags the board, not the flange. -->
 <robot xmlns:xacro="http://wiki.ros.org/xacro" name="abb_irb120_3_58">
-  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_handeye_macro.srdf.xacro"/>
-  <xacro:irb120_handeye_srdf/>
+  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_cell_macro.srdf.xacro"/>
+  <xacro:irb120_cell_srdf tip_link="charuco_center"/>
+
+  <disable_collisions link1="tool_stack_collision" link2="charuco_mount" reason="Adjacent"/>
+  <disable_collisions link1="sensor_body" link2="charuco_mount" reason="Adjacent"/>
 </robot>

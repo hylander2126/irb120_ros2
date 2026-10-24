@@ -6,12 +6,11 @@ on one camera's own rectified IR1/IR2 pair and republishes a dense depth
 estimate alongside — not instead of — the RealSense driver's on-chip depth.
 Purely additive: no existing topic is touched, subscribed to, or modified.
 
-One node instance per camera, by design — matches how `bringup_cam1/2/3`
-are already separate, standalone launches in `irb120_handeye` (see this
-package's `launch/foundation_stereo.launch.py`, parameterized by
-`camera_name`, meant to be run once per camera in its own terminal next to
-that camera's `bringup_camN.launch.py`, which must publish infra1/infra2 for
-this node to have anything to subscribe to).
+One node instance per camera, by design (see this package's
+`launch/foundation_stereo.launch.py`, parameterized by `camera_name`, meant to
+be run once per camera in its own terminal next to `irb120_handeye`'s
+`bringup_cams.launch.py`, which must publish infra1/infra2 for this node to
+have anything to subscribe to).
 
 Interpreter: like `object_detector_sam`, this node needs torch, which lives
 in the `irb_venv` virtualenv, not in `irb120_perception`'s normal

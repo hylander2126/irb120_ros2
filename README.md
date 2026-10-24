@@ -146,9 +146,9 @@ ros2 launch irb120_control bringup_stack.launch.py start_servo:=true
 
 This is the terminal you kill and relaunch during iteration. T1 and T2 remain untouched.
 
-This also brings up both RealSense cameras — `irb120_handeye`'s
-`bringup_cam1.launch.py` and `bringup_cam2.launch.py`, each pairing a
-camera driver pinned to its serial number with its calibrated TF. See
+This also brings up the RealSense cameras through `irb120_handeye`'s
+`bringup_cams.launch.py` (`cameras:=` / `camera_profile:=` select which and how),
+pairing each camera driver pinned to its serial number with its calibrated TF. See
 [Calibration results](#calibration-results) below for which camera is which.
 
 ---
@@ -161,12 +161,13 @@ camera driver pinned to its serial number with its calibrated TF. See
 ros2 launch irb120_handeye bringup_handeye.launch.py
 ```
 
-Starts the hardware stack with the handeye MoveIt config, RViz handeye plugin, and RealSense camera.
+Starts the hardware stack with the handeye MoveIt config, RViz handeye plugin, and the RealSense
+cameras on the calibration profile (`cameras:=cam2` to start only one).
 
 ### Run calibration poses
 
 ```bash
-ros2 run irb120_handeye run_calibration_poses
+ros2 run irb120_handeye handeye run-poses
 ```
 
 Options:
@@ -182,19 +183,15 @@ In RViz, use the HandEye Calibration panel to take samples manually at each pose
 
 ### Calibration results
 
-Each camera has a driver bringup paired with its solved TF, both under
-`share/irb120_handeye/launch/`:
-- `bringup_cam1.launch.py` + `camera_1_tf.launch.py` — primary camera
-  (`realsense`, serial `243522072478`), eye-to-hand `base` → `realsense_link`,
-  solved via MoveIt hand-eye calibration (6mm reprojection error, current
-  result)
-- `bringup_cam2.launch.py` + `camera_2_tf.launch.py` — second camera
-  (`realsense2`, serial `750612071219`), `base` → `realsense2_link`, solved
-  via ICP calibration
+`share/irb120_handeye/launch/bringup_cams.launch.py` pairs each camera's driver with its
+solved TF (the `CAMERAS` table at the top of that file):
+- `cam1`: `realsense`, serial `243522072478`, `base` → `realsense_link`, `cam_tf_realsense_1.7px.launch.py`
+- `cam2`: `realsense2`, serial `750612071219`, `base` → `realsense2_link`, `cam_tf_realsense2_2.1px.launch.py`
+- `cam3`: `realsense3`, serial `213622073793`, `base` → `realsense3_link`, `cam_tf_realsense3_1.6px.launch.py`
 
-Both pairs are included automatically by `bringup_stack.launch.py`. Launch a
-`bringup_camN.launch.py` on its own only to verify a single camera in
-isolation (see the header comment in each file).
+`bringup_stack.launch.py` and `bringup_handeye.launch.py` both include it. Run it on its own
+(`ros2 launch irb120_handeye bringup_cams.launch.py cameras:=cam2`) to verify cameras in
+isolation; a missing camera logs an error and the others keep running.
 
 ---
 

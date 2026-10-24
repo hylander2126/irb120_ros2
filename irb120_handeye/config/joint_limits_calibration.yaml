@@ -1,0 +1,48 @@
+# Calibration-only variant of irb120_moveit_config/config/joint_limits.yaml -- identical except
+# joint_6 gets ABB's full +/-400 degree range here instead of +/-60 degrees. That limit (+/-60 degrees, added in commit e10c817) exists
+# to protect the force-torque sensor cable from twisting during production motion; hand-eye
+# calibration (bringup_handeye.launch.py) doesn't route through the FT cable at all, so the
+# restriction doesn't apply here and would otherwise block legitimate calibration poses (or trap
+# the robot if it stops mid-motion with joint_6 outside +/-60 degrees, as happened in practice --
+# MoveIt refuses to plan from ANY start state that violates a position limit, regardless of goal).
+# irb120_control/util/shove_check.py's own +/-60-degree guard on shove requests is unaffected by
+# this file and still applies to the one motion primitive that actually needs cable protection.
+# Production launch files (bringup_stack.launch.py, abb_control.launch.py) must keep using the
+# original irb120_moveit_config/config/joint_limits.yaml, where the cable IS in play.
+joint_limits:
+  joint_1:
+    has_velocity_limits: true
+    max_velocity: 4.36332
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+  joint_2:
+    has_velocity_limits: true
+    max_velocity: 4.36332
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+  joint_3:
+    has_velocity_limits: true
+    max_velocity: 4.36332
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+  joint_4:
+    has_velocity_limits: true
+    max_velocity: 5.58505
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  joint_5:
+    has_velocity_limits: true
+    max_velocity: 5.58505
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  joint_6:
+    # Must be explicit: the URDF (irb120_3_58_macro.xacro) also carries the +/-60 degree cable
+    # limit, and MoveIt falls back to URDF bounds when this file sets none. +/-6.98132 rad is
+    # ABB's +/-400 degree axis-6 range, the URDF's value before commit e10c817.
+    has_position_limits: true
+    min_position: -6.98132
+    max_position: 6.98132
+    has_velocity_limits: true
+    max_velocity: 7.33038
+    has_acceleration_limits: true
+    max_acceleration: 6.0

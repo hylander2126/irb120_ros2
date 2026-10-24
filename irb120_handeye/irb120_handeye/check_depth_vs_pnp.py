@@ -24,7 +24,7 @@ SQUARE_LENGTH_M_OVERRIDE in run_handeye_calibration.py to the caliper-measured
 value if it hasn't been.
 
 Needs depth on, i.e. the normal camera profile (not calibration:=true):
-  ros2 run irb120_handeye check_depth_vs_pnp --camera realsense2
+  ros2 run irb120_handeye handeye check-depth-pnp --camera realsense2
 """
 
 import argparse

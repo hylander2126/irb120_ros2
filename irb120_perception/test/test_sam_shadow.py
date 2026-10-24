@@ -60,6 +60,27 @@ def test_opposite_thin_face_is_retained():
     assert report['corroborating_cam2'] == 0
 
 
+def test_priority_merge_drops_isolated_cam1_cam3_noise():
+    views = [view('cam1'), view('cam2'), view('cam3')]
+    masks = {v.camera: np.ones((9, 9), bool) for v in views}
+    outlier_xyz = views[0].geometry()[0, 0].copy()
+    views[0].depth[0, 0] = 5.  # one pixel far from the rest of cam1's dense flat plane
+    points, ids, _, report = priority_merge(views, masks)
+    assert report['noise_filtered'] == {'cam1': 1, 'cam3': 0, 'cam2': 0}
+    cam1_points = points[ids == 1]
+    assert len(cam1_points) == 9*9 - 1
+    assert not np.any(np.all(np.isclose(cam1_points, outlier_xyz), axis=1))
+
+
+def test_priority_merge_noise_filter_disabled_by_default_zero():
+    views = [view('cam1'), view('cam2'), view('cam3')]
+    masks = {v.camera: np.ones((9, 9), bool) for v in views}
+    views[0].depth[0, 0] = 5.
+    points, ids, _, report = priority_merge(views, masks, noise_min_neighbors=0)
+    assert report['noise_filtered'] == {'cam1': 0, 'cam3': 0, 'cam2': 0}
+    assert len(points[ids == 1]) == 9*9
+
+
 def test_guided_prompts_are_bounded_and_inside_support():
     support = np.zeros((100, 100), bool); support[20:80, 40:60] = True
     points = guided_points(support)
@@ -86,7 +107,30 @@ def test_cam2_cannot_shift_preferred_tsdf(tmp_path):
     np.testing.assert_array_equal(np.asarray(a.triangles), np.asarray(b.triangles))
 
 
-<<<<<<< HEAD
+def test_protected_meshes_drops_isolated_cam1_cam3_noise(tmp_path):
+    import pytest
+    pytest.importorskip('open3d')
+    from irb120_perception.sam_shadow import protected_meshes
+    views = [view('cam1'), view('cam2'), view('cam3')]
+    masks = {v.camera: np.ones((9, 9), bool) for v in views}
+    views[0].depth[0, 0] = 5.  # isolated cam1 pixel, far from the rest of the flat plane
+    out = tmp_path/'out'; out.mkdir()
+    mesh = protected_meshes(views, masks, out, voxel=.001)
+    assert mesh['noise_filtered_pixels'] == {'cam1': 1, 'cam2': 0, 'cam3': 0}
+
+
+def test_protected_meshes_noise_filter_disabled_by_zero(tmp_path):
+    import pytest
+    pytest.importorskip('open3d')
+    from irb120_perception.sam_shadow import protected_meshes
+    views = [view('cam1'), view('cam2'), view('cam3')]
+    masks = {v.camera: np.ones((9, 9), bool) for v in views}
+    views[0].depth[0, 0] = 5.
+    out = tmp_path/'out'; out.mkdir()
+    mesh = protected_meshes(views, masks, out, voxel=.001, noise_min_neighbors=0)
+    assert mesh['noise_filtered_pixels'] == {'cam1': 0, 'cam2': 0, 'cam3': 0}
+
+
 def test_combined_cannot_be_shifted_by_disagreeing_nearby_cam2(tmp_path):
     import pytest
     o3d = pytest.importorskip('open3d')
@@ -130,8 +174,6 @@ def test_combined_mesh_is_one_continuous_patch_where_only_cam2_has_coverage(tmp_
     assert len(counts) == 1  # one continuous surface, not a preferred patch glued to a separate cam2 patch
 
 
-=======
->>>>>>> 2607c08e5a6cea5dbb6f19d1da1d380fe31ce5c9
 def test_table_dominated_proposal_rejected_without_rejecting_outside_roi():
     from irb120_perception.sam_shadow import accept_proposal
     mask = np.ones((100, 100), bool)

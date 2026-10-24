@@ -215,7 +215,7 @@ def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, l
 
 
 def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
-            press_pivot_override=None):
+            press_pivot_override=None, diagnostics=None):
     """Return an experimental contacts copy and evidence, preserving baseline.
 
     press_pivot_override: forwarded to select_contact_points unchanged -- moves
@@ -224,6 +224,11 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
     caller re-seed the SAME candidate pipeline (observed + any inferred top
     points, same camera-view-check filter) with a different pivot, instead of
     falling back to a plainer candidate pool that may not support a press at all.
+
+    diagnostics: forwarded to select_contact_points unchanged -- see its docstring. This is the
+    call that actually includes the camera-agreement/view-check gate (via experimental_press_filter
+    below), so a caller wanting the REAL end-to-end press funnel (not just the geometric one)
+    should capture diagnostics from here, not from a separate select_contact_points call.
     """
     snapshot = Path(snapshot); result = copy.deepcopy(contacts)
     from irb120_perception.contact_point_selector import select_contact_points
@@ -331,7 +336,8 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
                                     min_ball_center_z=.06,
                                     press_score_fraction=.05,
                                     experimental_press_filter=filter_candidates,
-                                    press_pivot_override=press_pivot_override)
+                                    press_pivot_override=press_pivot_override,
+                                    diagnostics=diagnostics)
     # An observed upward normal is only a hypothesis. If all observed contacts
     # fail validation, retry with inferred cap hypotheses through the SAME gates.
     if (rule == 'top_support_v1' and not selected['press']['available']

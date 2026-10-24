@@ -4,7 +4,9 @@ Models for the IRB120 cell: the robot description, and ground-truth models of th
 objects it presses, pulls and tips.
 
 ```text
-urdf/irb120_with_finger.xacro   # robot + F/T stack + finger (use_charuco_mount:=true for calibration)
+urdf/irb120_cell.xacro          # shared: robot + cell + F/T stack (included, not loaded directly)
+urdf/irb120_with_finger.xacro   # production: cell + finger
+urdf/irb120_with_charuco.xacro  # hand-eye calibration: cell + ChArUco mount
 urdf/*.xacro, urdf/*.urdf       # ABB IRB120 macro, ros2_control block, sensor/adapter and finger assemblies
 meshes/                         # robot, sensor and finger meshes
 objects/<name>/                 # one ground-truth object per folder (below)

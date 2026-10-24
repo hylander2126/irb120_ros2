@@ -1,0 +1,161 @@
+<?xml version="1.0"?>
+<!-- IRB120 cell shared by every end effector: arm + ros2_control, table/bracket/keep-out wall,
+     adapters + NetFT + tool-stack collision cylinder. The end effector mounts on sensor_body at
+     ft_body_length_xyz. Included by irb120_with_finger.xacro (production) and
+     irb120_with_charuco.xacro (hand-eye calibration); not loaded on its own. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="prefix" default=""/>
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  <xacro:arg name="fake_sensor_commands" default="false"/>
+  <xacro:arg name="rws_ip" default="None"/>
+  <xacro:arg name="rws_port" default="80"/>
+  <xacro:arg name="rws_username" default="ROS"/>
+  <xacro:arg name="rws_password" default="robotics"/>
+  <xacro:arg name="egm_port" default="6511"/>
+  <xacro:arg name="configure_via_rws" default="true"/>
+
+  <xacro:property name="prefix" value="$(arg prefix)"/>
+  <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
+  <xacro:property name="fake_sensor_commands" value="$(arg fake_sensor_commands)"/>
+  <xacro:property name="rws_ip" value="$(arg rws_ip)"/>
+  <xacro:property name="rws_port" value="$(arg rws_port)"/>
+  <xacro:property name="rws_username" value="$(arg rws_username)"/>
+  <xacro:property name="rws_password" value="$(arg rws_password)"/>
+  <xacro:property name="egm_port" value="$(arg egm_port)"/>
+  <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
+
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58_macro.xacro"/>
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58.ros2_control.xacro"/>
+  <xacro:abb_irb120_3_58 prefix="${prefix}"/>
+
+  <xacro:abb_irb120_3_58_ros2_control
+    name="ABBSystemHardware"
+    prefix="${prefix}"
+    use_fake_hardware="${use_fake_hardware}"
+    fake_sensor_commands="${fake_sensor_commands}"
+    rws_ip="${rws_ip}"
+    rws_port="${rws_port}"
+    rws_username="${rws_username}"
+    rws_password="${rws_password}"
+    egm_port="${egm_port}"
+    configure_via_rws="${configure_via_rws}"/>
+
+  <!-- ====== Params to tweak ====== -->
+  <xacro:property name="ft_body_length_xyz" value="0 0 -0.0333244"/>  <!-- Literallly just the sensor body length. Sensor body 'origin' is its robot-side face. -->
+
+  <xacro:property name="table_thickness" value="0.044"/> <!-- Visual feature -->
+  <xacro:property name="bracket_thickness" value="0.021"/> <!-- Visual feature -->
+  <xacro:property name="table_center_xyz" value="0.40 0 0"/> <!-- Visual feature -->
+
+
+  <!-- world: base_link is at x=y=0; table top surface is z=0 -->
+  <link name="world"/>
+
+  <!-- ====== Table that the robot and object rest on (for collision and visuals) ====== -->
+  <link name='table'>
+    <visual>
+      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 0.8 ${table_thickness}"/>
+      </geometry>
+      <material name="TableLight">
+        <color rgba="0.965 0.965 0.945 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/> <!-- At the center, bottom of table-->
+      <geometry>
+        <box size="2.0 0.8 ${table_thickness}"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ====== Bracket that robot sits on, ontop of the table ====== -->
+  <link name='bracket'>
+    <visual>
+      <origin xyz="0 0 ${bracket_thickness / 2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.194 0.8 ${bracket_thickness}"/>
+      </geometry>
+      <material name="LightGrey">
+        <color rgba="0.8 0.8 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${bracket_thickness / 2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.194 0.8 ${bracket_thickness}"/>
+      </geometry>
+    </collision>
+  </link>
+
+
+  <!-- ====== Keep-out wall on the robot's +y side (camera stand) ====== -->
+  <!-- Collision-only (no visual), so MoveIt plans around it without it cluttering RViz.
+       Its robot-facing surface is the x-z plane at y = wall_y. -->
+  <xacro:property name="wall_y" value="0.375"/>
+  <xacro:property name="wall_thickness" value="0.05"/>
+  <xacro:property name="wall_height" value="1.2"/>
+  <link name="keepout_wall_left">
+    <collision>
+      <origin xyz="0 ${wall_thickness / 2} ${wall_height / 2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 ${wall_thickness} ${wall_height}"/>
+      </geometry>
+    </collision>
+  </link>
+
+
+  <!-- The physical calibration and production chains share the robot adapters and NetFT. -->
+  <xacro:include filename="$(find irb120_models)/urdf/sensor_and_adapter_assembly.urdf"/>
+
+  <joint name="tool0_to_sensor_root" type="fixed">
+    <parent link="tool0"/>
+    <origin xyz="0 0 0" rpy="0 0 ${pi/2}"/>
+    <child link="root_sensor"/>
+  </joint>
+
+  <!-- The adapters, sensor plate and NetFT body have no collision geometry of their own; one
+       oversized cylinder covers all of them: 90 mm diameter, from the tool0 flange face to the
+       sensor's output face where the finger / ChArUco mount attaches (85.8 mm along tool0 +X). -->
+  <xacro:property name="tool_stack_length" value="0.0858"/>
+  <link name="tool_stack_collision">
+    <collision>
+      <origin xyz="${tool_stack_length / 2} 0 0" rpy="0 ${pi/2} 0"/>
+      <geometry><cylinder radius="0.045" length="${tool_stack_length}"/></geometry>
+    </collision>
+  </link>
+  <joint name="tool0_to_tool_stack_collision" type="fixed">
+    <parent link="tool0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="tool_stack_collision"/>
+  </joint>
+
+  <!-- World and table should coincide, at the top table surface -->
+  <joint name="world_to_table" type="fixed">
+    <parent link="world"/>
+    <origin xyz="${table_center_xyz}" rpy="0 0 0"/>
+    <child link="table"/>
+  </joint>
+
+  <joint name="world_to_bracket" type="fixed">
+    <parent link="world"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <child link="bracket"/>
+  </joint>
+
+  <!-- Spans the table's length (same x center), standing on the table top -->
+  <joint name="world_to_keepout_wall_left" type="fixed">
+    <parent link="world"/>
+    <origin xyz="${table_center_xyz.split()[0]} ${wall_y} 0" rpy="0 0 0"/>
+    <child link="keepout_wall_left"/>
+  </joint>
+
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <origin xyz="0 0 ${bracket_thickness}" rpy="0 0 0"/>
+    <child link="base_link"/>
+  </joint>
+
+</robot>

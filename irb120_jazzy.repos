@@ -23,7 +23,3 @@ repositories:
     type: git
     url: https://github.com/UTNuclearRoboticsPublic/netft_utils.git
     version: ddccade65049195324c384919be7391b24929b48
-  moveit_calibration:
-    type: git
-    url: https://github.com/ros-planning/moveit_calibration.git
-    version: 3f9d48ebe843caf1de060bfafe78160585c7c26f

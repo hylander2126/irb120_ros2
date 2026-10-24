@@ -15,10 +15,26 @@ The output YAML has the same joint_names/joint_values layout as the other
 pose sets, plus a parallel `detections` list recording what each camera saw
 at save time. Re-running with the same --out appends to it. Test the result
 with:
-  ros2 run irb120_handeye run_handeye_calibration --pose-path <file> --step --dry-run
+  ros2 run irb120_handeye handeye calibrate --pose-file <file> --step --dry-run
 
 Wait for the arm to finish moving before saving; the status line reflects the
 latest camera frame, not a settled pose.
+
+TEACHING POSES FOR ONE CAMERA (e.g. cam2): pass --cameras so the live status
+line only reports that camera, then jog to poses that are good FOR IT --
+board presented close to face-on to that camera's actual mounting angle, at
+a range of distances/orientations -- rather than poses that happened to work
+for a differently-angled camera. This matters: the default joints_custom.yaml
+set was originally taught against cam1's FOV, and cam2's steep/overhead
+mounting means it only ever sees a narrow, oblique subset of those cam1-tuned
+poses, which is the likely reason cam2's calibration residual keeps coming
+back worse than cam1/cam3's even after repeated re-runs against that same
+set -- see irb120_handeye/README.md "Recalibrate ONE camera".
+
+  ros2 run irb120_handeye handeye record-pose --cameras realsense2 \\
+      --out ~/joints_realsense2.yaml
+  ros2 run irb120_handeye handeye calibrate --cameras realsense2 \\
+      --pose-file ~/joints_realsense2.yaml
 """
 
 import argparse
@@ -119,7 +135,10 @@ def _report_live_solution(ns: str, samples: dict) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', default=None, help='Pose YAML to create/append to (default: ~/joints_custom.yaml).')
-    p.add_argument('--cameras', default='realsense,realsense2,realsense3')
+    p.add_argument('--cameras', default='realsense,realsense2,realsense3',
+                   help='Comma-separated camera_name values to show/record detections for -- '
+                        'realsense=cam1, realsense2=cam2, realsense3=cam3 -- e.g. "realsense2" to teach '
+                        'a pose set tuned for ONLY cam2 (see the module docstring above).')
     p.add_argument('--board-type', choices=['charuco', 'aruco'], default='charuco',
                    help='Calibration target type (default: the calibrated ChArUco board).')
     p.add_argument('--board-yaml', default=None)
@@ -127,7 +146,7 @@ def main() -> int:
     p.add_argument('--marker-separation-m', type=float, default=None)
     p.add_argument('--square-length-m', type=float, default=None)
     p.add_argument('--min-features', type=int, default=None)
-    # p.add_argument('--joint-names-from', default='joints_5_6mm.yaml',
+    # p.add_argument('--joint-names-from', default='joints_custom.yaml',
                 #    help='Existing pose file to copy the joint name order from.')
     args = p.parse_args()
 

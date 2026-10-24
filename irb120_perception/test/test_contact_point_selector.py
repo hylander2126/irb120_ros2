@@ -52,6 +52,35 @@ def test_box_contacts_and_signed_scores():
     assert push['ball_center'][2] - 0.01325 >= 0.003
 
 
+def test_diagnostics_funnel_matches_candidate_counts_and_selected_point():
+    points, normals = box()
+    diagnostics = {}
+    result = select_contact_points(points, normals=normals, table_z=0., diagnostics=diagnostics)
+    diag_points = diagnostics['points']
+    for mode in ('forward_tip', 'press'):
+        counts = result[mode]['candidate_counts']
+        stages = diagnostics[mode]
+        # Every stage reported in candidate_counts has a matching boolean mask whose
+        # True-count agrees exactly, and the funnel only ever shrinks (each stage's
+        # survivors are a subset of the previous stage's).
+        order = ['clearance', 'direction', 'surface', 'positive_moment', 'inset',
+                 'camera_agreement', 'best_score_band', 'centered_on_edge', 'centered_edgeward']
+        present = [s for s in order if s in counts]
+        for stage in present:
+            assert stages[stage].sum() == counts[stage]
+        for prev, nxt in zip(present, present[1:]):
+            assert np.all(stages[prev][stages[nxt]])  # nxt's survivors all survived prev too
+        selected = stages['selected_index']
+        assert selected is not None
+        np.testing.assert_allclose(diag_points[selected], result[mode]['point'])
+
+
+def test_diagnostics_default_none_is_a_no_op():
+    points, normals = box()
+    result = select_contact_points(points, normals=normals, table_z=0.)
+    assert 'candidate_counts' in result['press']  # unaffected by diagnostics=None
+
+
 def test_normals_estimated_from_cloud_and_fused_overlap():
     points, _ = box()
     a = select_contact_points(points, table_z=0.)

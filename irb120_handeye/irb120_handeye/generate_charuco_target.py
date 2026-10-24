@@ -8,7 +8,7 @@ ArUco grid board / the MoveIt HandEyeCalibration panel.
 
 Run once whenever BOARD_* below changes:
 
-  ros2 run irb120_handeye generate_charuco_target
+  ros2 run irb120_handeye handeye generate-target
 
 Writes, to the home directory:
   - charuco_target.pdf  — the print-ready page. The PDF page size is set

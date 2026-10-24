@@ -2,8 +2,8 @@
 Fast-FoundationStereo depth node — launch wrapper.
 
 Reusable per camera: run once per `camera_name` in its own terminal, next to
-that camera's `bringup_camN.launch.py` (which must publish infra1/infra2 —
-on by default now via `raw_depth`/`depth_diagnostics`). Does not touch any
+`irb120_handeye`'s `bringup_cams.launch.py` (which must publish infra1/infra2 —
+on by default via `profile:=raw_depth`). Does not touch any
 existing topic or node.
 
   ros2 launch irb120_perception foundation_stereo.launch.py camera_name:=realsense

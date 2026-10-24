@@ -18,11 +18,45 @@ dir -- see the "Tunables" block) is fixed for this rig and meant to be edited
 here directly rather than passed as a flag.
 
 Usage:
-  ros2 run irb120_handeye run_handeye_calibration
-  ros2 run irb120_handeye run_handeye_calibration --cameras realsense3
+  ros2 run irb120_handeye handeye calibrate
+  ros2 run irb120_handeye handeye calibrate --cameras realsense2    # cam2 only
+  ros2 run irb120_handeye handeye calibrate --cameras realsense3
 
-Prerequisites: abb_control bringup (base_link/tool0 TF), bringup_stack with
-calibration:=true (move_group with the ChArUco-mount model, and the cameras).
+camera_name -> physical camera: realsense=cam1, realsense2=cam2, realsense3=cam3
+(see CAMERA_LINK_FRAMES below). --cameras restricts which camera(s) get a
+solve/output file this run; it does NOT change which poses are driven through
+unless the pose file's own per-pose `detections` record also excludes some --
+see --pose-file below.
+
+RECALIBRATING ONE CAMERA (e.g. cam2) AGAINST THE SHARED POSE SET JUST REPEATS
+WHATEVER LIMITED THAT CAMERA LAST TIME: if cam2 keeps coming back with a worse
+residual than cam1/cam3 across repeated attempts, that is a known, documented
+issue (see irb120_handeye/README.md "Recalibrate ONE camera") -- the default
+pose set was taught/tuned for cam1's FOV, and cam2's different (steep/
+overhead) mounting angle means it only ever sees a narrower, more oblique
+subset of those cam1-oriented poses, not poses chosen for its own geometry.
+Re-running the solve against the SAME poses will not fix that; teach a
+cam2-specific pose set first (`ros2 run irb120_handeye handeye record-pose
+--cameras realsense2 --out ~/joints_realsense2.yaml`, watching ONLY cam2's
+live detection status while jogging to a face-on, well-spread set of board
+views for cam2's actual angle), then calibrate against that:
+  ros2 run irb120_handeye handeye calibrate --cameras realsense2 \\
+      --pose-file ~/joints_realsense2.yaml
+The solver itself (cv2.calibrateHandEye seeded Park solve, refined by
+jointly minimizing board-corner reprojection error with a Huber robust loss,
+automatic outlier-pose flagging -- see METHOD/_solve_handeye below) is the
+same regardless of camera and has been validated against synthetic ground
+truth (see the METHODS comment below); a bad residual is a pose-coverage/data
+problem for that camera, not a solver problem.
+
+Prerequisites: `ros2 launch irb120_handeye bringup_handeye.launch.py` (brings up
+abb_control itself, plus move_group with the ChArUco-mount model) and the
+camera(s) you're calibrating. bringup_stack.launch.py is NOT a substitute --
+it has no calibration mode (removed 2026-10-24: it was carrying the
+production +/-60 degree joint_6 FT-cable-protection limit into calibration
+too, with no way to turn it off, which could trap the robot mid-motion with
+no valid replan target -- see irb120_handeye/README.md "Recalibrate ONE
+camera" and irb120_handeye/config/joint_limits_calibration.yaml).
 """
 
 import argparse
@@ -66,7 +100,7 @@ METHODS = {
     'daniilidis': cv2.CALIB_HAND_EYE_DANIILIDIS,
 }
 
-# camera_name (rs_launch.py) -> its eye-to-hand link frame (bringup_cam1/2/3.launch.py).
+# camera_name (rs_launch.py) -> its eye-to-hand link frame (CAMERAS in bringup_cams.launch.py).
 # Optical frame is derived as f'{name}_color_optical_frame'.
 CAMERA_LINK_FRAMES = {'realsense': 'realsense_link', 'realsense2': 'realsense2_link', 'realsense3': 'realsense3_link'}
 
@@ -183,7 +217,7 @@ def _load_pose_detections(pose_path: str, n_poses: int) -> List[Optional[Dict[st
     """The per-pose 'detections' list record_calibration_pose.py writes (which
     camera(s) saw the board when that pose was taught), or [None] * n_poses
     when the pose file predates that field / wasn't taught interactively
-    (e.g. joints_5_6mm.yaml) or its length doesn't match joint_values."""
+    (e.g. an old OLD_joints_*.yaml) or its length doesn't match joint_values."""
     with open(pose_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
     detections = data.get('detections')
@@ -498,9 +532,8 @@ EYE-TO-HAND: base_link -> {link_frame}. Seeded with cv2.calibrateHandEye
 error; {n_samples} samples, RMS reprojection error {sol.rms_px:.2f} px
 (~{sol.rms_mm:.2f} mm at the board).
 
-Not wired into bringup automatically. Point the matching
-bringup_camN.launch.py's cameraN_tf.launch.py include at this file (or copy
-the values in) once you trust the result, and keep the previous
+Not wired into bringup automatically. Point this camera's CAMERAS entry in
+bringup_cams.launch.py at this file (or copy the values in) once you trust the result, and keep the previous
 cam_tf_*.launch.py around as a fallback per this package's README.
 """
 from launch import LaunchDescription
@@ -626,13 +659,20 @@ def _resolve_pose_source(pose: str) -> str:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--pose-file', default='joints_5_6mm.yaml',
-                   help='Pose YAML: an existing path (e.g. ~/joints_custom.yaml), or a filename under '
-                        'share/irb120_handeye/calibrations/.')
+    p.add_argument('--pose-file', default='joints_custom.yaml',
+                   help='Pose YAML: an existing path (e.g. ~/joints_realsense2.yaml), or a filename under '
+                        'share/irb120_handeye/calibrations/ (default: joints_custom.yaml, the shared set). '
+                        'For a single camera (e.g. cam2) whose residual keeps coming back worse than the '
+                        "others, pass a pose file taught JUST for that camera (see --cameras below and "
+                        'irb120_handeye/README.md "Recalibrate ONE camera") rather than reusing this one.')
     p.add_argument('--cameras', default=None,
-                   help='Comma-separated camera_name values, e.g. "realsense3". Defaults to all of: '
+                   help='Comma-separated camera_name values -- realsense=cam1, realsense2=cam2, '
+                        'realsense3=cam3 -- e.g. "realsense2" to calibrate ONLY cam2. Defaults to all of: '
                         + ', '.join(sorted(CAMERA_LINK_FRAMES)) + '. A pose taught '
-                        '(record_calibration_pose.py) as not seen by any of these is skipped -- no move.')
+                        '(record_calibration_pose.py) as not seen by any of these is skipped -- no move. '
+                        'Restricting --cameras alone does not change pose GEOMETRY -- it still drives '
+                        'through --pose-file\'s existing poses, just solving/writing output for fewer '
+                        'cameras; see --pose-file above if that camera needs its own poses.')
     p.add_argument('--step', action='store_true',
                    help='Print the planned joint move and wait for Enter before every pose '
                         '(Ctrl+C to abort). Use for first runs of a new pose set.')
@@ -687,7 +727,7 @@ def main() -> int:
             print('No joint states received -- is abb_control bringup running?')
             return 2
         if not pose_runner.wait_for_move_group(timeout_sec=10.0):
-            print('move_group not available -- is bringup_stack (calibration:=true) running?')
+            print('move_group not available -- is bringup_handeye.launch.py running?')
             return 2
 
         print('Planning every move with MoveIt before moving (collision check, no motion)...')

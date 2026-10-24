@@ -1,194 +1,23 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="abb_irb120_3_58">
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_cell.xacro"/>
 
-  <xacro:arg name="prefix" default=""/>
-  <xacro:arg name="use_fake_hardware" default="false"/>
-  <xacro:arg name="fake_sensor_commands" default="false"/>
-  <xacro:arg name="rws_ip" default="None"/>
-  <xacro:arg name="rws_port" default="80"/>
-  <xacro:arg name="rws_username" default="ROS"/>
-  <xacro:arg name="rws_password" default="robotics"/>
-  <xacro:arg name="egm_port" default="6511"/>
-  <xacro:arg name="configure_via_rws" default="true"/>
-  <xacro:arg name="use_charuco_mount" default="false"/>
-
-  <xacro:property name="prefix" value="$(arg prefix)"/>
-  <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
-  <xacro:property name="fake_sensor_commands" value="$(arg fake_sensor_commands)"/>
-  <xacro:property name="rws_ip" value="$(arg rws_ip)"/>
-  <xacro:property name="rws_port" value="$(arg rws_port)"/>
-  <xacro:property name="rws_username" value="$(arg rws_username)"/>
-  <xacro:property name="rws_password" value="$(arg rws_password)"/>
-  <xacro:property name="egm_port" value="$(arg egm_port)"/>
-  <xacro:property name="configure_via_rws" value="$(arg configure_via_rws)"/>
-  <xacro:property name="use_charuco_mount" value="$(arg use_charuco_mount)"/>
-
-  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58_macro.xacro"/>
-  <xacro:include filename="$(find irb120_models)/urdf/irb120_3_58.ros2_control.xacro"/>
-  <xacro:abb_irb120_3_58 prefix="${prefix}"/>
-
-  <xacro:abb_irb120_3_58_ros2_control
-    name="ABBSystemHardware"
-    prefix="${prefix}"
-    use_fake_hardware="${use_fake_hardware}"
-    fake_sensor_commands="${fake_sensor_commands}"
-    rws_ip="${rws_ip}"
-    rws_port="${rws_port}"
-    rws_username="${rws_username}"
-    rws_password="${rws_password}"
-    egm_port="${egm_port}"
-    configure_via_rws="${configure_via_rws}"/>
-
-  <!-- ====== Params to tweak ====== -->
-  <xacro:property name="ft_body_length_xyz" value="0 0 -0.0333244"/>  <!-- Literallly just the sensor body length. Sensor body 'origin' is its robot-side face. -->
   <xacro:property name="finger_mass" value="0.066"/>           <!-- kg (measured finger+ball+screws) -->
   <xacro:property name="finger_cog" value="0.0275"/>         <!-- meters in finger frame (measured) -->
   <xacro:property name="finger_length" value="0.100"/>         <!-- finger length (measured)-->
   <xacro:property name="finger_ball_radius" value="0.01325"/>  <!-- Ball radius, matches finger_assembly.urdf ball link's CAD inertial/mesh offset exactly -->
   <xacro:property name="finger_ball_center_xyz" value="0 0 0.0866512"/>     <!-- finger_assembly.urdf CAD chain, root_finger's local Z is the shaft axis: 0 (root_finger->pusher_body) + 0.0734012 (pusher_body->ball) + 0.01325 (ball mesh recenter) -->
 
-  <xacro:property name="table_thickness" value="0.044"/> <!-- Visual feature -->
-  <xacro:property name="bracket_thickness" value="0.021"/> <!-- Visual feature -->
-  <xacro:property name="table_center_xyz" value="0.40 0 0"/> <!-- Visual feature -->
-
-
-  <!-- world: base_link is at x=y=0; table top surface is z=0 -->
-  <link name="world"/>
-
-  <!-- ====== Table that the robot and object rest on (for collision and visuals) ====== -->
-  <link name='table'>
-    <visual>
-      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/>
-      <geometry>
-        <box size="2.0 0.8 ${table_thickness}"/>
-      </geometry>
-      <material name="TableLight">
-        <color rgba="0.965 0.965 0.945 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 -${table_thickness / 2}" rpy="0 0 0"/> <!-- At the center, bottom of table-->
-      <geometry>
-        <box size="2.0 0.8 ${table_thickness}"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <!-- ====== Bracket that robot sits on, ontop of the table ====== -->
-  <link name='bracket'>
-    <visual>
-      <origin xyz="0 0 ${bracket_thickness / 2}" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.194 0.8 ${bracket_thickness}"/>
-      </geometry>
-      <material name="LightGrey">
-        <color rgba="0.8 0.8 0.8 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 ${bracket_thickness / 2}" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.194 0.8 ${bracket_thickness}"/>
-      </geometry>
-    </collision>
-  </link>
-
-
-  <!-- ====== Keep-out wall on the robot's +y side (camera stand) ====== -->
-  <!-- Collision-only (no visual), so MoveIt plans around it without it cluttering RViz.
-       Its robot-facing surface is the x-z plane at y = wall_y. -->
-  <xacro:property name="wall_y" value="0.375"/>
-  <xacro:property name="wall_thickness" value="0.05"/>
-  <xacro:property name="wall_height" value="1.2"/>
-  <link name="keepout_wall_left">
-    <collision>
-      <origin xyz="0 ${wall_thickness / 2} ${wall_height / 2}" rpy="0 0 0"/>
-      <geometry>
-        <box size="2.0 ${wall_thickness} ${wall_height}"/>
-      </geometry>
-    </collision>
-  </link>
-
-
-  <!-- The physical calibration and production chains share the robot adapters and NetFT. -->
-  <xacro:include filename="$(find irb120_models)/urdf/sensor_and_adapter_assembly.urdf"/>
-
-  <joint name="tool0_to_sensor_root" type="fixed">
-    <parent link="tool0"/>
-    <origin xyz="0 0 0" rpy="0 0 ${pi/2}"/>
-    <child link="root_sensor"/>
+  <xacro:include filename="$(find irb120_models)/urdf/finger_assembly.urdf"/>
+  <joint name="sensor_body_to_finger_root" type="fixed">
+    <parent link="sensor_body"/>
+    <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
+    <child link="root_finger"/>
   </joint>
-
-  <!-- The adapters, sensor plate and NetFT body have no collision geometry of their own; one
-       oversized cylinder covers all of them: 90 mm diameter, from the tool0 flange face to the
-       sensor's output face where the finger / ChArUco mount attaches (85.8 mm along tool0 +X). -->
-  <xacro:property name="tool_stack_length" value="0.0858"/>
-  <link name="tool_stack_collision">
-    <collision>
-      <origin xyz="${tool_stack_length / 2} 0 0" rpy="0 ${pi/2} 0"/>
-      <geometry><cylinder radius="0.045" length="${tool_stack_length}"/></geometry>
-    </collision>
-  </link>
-  <joint name="tool0_to_tool_stack_collision" type="fixed">
-    <parent link="tool0"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <child link="tool_stack_collision"/>
+  <link name="finger_ball_center"/>
+  <joint name="finger_to_ball_center" type="fixed">
+    <parent link="root_finger"/>
+    <origin xyz="${finger_ball_center_xyz}" rpy="${pi/2} ${-pi/2} 0"/>
+    <child link="finger_ball_center"/>
   </joint>
-
-  <xacro:if value="${use_charuco_mount}">
-    <!-- Calibration-only terminal attachment. Its mounting plane is the NetFT output face. -->
-    <link name="charuco_mount">
-      <visual>
-        <geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry>
-        <material name="CharucoMount"><color rgba="0.95 0.55 0.05 1.0"/></material>
-      </visual>
-      <collision><geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry></collision>
-    </link>
-    <joint name="sensor_body_to_charuco_mount" type="fixed">
-      <parent link="sensor_body"/><child link="charuco_mount"/>
-      <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
-    </joint>
-  </xacro:if>
-
-  <xacro:unless value="${use_charuco_mount}">
-    <xacro:include filename="$(find irb120_models)/urdf/finger_assembly.urdf"/>
-    <joint name="sensor_body_to_finger_root" type="fixed">
-      <parent link="sensor_body"/>
-      <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
-      <child link="root_finger"/>
-    </joint>
-    <link name="finger_ball_center"/>
-    <joint name="finger_to_ball_center" type="fixed">
-      <parent link="root_finger"/>
-      <origin xyz="${finger_ball_center_xyz}" rpy="${pi/2} ${-pi/2} 0"/>
-      <child link="finger_ball_center"/>
-    </joint>
-  </xacro:unless>
-
-  <!-- World and table should coincide, at the top table surface -->
-  <joint name="world_to_table" type="fixed">
-    <parent link="world"/>
-    <origin xyz="${table_center_xyz}" rpy="0 0 0"/>
-    <child link="table"/>
-  </joint>
-
-  <joint name="world_to_bracket" type="fixed">
-    <parent link="world"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <child link="bracket"/>
-  </joint>
-
-  <!-- Spans the table's length (same x center), standing on the table top -->
-  <joint name="world_to_keepout_wall_left" type="fixed">
-    <parent link="world"/>
-    <origin xyz="${table_center_xyz.split()[0]} ${wall_y} 0" rpy="0 0 0"/>
-    <child link="keepout_wall_left"/>
-  </joint>
-
-  <joint name="world_to_base" type="fixed">
-    <parent link="world"/>
-    <origin xyz="0 0 ${bracket_thickness}" rpy="0 0 0"/>
-    <child link="base_link"/>
-  </joint>
-
 </robot>

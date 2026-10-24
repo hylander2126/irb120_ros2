@@ -7,9 +7,9 @@ sent straight to the trajectory controller. Requires bringup_stack's
 move_group.
 
 Usage examples:
-  ros2 run irb120_handeye run_calibration_poses
-  ros2 run irb120_handeye run_calibration_poses --pose-file joints_8_32mm.yaml
-  ros2 run irb120_handeye run_calibration_poses --velocity-scaling 0.1 --settle-time 2.0
+  ros2 run irb120_handeye handeye run-poses
+  ros2 run irb120_handeye handeye run-poses --pose-file joints_custom.yaml
+  ros2 run irb120_handeye handeye run-poses --velocity-scaling 0.1 --settle-time 2.0
 """
 
 import argparse
@@ -182,7 +182,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run saved hand-eye calibration poses with manual sampling.")
     p.add_argument(
         "--pose-file",
-        default="joints_5_6mm.yaml",
+        default="joints_custom.yaml",
         help="Pose YAML filename under share/irb120_handeye/calibrations/",
     )
     p.add_argument(

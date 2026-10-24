@@ -23,10 +23,10 @@ printed live for that pose (1-based, into the --pose-file used for that run)
 been missed/rejected for a given camera.
 
 Usage:
-  ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml
-  ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense3.yaml \\
+  ros2 run irb120_handeye handeye diagnose --in ~/handeye_samples_realsense3.yaml
+  ros2 run irb120_handeye handeye diagnose --in ~/handeye_samples_realsense3.yaml \\
       --exclude-poses "4,9" --write-launch
-  ros2 run irb120_handeye diagnose_handeye_samples --in ~/handeye_samples_realsense.yaml --fit-focal
+  ros2 run irb120_handeye handeye diagnose --in ~/handeye_samples_realsense.yaml --fit-focal
 
 --fit-focal re-runs the refinement with one extra unknown: a scale on the
 color camera's factory focal length (fx, fy together). The robot's known

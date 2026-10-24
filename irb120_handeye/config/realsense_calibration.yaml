@@ -1,4 +1,4 @@
-# Realsense driver params for hand-eye calibration (bringup_stack.launch.py calibration:=true).
+# Realsense driver params for hand-eye calibration (bringup_cams.launch.py profile:=calibration, used by bringup_handeye.launch.py).
 # Replaces realsense_common.yaml rather than layering on it: rs_launch.py applies config_file
 # params after its launch args, so a launch arg can't override a value set in a yaml.
 

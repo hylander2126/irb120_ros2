@@ -79,7 +79,7 @@ def generate_launch_description() -> LaunchDescription:
         # Table removal: each camera's fixed view of the table, z = a*x + b*y + c in
         # base_link, the median depth_plane_audit fit over the 2026-10-13 snapshots
         # (cam1/cam3 p95 residual 2.2 mm, cam2 5.0 mm). Re-measure after recalibrating a
-        # camera: ros2 run irb120_perception depth_plane_audit SNAPSHOT --camera camN.
+        # camera: python3 -m irb120_perception.depth_plane_audit SNAPSHOT --camera camN.
         'table_plane_cam1': [0.0112, -0.0009, -0.0279],
         'table_plane_cam2': [0.0108, 0.0036, -0.0191],
         'table_plane_cam3': [0.0039, 0.0006, -0.0208],

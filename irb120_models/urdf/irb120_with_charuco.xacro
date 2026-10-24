@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="abb_irb120_3_58">
+  <xacro:include filename="$(find irb120_models)/urdf/irb120_cell.xacro"/>
+
+  <!-- Calibration-only terminal attachment. Its mounting plane is the NetFT output face. -->
+  <link name="charuco_mount">
+    <visual>
+      <geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry>
+      <material name="CharucoMount"><color rgba="0.95 0.55 0.05 1.0"/></material>
+    </visual>
+    <collision><geometry><mesh filename="package://irb120_models/meshes/aruco_mount.stl"/></geometry></collision>
+  </link>
+  <joint name="sensor_body_to_charuco_mount" type="fixed">
+    <parent link="sensor_body"/><child link="charuco_mount"/>
+    <origin xyz="${ft_body_length_xyz}" rpy="0 ${pi} -0.7853975"/>
+  </joint>
+
+  <link name="charuco_center"/>
+  <joint name="charuco_mount_to_charuco_center" type="fixed">
+    <parent link="charuco_mount"/><child link="charuco_center"/>
+    <origin xyz="0 0 0.09273" rpy="${pi/2} ${-pi/2} 0"/>
+  </joint>
+</robot>

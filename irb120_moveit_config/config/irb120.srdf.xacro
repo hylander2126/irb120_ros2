@@ -1,13 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Production SRDF, paired with irb120_models/urdf/irb120_with_finger.xacro. -->
 <robot xmlns:xacro="http://wiki.ros.org/xacro" name="abb_irb120_3_58">
-  <xacro:arg name="use_charuco_mount" default="false"/>
-  <xacro:property name="use_charuco_mount" value="$(arg use_charuco_mount)"/>
-  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_macro.srdf.xacro"/>
-  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_handeye_macro.srdf.xacro"/>
-  <xacro:if value="${use_charuco_mount}">
-    <xacro:irb120_handeye_srdf/>
-  </xacro:if>
-  <xacro:unless value="${use_charuco_mount}">
-    <xacro:irb120_srdf/>
-  </xacro:unless>
+  <xacro:include filename="$(find irb120_moveit_config)/config/irb120_cell_macro.srdf.xacro"/>
+  <xacro:irb120_cell_srdf tip_link="finger_ball_center"/>
+
+  <disable_collisions link1="tool_stack_collision" link2="pusher_body" reason="Adjacent"/>
+  <disable_collisions link1="sensor_body" link2="pusher_body" reason="Adjacent"/>
+  <disable_collisions link1="pusher_body" link2="ball" reason="Adjacent"/>
 </robot>

@@ -31,6 +31,7 @@
   <depend>control_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>moveit_msgs</depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
   <depend>moveit_configs_utils</depend>
   <depend>moveit_ros_move_group</depend>
   <depend>shape_msgs</depend>

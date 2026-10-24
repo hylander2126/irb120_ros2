@@ -74,9 +74,9 @@ def test_calibration_recovers_known_bias_and_rejects_unobservable_poses(tmp_path
 
 
 def test_axes_frame_exists_in_both_generated_robot_models():
-    path = Path(__file__).parents[2] / 'irb120_models/urdf/irb120_with_finger.xacro'
-    for mount in ('false', 'true'):
-        root = ET.fromstring(xacro.process_file(str(path), mappings={'use_charuco_mount': mount}).toxml())
+    urdf_dir = Path(__file__).parents[2] / 'irb120_models/urdf'
+    for model in ('irb120_with_finger.xacro', 'irb120_with_charuco.xacro'):
+        root = ET.fromstring(xacro.process_file(str(urdf_dir / model)).toxml())
         assert WRENCH_AXES_FRAME in {link.attrib['name'] for link in root.findall('link')}
 
 
