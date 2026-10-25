@@ -101,10 +101,22 @@ DESCEND_SPEED = 0.005       # m/s once contact is felt, while loading to the pre
 SQUASH_SEEK_SPEED = 1.5 * DESCEND_SPEED  # m/s before contact (free air down to the object)
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
-ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
+# Object tilt is measured from the squash contact (0 deg = object at rest), wherever the
+# contact is. Safety cap only; ARC exits earlier once fx flips sign. 35 deg clears the
+# largest press tilt recorded so far (teal_cylinder, 33.4 deg on 2026-10-20).
+ARC_MAX_TILT_DEG = 35.0
 SQUASH_EXTRA_DESCENT_M = 0.005  # allow 5 mm below predicted ball-center contact height
 SQUASH_STANDOFF = PRESS_STANDOFF       # m, pre-squash ball center sits this far above the detected press contact (~14 mm clear of the object's collision box)
-PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # EE orientation for the approach (xyzw)
+PRE_SQUASH_ORIENTATION = (0.0, 0.0, 0.0, 1.0)  # horizontal finger (xyzw); pitch 0 below
+# Try the horizontal finger first; if the approach does not plan (e.g. the shaft would lie
+# over an overhanging top), pitch the finger down (about world y, as push) in these steps.
+# The pitch is then held static through the arc.
+PRESS_PITCH_CANDIDATES_DEG = (0.0, 10.0, 20.0, 30.0)
+
+
+def press_orientation(pitch_deg: float) -> tuple:
+    half = math.radians(pitch_deg) / 2
+    return (0.0, math.sin(half), 0.0, math.cos(half))
 ARC_FX_SIGN_DEADBAND_N = 0.08
 ARC_FX_SIGN_MIN_SWEEP_DEG = 5.0
 ARC_FX_SIGN_MIN_SAMPLES = 20
@@ -125,8 +137,8 @@ ARC_FX_LOW_FLOOR_N  = 0.1    # absolute floor — the old fixed threshold, now a
 ARC_FX_LOW_STABLE_SAMPLES = 5    # number of consecutive ticks below threshold required
 
 SQUASH_TIMEOUT_SEC = 30.0
-ARC_TIMEOUT_SEC = 30.0
-UNARC_TIMEOUT_SEC = 30.0
+ARC_TIMEOUT_SEC = 45.0     # a full 23 deg sweep takes ~28 s at the ~0.9 deg/s reached on hardware
+UNARC_TIMEOUT_SEC = 45.0
 LULL_WAIT_SEC = 1.0
 LULL_SETTLE_N = 0.5          # force must be within this many N of reference before leaving LULL
 LULL_SETTLE_TIMEOUT_SEC = 8.0 # bail to ARC anyway after this long even if not settled
@@ -251,6 +263,7 @@ class ArcStatic(Node):
         self._force_x = 0.0
         self._force_z = 0.0
         self._force_z_signed = 0.0
+        self._press_pitch_deg = 0.0  # finger pitch chosen by the approach; forces rotated by it
         self._have_force = False
         self._last_wrench_s: float | None = None  # node-clock receipt time of the latest sample
         self._abort_reason: str | None = None
@@ -342,15 +355,30 @@ class ArcStatic(Node):
     def move_to_pre_squash(self) -> bool:
         """Plan around the detected object (a collision box only for this move). Also used for
         retries and between batch trials, from the RETRACT pose just above the object's box."""
+        for pitch in PRESS_PITCH_CANDIDATES_DEG:
+            action = {}
+            if self._approach_at_pitch(pitch, action):
+                self._press_pitch_deg = pitch
+                if pitch:
+                    self.get_logger().warn(f"Horizontal finger did not plan; pressing with the finger "
+                                           f"pitched {pitch:.0f} deg down")
+                return True
+            # Only a plan that failed tries the next pitch; an attempted move that failed does not.
+            if 'execution_success' in action:
+                return False
+            self.get_logger().warn(f"Pre-squash approach at finger pitch {pitch:.0f} deg did not plan")
+        return False
+
+    def _approach_at_pitch(self, pitch_deg: float, action: dict) -> bool:
+        orientation = press_orientation(pitch_deg)
         diagnostic = None
-        action = {}
         success = False
         if getattr(self, '_approach_diagnostic_path', None):
             from irb120_control.util.approach_diagnostics import ApproachDiagnostics
             diagnostic = ApproachDiagnostics(self, self._approach_diagnostic_path,
                                              self._pre_squash_pos, BASE_FRAME, EE_LINK)
             diagnostic.write('approach_request', target=self._pre_squash_pos,
-                             orientation_xyzw=PRE_SQUASH_ORIENTATION, frame=BASE_FRAME,
+                             orientation_xyzw=orientation, pitch_deg=pitch_deg, frame=BASE_FRAME,
                              link=EE_LINK, provenance=self._approach_provenance)
             diagnostic.start()
         try:
@@ -358,7 +386,7 @@ class ArcStatic(Node):
                 success = plan_and_execute_pose_goal(
                     self, self._move_group_client,
                     target_position=self._pre_squash_pos,
-                    target_orientation=PRE_SQUASH_ORIENTATION,
+                    target_orientation=orientation,
                     base_frame=BASE_FRAME, ee_link=EE_LINK,
                     velocity_scale=0.1, acceleration_scale=0.1, diagnostics=action)
             return success
@@ -450,9 +478,12 @@ class ArcStatic(Node):
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
         # Keep the signed fixed-orientation XZ force for actual-angle radial/tangent projections.
-        self._force_x = msg.wrench.force.x
+        # tool0 axes are world axes at pitch 0; a pitched finger rotates them about y.
+        c, s = math.cos(math.radians(self._press_pitch_deg)), math.sin(math.radians(self._press_pitch_deg))
+        fx, fz = msg.wrench.force.x, msg.wrench.force.z
+        self._force_x = c * fx + s * fz
         self._force_y = msg.wrench.force.y
-        self._force_z_signed = msg.wrench.force.z
+        self._force_z_signed = -s * fx + c * fz
         self._force_z = abs(self._force_z_signed)
         self._have_force = True
         t = self._now_s()
@@ -583,7 +614,7 @@ class ArcStatic(Node):
         self._arc_center_x = center_x
         self._arc_center_z = center_z
         self._arc_start_angle = arc_angle_xz(x_contact, z_contact, self._arc_center_x, self._arc_center_z)
-        self._arc_end_angle = math.radians(ARC_MAX_ANGLE_DEG)
+        self._arc_end_angle = self._arc_start_angle - math.radians(ARC_MAX_TILT_DEG)
         radius = math.hypot(x_contact - center_x, z_contact - center_z)
         self._arc_fx_pos_count = 0
         self._arc_fx_neg_count = 0
@@ -593,7 +624,8 @@ class ArcStatic(Node):
         self._arc_peak_tangent = 0.0
         self.get_logger().info(
             f"Arc init: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})  "
-            f"r={radius:.4f} m  start={math.degrees(self._arc_start_angle):.1f} deg"
+            f"r={radius:.4f} m  tilt 0 at contact (ball {math.degrees(self._arc_start_angle):.1f} deg "
+            f"from vertical over the pivot)  max tilt {ARC_MAX_TILT_DEG:.1f} deg"
         )
 
     def _current_arc_angle(self, x: float, z: float) -> float:
@@ -839,7 +871,7 @@ class ArcStatic(Node):
             if t - self._last_arc_log_time > 0.2:
                 self._last_arc_log_time = t
                 self.get_logger().info(
-                    f"{angle_deg:.1f} / {ARC_MAX_ANGLE_DEG:.1f} deg  "
+                    f"tilt {math.degrees(self._arc_start_angle - angle):.1f} / {ARC_MAX_TILT_DEG:.1f} deg  "
                     f"pitch(static): {math.degrees(current_pitch):.1f} deg  "
                     f"f_tangent: {f_tangent:.2f} N  f_radial: {f_radial:.2f} N  "
                     f"fx_low_count: {self._arc_fx_low_count}"
@@ -879,7 +911,7 @@ class ArcStatic(Node):
                 self._lull_next = "UNARC"
                 self._arc_exit = "arc_limit"
                 self.get_logger().warn(
-                    f"Reached max arc angle {ARC_MAX_ANGLE_DEG:.1f} deg before fx sign flip "
+                    f"Reached max tilt {ARC_MAX_TILT_DEG:.1f} deg before fx sign flip "
                     f"(f_tangent={self._tangent_force(angle):.2f} N); entering LULL as safety fallback"
                 )
                 self._transition("LULL")
@@ -895,7 +927,7 @@ class ArcStatic(Node):
                 self._last_arc_log_time = t
                 f_tangent = self._tangent_force(angle)
                 self.get_logger().info(
-                    f"unarc {math.degrees(angle):.1f} / {math.degrees(self._arc_start_angle):.1f} deg  "
+                    f"unarc tilt {math.degrees(self._arc_start_angle - angle):.1f} -> 0 deg  "
                     f"pitch(static): {math.degrees(current_pitch):.1f} deg  "
                     f"f_tangent: {f_tangent:.2f} N  f_radial: {f_radial:.2f} N"
                 )
@@ -1137,7 +1169,7 @@ def main(args=None) -> int:
             f"force_deadband={FORCE_DEADBAND_N}N  "
             f"force_filter_alpha={FORCE_FILTER_ALPHA}  "
             f"max_normal_speed={MAX_NORMAL_SPEED}m/s  "
-            f"seek_speed={SQUASH_SEEK_SPEED}m/s  descend_speed={DESCEND_SPEED}m/s  arc_max={ARC_MAX_ANGLE_DEG}deg  "
+            f"seek_speed={SQUASH_SEEK_SPEED}m/s  descend_speed={DESCEND_SPEED}m/s  max_tilt={ARC_MAX_TILT_DEG}deg  "
             f"static_wrist=true  radial_force_control=true  tangential_ramp={ARC_TANGENTIAL_RAMP_SEC:.1f}s  "
             f"unarc_force_augment={UNARC_FORCE_AUGMENT_SPEED:.4f}m/s softness={UNARC_FORCE_AUGMENT_SOFTNESS_N:.2f}N"
         )
@@ -1191,6 +1223,7 @@ def main(args=None) -> int:
                     "object": node._object,
                     "pre_squash": node._pre_squash_pos,
                     "arc_center": node._arc_center,
+                    "press_pitch_deg": node._press_pitch_deg,
                     "tare_at_start": parsed.tare_at_start,
                     "tare_events": node._tare_events,
                     "final_force_ref_n": force_ref,

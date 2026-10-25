@@ -150,7 +150,7 @@ MAX_ALTERNATIVES = 3
 
 
 def press_alternatives(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M,
-                       lateral=ALTERNATIVE_LATERAL_M, limit=MAX_ALTERNATIVES):
+                       lateral=ALTERNATIVE_LATERAL_M, limit=MAX_ALTERNATIVES, approachable=None):
     """The riskier press contacts run_pipeline's tip cascade tries after the chosen
     (conservative) one fails: candidates that passed the camera check with MORE tipping
     torque per unit pull than the chosen press, at most `lateral` sideways from it (a
@@ -173,6 +173,8 @@ def press_alternatives(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING
         normal = np.asarray(normal_at(point), dtype=float)
         if not np.isfinite(normal).all():
             normal = np.array([0., 0., 1.])  # as the selector's topmost fallback assumes
+        if approachable is not None and not approachable(point + radius * normal):
+            continue
         result.append(dict(available=True, rank=len(result) + 1, point=point, normal=normal,
                            ball_center=point + radius * normal,
                            torque_per_pull_N_m=candidate['torque_per_pull_N_m'],
@@ -185,7 +187,8 @@ def press_alternatives(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING
     return result
 
 
-def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, limit=MAX_ALTERNATIVES):
+def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, limit=MAX_ALTERNATIVES,
+                  approachable=None):
     """Next-best press contacts the operator can pick at run_pipeline's gate ('n'): any
     candidate that passed the camera check, at least `spacing` from the chosen press and
     from one another, most centered over the pivot (along the pivot axis) first."""
@@ -202,6 +205,8 @@ def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, l
         normal = np.asarray(normal_at(point), dtype=float)
         if not np.isfinite(normal).all():
             normal = np.array([0., 0., 1.])
+        if approachable is not None and not approachable(point + radius * normal):
+            continue
         result.append(dict(available=True, rank=len(result) + 1, point=point, normal=normal,
                            ball_center=point + radius * normal,
                            torque_per_pull_N_m=candidate.get('torque_per_pull_N_m'),
@@ -385,11 +390,28 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
     report['selected_point'] = result['press'].get('point')
     if report['selected_point'] is not None:
         report['selected_point'] = report['selected_point'].tolist()
-    if rule == 'top_support_v1' and result['press'].get('available'):
+    if rule == 'view_check_v2' and result['press'].get('available'):
+        # The FFS path had no alternatives/backups, so the tip cascade and the gate's 'n' had
+        # nothing to fall back to. Score passed candidates by the pull moment about the
+        # selected pivot (the selector's press score) and use the cloud's own normals.
+        from scipy.spatial import cKDTree
+        from .contact_point_selector import estimate_normals
+        normals, tree = estimate_normals(xyz), cKDTree(xyz)
+        g = result['press']['geometry']
+        pivot, axis, direction = (np.asarray(g[k], dtype=float) for k in ('pivot', 'axis', 'direction'))
+        for row in report['candidates']:
+            row['torque_per_pull_N_m'] = float(np.cross(np.asarray(row['point']) - pivot, direction) @ axis)
+    if result['press'].get('available'):
+        # Only offer contacts the approach can plan to (and flag the chosen one).
+        from .press_targets import press_approachable
+        top = float(np.asarray(xyz)[:, 2].max())
+        approachable = lambda ball: press_approachable(ball, top)  # noqa: E731
+        result['press']['approachable'] = approachable(result['press']['ball_center'])
+        normal_at = lambda point: normals[tree.query(point)[1]]  # noqa: E731
         result['press_alternatives'] = press_alternatives(
-            report['candidates'], result['press'], lambda point: normals[tree.query(point)[1]])
+            report['candidates'], result['press'], normal_at, approachable=approachable)
         result['press_backups'] = press_backups(
-            report['candidates'], result['press'], lambda point: normals[tree.query(point)[1]])
+            report['candidates'], result['press'], normal_at, approachable=approachable)
     # JSON-friendly output, including newly selected numpy geometry.
     result = json.loads(json.dumps(result, default=lambda value: value.tolist()))
     result['press']['experimental_view_check'] = dict(

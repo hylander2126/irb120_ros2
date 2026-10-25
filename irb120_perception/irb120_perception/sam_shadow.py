@@ -142,6 +142,24 @@ def select_joint_candidate(masks, scores, points, labels):
     return int(np.argmax(ranking)) if np.isfinite(ranking).any() else None
 
 
+def retry_workspace_prompts(masks, scores, support, workspace_pixels):
+    """Refine fringe-contaminated prompts only from a whole-object RGB proposal.
+
+    A seed must cover at least 90% of measured support, so a cap/part cannot
+    replace the whole-object prompt. The caller retains its original box and
+    must run select_joint_candidate again; the seed is never accepted directly.
+    """
+    if not support.any():
+        return np.empty((0, 2)), np.empty(0, int)
+    eligible = [i for i, mask in enumerate(masks)
+                if np.count_nonzero(mask & support) >= .9*np.count_nonzero(support)]
+    if not eligible:
+        return np.empty((0, 2)), np.empty(0, int)
+    seed = masks[max(eligible, key=lambda i: scores[i])]
+    _, points, labels = joint_prompts(seed, support, workspace_pixels)
+    return points, labels
+
+
 def segment(view, support, model, mode='joint', prompts=8, workspace_pixels=None,
             diagnostics=None):
     from mobile_sam import SamPredictor, SamAutomaticMaskGenerator

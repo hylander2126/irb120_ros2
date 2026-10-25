@@ -4,6 +4,12 @@ The supported path uses three calibrated native IR stereo pairs and RGB, one
 stationary object and an arm clear of the views. FFS supplies depth; SAM segments
 observed surfaces; contact selection is described in [CONTACT_SELECTION](../CONTACT_SELECTION.md).
 
+If all RGB masks fail prompt consistency, reconstruction retries once with prompts
+inside a proposal covering at least 90% of the measured support. It retains the
+original box and requires the refined mask to meet both prompt consistency and
+support coverage. Failed refinement stops reconstruction. Per-camera
+`*_sam_prompts.json` records both attempts, including failed selections.
+
 ## Camera and execution layout
 
 Source ROS Jazzy and the workspace. For robot work use the repository T1/T2/T3

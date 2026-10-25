@@ -18,9 +18,9 @@ the measured ball center anchors the circle to avoid a position discontinuity.
 The arc lies in the plane normal to the pivot axis. The finger holds its initial
 orientation. It retraces the circle to touch, then the approach line to pre-tip.
 
-Default speed is 5 mm/s along the path. `--max-travel` limits path length after
-contact (default 80 mm); `--max-angle` adds an angular cap (default 30 degrees).
-Reaching either cap returns with an unsuccessful result. `--force-limit`,
+Default speed is 5 mm/s along the path. `--max-angle` caps the arc after contact
+(default 30 degrees); there is no separate travel cap (fwd_tip's `--max-travel` is
+not offered). Reaching the cap returns with an unsuccessful result. `--force-limit`,
 `--tip-force`, `--quality`, and `--episode` retain their forward-tip meanings.
 
 A successful reversal requires five fresh samples at or below 10% of the

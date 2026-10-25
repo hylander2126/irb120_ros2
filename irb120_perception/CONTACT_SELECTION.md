@@ -29,6 +29,11 @@ clearance, direction, surface normal, signed moment and footprint inset before
 camera agreement and final score/edge-centering decisions. The contact report
 shows the candidate funnel spatially and numerically.
 
+Forward-tip contacts must face the push direction: the horizontal surface normal
+may deviate by at most 15 degrees in the pivot frame. This rejects sideways neck
+contacts on rounded objects even when the sample lies near the centerline. The
+selector then centers the contact along the pivot within its 10 mm moment band.
+
 The FFS adapter calls `experimental_view_check.evaluate(..., rule='view_check_v2')`.
 The FFS handoff defaults to cam2-only observed press candidates and cam2-local
 normals oriented toward cam2. The merged cloud still supplies pivot/footprint geometry; RGB-reviewed

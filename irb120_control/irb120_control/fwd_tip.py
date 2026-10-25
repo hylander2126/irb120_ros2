@@ -241,7 +241,9 @@ class ForwardTip(Node):
                 velocity_scale=.1, acceleration_scale=.1)
 
     def home(self):
-        with object_obstacle(self, self._object_xyz):
+        # Plan against the scene the approach used: the arm is back at a slab pre-tip,
+        # which can sit inside the whole box (monitor 20261025_155858: start in collision).
+        with object_obstacle(self, self._object_xyz, slabs=self.pre_clearance == 'slabs'):
             return plan_and_execute_joint_goal(
                 self, self._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
                 velocity_scaling_factor=.1, acceleration_scaling_factor=.1)
@@ -380,8 +382,12 @@ def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
     parser.add_argument('object', help='Object/episode label; no ground-truth parameters required')
     parser.add_argument('--episode', default='new', help='new, last, or episode path')
     parser.add_argument('--quality', choices=['h264', 'lossless'], default='h264')
-    parser.add_argument('--speed', type=float, default=.005, help='Load/tip/return speed in m/s; the contact seek runs at 1.5x')
-    parser.add_argument('--max-travel', type=float, default=.080, help='Travel cap after contact, metres')
+    # Servo reaches ~56% of the commanded speed on hardware (5 mm/s -> 2.8 mm/s, 2026-10-16..25
+    # logs), so 9 mm/s gives ~5 mm/s actual. Still quasi-static (~0.03 rad/s on a 0.2 m arc).
+    parser.add_argument('--speed', type=float, default=.009,
+                        help='Commanded load/tip/return speed in m/s (~56%% reached); the contact seek runs at 1.5x')
+    if primitive != 'fwd_arc':  # the arc is capped by --max-angle instead
+        parser.add_argument('--max-travel', type=float, default=.080, help='Travel cap after contact, metres')
     parser.add_argument('--reverse-fraction', type=float, default=.10, help='Fraction of peak pivot torque' if primitive == 'fwd_arc' else 'Fraction of peak axial force')
     parser.add_argument('--force-limit', type=float, default=20., help='Resultant force stop limit, N')
     parser.add_argument('--tip-force', type=float, default=.30,
@@ -392,7 +398,7 @@ def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
     if primitive == 'fwd_arc' and (not math.isfinite(parsed.max_angle) or not 0 < parsed.max_angle <= 90):
         parser.error('--max-angle must be in (0, 90] degrees')
     try:
-        config = TipConfig(speed=parsed.speed, seek_speed=1.5 * parsed.speed, max_travel=parsed.max_travel,
+        config = TipConfig(speed=parsed.speed, seek_speed=1.5 * parsed.speed, max_travel=getattr(parsed, 'max_travel', .080),
                            reverse_fraction=parsed.reverse_fraction, force_limit=parsed.force_limit,
                            tip_force=parsed.tip_force)
     except ValueError as exc:

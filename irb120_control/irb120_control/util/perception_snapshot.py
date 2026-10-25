@@ -141,14 +141,20 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
     from irb120_perception.stereo_offline_bridge import WORKSPACE, VENV_PYTHON
     # The FFS run is written straight into the stage (capture/, recon/, contact selection
     # at the stage root; see irb120_perception.snapshot_layout), so nothing is copied.
+    # The episode's first perceive also builds the review mesh, report and HTML viewers;
+    # later ones skip them for speed.
+    review = not any(s['kind'] == 'perceive' for s in episode.load()['stages'])
     stage = episode.begin_stage('perceive', backend='offline_ffs', label=label)
     run = stage.path
     capture, recon, logs = run/'capture', run/'recon', run/'logs'
     logs.mkdir()
     commands = [
         ('capture', 'capture_stereo_snapshot.py', [str(capture), '--stationary-arm-clear']),
-        ('reconstruct', 'reconstruct_stereo_offline.py', [str(capture), '--output', str(recon)]),
-        ('contacts', 'select_stereo_contacts.py', [str(recon), '--output', str(run)]),
+        ('reconstruct', 'reconstruct_stereo_offline.py',
+         [str(capture), '--output', str(recon)] + (['--mesh'] if review else [])),
+        *([('report', 'report_stereo_offline.py', [str(recon)])] if review else []),
+        ('contacts', 'select_stereo_contacts.py',
+         [str(recon), '--output', str(run)] + (['--review-mesh'] if review else [])),
     ]
     try:
         started = time.monotonic()
@@ -156,7 +162,7 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
         if worker is not None:
             node.get_logger().info(f'[snapshot] FFS via warm worker: {run}')
             status = _run_ffs_worker(node, worker, dict(capture=str(capture), recon=str(recon),
-                                                        contacts=str(run), logs=str(logs), report=False))
+                                                        contacts=str(run), logs=str(logs), report=review))
             runner = dict(runner='warm_worker', **{k: v for k, v in status.items() if k.endswith('_seconds')})
         else:
             node.get_logger().warn('[snapshot] FFS worker not running (bringup_stack ffs_worker:=true '
@@ -167,6 +173,7 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
                                  logs/f'{name}.log')
             runner = dict(runner='subprocess')
         runner['wall_seconds'] = time.monotonic()-started
+        runner['review'] = review
         record = _import_ffs_snapshot(episode, run, review_status='pending_motion_gate', label=label,
                                       stage=stage, ffs_runner=runner)
         return record

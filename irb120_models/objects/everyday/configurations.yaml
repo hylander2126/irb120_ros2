@@ -55,7 +55,9 @@ defaults:
     base_w: null
     support_distances: {forward: null, press_pull: null}
   source: null
+
 configurations: 
+
   teal_cylinder:
     placement: "TODO: which face points at the robot (marked on the object)"
     mesh: meshes/teal_cylinder.gltf  # bottle: r 45 mm to z 85, shoulder to r 25 at z 110, neck to 135; origin bottom centre
@@ -70,7 +72,7 @@ configurations:
     measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/teal_cylinder/20261020_183954/00_perceive --name teal_cylinder --com 44 0 nan"
     source: null
   
-  orange_robot:
+  toy_robot:
     placement: "TODO: which face points at the robot (marked on the object)"
     mass: 0.226
     com_obj: [0.035, 0.0050, null]
@@ -79,7 +81,7 @@ configurations:
     uncertainty:
       support_distances: {press_pull: null, forward: null}
       com_obj: [null, null, null]
-    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/orange_robot/20261020_192830/00_perceive --name orange_robot --com 35 5 nan"
+    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/toy_robot/20261020_192830/00_perceive --name toy_robot --com 35 5 nan"
     source: null
 
   drill:
@@ -121,3 +123,64 @@ configurations:
       com_obj: [null, null, 0.010]
     measurement: "previous paper, measured against the tip edge"
     source: "objects/monitor/monitor.yaml, migrated from object_params.json 2026-10-09"
+
+  heart:
+    placement: "bulbous heart bits towards robot, point away."
+    mass: 0.239
+    # Previous paper (objects/heart/heart.yaml) used different reference frame. don't panic.
+    com_obj: [0.044, 0.0, 0.1]
+    base_w: null
+    support_distances: {press_pull: null, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: "previous paper, measured against the round parts and validated in onshape..."
+    source: "objects/heart/heart.yaml, migrated from object_params.json 2026-10-09"
+
+  soda:
+    placement: "with two legs nicely placed for fwd tipping"
+    mass: 2.054
+    com_obj: [0.0525, 0.0, 0.15]
+    base_w: null
+    support_distances: {press_pull: null, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: null
+    source: "objects/soda/soda.yaml"
+
+  block:
+    placement: "Any square edge face toward robot"
+    mass: 0.710
+    com_obj: [0.044, 0.0, null]
+    base_w: 0.088
+    support_distances: {press_pull: null, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: null
+    source: "Ground truth measured 2026-10-25 by Steven"
+
+  tripod:
+    placement: "with two legs nicely placed for press-pull tipping"
+    mass: 0.722
+    com_obj: [0.064, 0.0, null]
+    base_w: 0.128 # rough, from straight pivot to third foot
+    support_distances: {press_pull: null, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: null
+    source: "Ground truth measured 2026-10-25 by Steven"
+
+  computer:
+    placement: "widest part along y-axis"
+    mass: 3.909
+    com_obj: [0.047, 0.0, null]
+    base_w: 0.093
+    support_distances: {press_pull: null, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: null
+    source: "Ground truth measured 2026-10-25 by Steven"

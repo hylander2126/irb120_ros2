@@ -47,6 +47,7 @@ def test_forward_outcomes():
     assert classify(FORWARD, {'failure_reason': 'force_limit'})[0] == 'force_limit'
     assert classify(FORWARD, {'failure_reason': 'height_lateral_or_orientation_drift'})[0] == 'drift'
     assert classify(FORWARD, {'reversal_reason': 'travel_limit'})[0] == 'no_tip'
+    assert classify(FORWARD, {'reversal_reason': 'angle_limit'})[0] == 'no_tip'
     assert classify(FORWARD, {'failure_reason': 'stale_force'})[0] == 'sensor_fault'
 
 
@@ -84,6 +85,26 @@ def test_slipping_press_goes_riskier_then_forward(monkeypatch):
     history.append(run(plan, 'failed', point=[.54, 0., .1]))
     plan, reason = next_attempt(history, c, force_ref=5.)
     assert plan == attempt(FORWARD) and 'no untried press contact' in reason
+
+
+def test_failed_conservative_press_goes_riskier_even_if_reperception_moved_it():
+    """toy_robot 20261025_141620: the conservative approach did not plan; the next
+    snapshot's conservative contact was 12 mm away and was retried instead of riskier #1."""
+    c = contacts()
+    history = [run(attempt(PRESS, 0, 5.), 'failed', point=np.asarray(c['press']['point']) + [.012, 0., 0.])]
+    plan, _ = next_attempt(history, c, force_ref=5.)
+    assert plan == attempt(PRESS, 1, 5.)
+
+
+def test_unapproachable_press_contacts_are_skipped():
+    """toy_robot: the conservative pre-press was inside the object's box at every pitch."""
+    c = contacts()
+    c['press']['approachable'] = False
+    plan, _ = first_attempt(c, mode='press', force_ref=5.)
+    assert plan == attempt(PRESS, 1, 5.)
+    c['press_alternatives'][0]['approachable'] = False
+    plan, _ = first_attempt(c, mode='press', force_ref=5.)
+    assert plan == attempt(PRESS, 2, 5.)
 
 
 def test_forward_runs_on_a_curved_pivot_but_only_once(monkeypatch):

@@ -16,6 +16,11 @@ FRAME = 'base_link'
 TIMEOUT = 5.0
 RELAXED_PULL_EPSILON = 0.5
 TOPMOST_BAND = 0.02  # press fallback: use points this close to the highest point
+# Forward tip: a flat top edge is level only to registration noise (a few mm), so a
+# 3 mm moment band keeps a handful of scattered points. Take a wider band, then centre.
+FORWARD_SCORE_BAND = 0.010
+FORWARD_CENTER_TOL = 0.003  # about one cloud voxel along the pivot edge
+FORWARD_NORMAL_YAW_DEG = 15.  # surface must face the push, not the side of a rounded neck
 
 
 def estimate_normals(points, radius=0.025, neighbors=24, viewpoint=None):
@@ -212,11 +217,32 @@ def _press_band(points, ids, scores, geometry, press_pivot_weight, score_toleran
     band entirely once they fall more than score_tolerance below it, even
     though they are the physically better contact.
     """
-    pivot_proximity = np.cross(
-        points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
+    # Distance to the pivot line on EITHER side: a top that overhangs the pivot (tipT)
+    # must not score its overhang tip as "closest". Directly above the pivot is best.
+    pivot_proximity = -np.abs(np.cross(
+        points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis'])
     combined = scores[ids] + press_pivot_weight * pivot_proximity
     tolerance = max(score_tolerance, press_score_fraction * abs(combined.max()))
     return combined >= combined.max() - tolerance
+
+
+PUSH_PATH_MARGIN = 0.003   # m beyond the ball radius that the approach sweep must clear
+
+
+def _push_path_blocked(points, center, normal, radius, margin=PUSH_PATH_MARGIN):
+    """True if the ball, swept along the push line (-normal, horizontal) up to `center`,
+    passes within `margin` of an object point before touching the contact itself, or
+    ends more than `margin` inside the object."""
+    d = -np.asarray(normal[:2], dtype=float)
+    d = np.r_[d / np.linalg.norm(d), 0.]
+    rel = points - center
+    along = rel @ d
+    perp = np.linalg.norm(rel - along[:, None] * d, axis=1)
+    # Only points more than a radius back along the path: the contact face itself (up to
+    # the 20 deg normal tolerance, noise) sits at along ~ radius - perp*tan(angle) > -radius.
+    # Nor may the ball end up inside the object (a stray point behind the visible face).
+    return bool(np.any((along < -radius) & (perp < radius + margin))
+                or np.any(np.linalg.norm(rel, axis=1) < radius - margin))
 
 
 def select_contact_points(clouds, *, normals=None,
@@ -358,7 +384,25 @@ def select_contact_points(clouds, *, normals=None,
     ids = np.flatnonzero(push_clear & (normals[:, 0] <= -np.cos(np.radians(push_max_normal_angle_deg)))
                          & (np.abs(normals[:, 2]) <= 0.5))
     if len(ids):
-        ids = ids[points[ids, 2] <= points[ids, 2].min() + push_height_band]
+        # The ball must reach its contact without first running into another part of the
+        # object, e.g. a monitor's foot plate in front of the neck (20261025_161157).
+        ids = ids[np.argsort(points[ids, 2], kind='stable')]
+        unblocked = [i for i in ids[:1] if not _push_path_blocked(points, centers[i], normals[i], finger_radius)]
+        k = 1
+        while not unblocked and k < len(ids):
+            i = ids[k]
+            if not _push_path_blocked(points, centers[i], normals[i], finger_radius):
+                unblocked = [i]
+            k += 1
+        if unblocked:
+            band = ids[(points[ids, 2] <= points[unblocked[0], 2] + push_height_band)
+                       & (points[ids, 2] >= points[unblocked[0], 2])]
+            ids = np.array([i for i in band
+                            if i == unblocked[0] or not _push_path_blocked(points, centers[i], normals[i],
+                                                                           finger_radius)], dtype=int)
+        else:
+            ids = ids[:0]
+    if len(ids):
         # Prefer a line of action through the observed footprint center, rather
         # than a world-y centerline. Keep height as the first selection gate.
         center = (points[:, :2].min(axis=0) + points[:, :2].max(axis=0)) / 2
@@ -376,7 +420,7 @@ def select_contact_points(clouds, *, normals=None,
             np.degrees(np.arccos(np.clip(-normals[i, 0], -1., 1.))))
     else:
         result['planar_push'] = missing(f'No contact within {push_max_normal_angle_deg:g} deg of +X inward normal '
-                                         'with fingertip clearance; reposition object and resnapshot')
+                                         'with fingertip clearance and a clear approach; reposition object and resnapshot')
 
     def inset_top(ids):
         try:
@@ -434,6 +478,11 @@ def select_contact_points(clouds, *, normals=None,
             stages['direction'] = feasible.copy()
             if mode == 'forward_tip':
                 feasible &= (normals @ direction <= -0.2) & (np.abs(normals[:, 2]) <= 0.5)
+                # A centred point can still lie on the side of a rounded neck. Its
+                # normal then sends the ball sideways and yaws the object. Gate the
+                # horizontal normal in the pivot frame before choosing the height band.
+                feasible &= np.abs(normals @ geometry['axis']) <= (
+                    -normals @ direction) * np.tan(np.deg2rad(FORWARD_NORMAL_YAW_DEG))
                 # Near the pivot's centre line: an off-centre push yaws a wide object instead of tipping it.
                 feasible &= np.abs((points - geometry['pivot']) @ geometry['axis']) <= forward_max_lateral
             else:
@@ -458,7 +507,7 @@ def select_contact_points(clouds, *, normals=None,
             if len(ids):
                 ids = ids[_press_band(points, ids, scores, geometry, press_pivot_weight,
                                       score_tolerance, press_score_fraction)
-                          if mode == 'press' else scores[ids] >= scores[ids].max() - score_tolerance]
+                          if mode == 'press' else scores[ids] >= scores[ids].max() - max(score_tolerance, FORWARD_SCORE_BAND)]
             counts['best_score_band'] = len(ids)
             stages['best_score_band'] = _scatter(ids, len(points))
             if len(ids):
@@ -507,19 +556,27 @@ def select_contact_points(clouds, *, normals=None,
                 counts['centered_on_edge'] = len(ids)
                 if diagnostics is not None:
                     diagnostics[mode]['centered_on_edge'] = _scatter(ids, len(points))
-                # If several points are equally centered, keep the most
-                # edgeward one; the median below then only resolves truly
-                # equivalent samples instead of drifting inward.
-                centered_press_scores = np.cross(
-                    points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis']
+                # If several points are equally centered, keep the one nearest
+                # the pivot line (either side); the median below then only
+                # resolves truly equivalent samples.
+                centered_press_scores = -np.abs(np.cross(
+                    points[ids] - geometry['pivot'], [0., 0., -1.]) @ geometry['axis'])
                 ids = ids[centered_press_scores >= centered_press_scores.max() - 1e-10]
                 counts['centered_edgeward'] = len(ids)
                 if diagnostics is not None:
                     diagnostics[mode]['centered_edgeward'] = _scatter(ids, len(points))
-            target = np.median(points[ids], axis=0)
             if mode == 'forward_tip':
-                target[1] = 0.0
-            i = ids[np.argmin(np.linalg.norm(points[ids] - target, axis=1))]
+                # Centre along the pivot edge (an off-centre push yaws the object), then
+                # take the largest moment among the centred points.
+                along_edge = np.abs((points[ids] - geometry['pivot']) @ geometry['axis'])
+                ids = ids[along_edge <= along_edge.min() + FORWARD_CENTER_TOL]
+                counts['centered_on_edge'] = len(ids)
+                if diagnostics is not None:
+                    diagnostics[mode]['centered_on_edge'] = _scatter(ids, len(points))
+                i = ids[np.argmax(scores[ids])]
+            else:
+                target = np.median(points[ids], axis=0)
+                i = ids[np.argmin(np.linalg.norm(points[ids] - target, axis=1))]
             if diagnostics is not None:
                 diagnostics[mode]['selected_index'] = int(i)
             result[mode] = contact(i, scores[i])

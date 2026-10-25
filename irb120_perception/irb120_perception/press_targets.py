@@ -2,10 +2,18 @@
 import numpy as np
 
 PRESS_STANDOFF = .03
+APPROACH_BOX_PADDING = .010  # irb120_control push_geometry.OBJECT_PADDING (the approach's object box)
+FINGER_BALL_RADIUS = .01325
 
 
 def pre_press_center(ball):
     return np.asarray(ball, dtype=float) + [0., 0., PRESS_STANDOFF]
+
+
+def press_approachable(ball, object_top_z):
+    """The press approach plans against the object's padded bounding box: a pre-press ball
+    below its top puts the finger shaft inside it at any pitch (toy_robot 20261025_14xxxx)."""
+    return bool(pre_press_center(ball)[2] - FINGER_BALL_RADIUS >= object_top_z + APPROACH_BOX_PADDING)
 
 
 def press_targets(press, rotation=None, translation=None):

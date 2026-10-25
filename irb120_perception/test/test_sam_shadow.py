@@ -253,6 +253,25 @@ def test_joint_empty_seed_has_no_fabricated_prompts():
     assert box is None and len(points) == len(labels) == 0
 
 
+def test_workspace_retry_removes_depth_fringe_without_accepting_seed():
+    from irb120_perception.sam_shadow import retry_workspace_prompts, select_joint_candidate
+    support = np.zeros((100, 100), bool); support[20:80, 30:70] = True
+    seed = support.copy(); support[20:80, 27:30] = True  # stereo fringe outside RGB
+    points, labels = retry_workspace_prompts(np.array([seed]), [.95], support, np.ones_like(seed))
+    pos = points[labels == 1].astype(int)
+    assert len(pos) and seed[pos[:, 1], pos[:, 0]].all()
+    # Refined prompts still reject an inconsistent prediction, even at high score.
+    assert select_joint_candidate(np.ones((1, 100, 100), bool), [.99], points, labels) is None
+
+
+def test_workspace_retry_rejects_partial_object_seed():
+    from irb120_perception.sam_shadow import retry_workspace_prompts
+    support = np.zeros((100, 100), bool); support[10:90, 30:70] = True
+    part = np.zeros_like(support); part[10:30, 30:70] = True
+    points, labels = retry_workspace_prompts(np.array([part]), [.99], support, np.ones_like(support))
+    assert len(points) == len(labels) == 0
+
+
 def test_joint_reuses_embedding_and_makes_one_joint_refinement(monkeypatch):
     import sys
     from types import SimpleNamespace

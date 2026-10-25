@@ -51,7 +51,9 @@ Usage:
 import argparse
 import json
 import math
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 
@@ -134,6 +136,24 @@ def _latest_perceive(episode: Episode):
     return next((s for s in reversed(episode.load()["stages"]) if s["kind"] == "perceive"), None)
 
 
+_viewer = {"path": None, "proc": None}
+
+
+def open_image(image: Path) -> None:
+    """Show `image`, closing the viewer this run opened before, so only the latest
+    contacts are on screen. The viewer stays in xdg-open's new session (process group)."""
+    if _viewer["path"] == str(image) and _viewer["proc"] is not None:
+        return
+    if _viewer["proc"] is not None:
+        try:
+            os.killpg(_viewer["proc"].pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    _viewer["path"] = str(image)
+    _viewer["proc"] = subprocess.Popen(["xdg-open", str(image)], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
     """Print the latest snapshot's contacts and the targets the motion steps would derive
     from them. Returns its contacts, or None if the snapshot failed."""
@@ -165,7 +185,9 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
         g = press["geometry"]
         ball, pivot = np.asarray(press["ball_center"]), np.asarray(g["pivot"])
         radius = math.hypot(ball[0] - pivot[0], ball[2] - pivot[2])
-        print(f"  press        contact {_mm(press['point'])}   pivot {_mm(pivot)} [{g.get('pivot_source', '?')}]")
+        print(f"  press        contact {_mm(press['point'])}   pivot {_mm(pivot)} [{g.get('pivot_source', '?')}]"
+              + ("   APPROACH BLOCKED (pre-press inside the object box): cascade starts riskier"
+                 if press.get("approachable") is False else ""))
         print(f"               pre-squash ball {_mm(ball + [0, 0, PRESS_STANDOFF])}"
               f"   arc radius {1000 * radius:.0f} mm   pull dir {np.round(g['direction'], 2).tolist()}")
         for alternative in contacts.get("press_alternatives") or []:
@@ -211,7 +233,7 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
     if image is not None:
         print(f"    image: {image}")
         if open_images:
-            subprocess.Popen(["xdg-open", str(image)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            open_image(image)
     return contacts
 
 
@@ -235,15 +257,19 @@ def tip_options(plan: dict, contacts: dict, args) -> list:
 
 
 def option_image(episode: Episode, plan: dict) -> Path | None:
-    """The latest snapshot's image of `plan`'s contact (final_selection_B<k>.jpg for a backup)."""
+    """The latest snapshot's image of `plan`'s contact: contacts_B<k>.png for a backup,
+    contacts_A<k>.png for a riskier alternative, else contacts.png."""
     stage = _latest_perceive(episode)
     if stage is None:
         return None
     folder = episode.path / stage["dir"]
     if plan.get("press_backup"):
-        path = folder / f"final_selection_B{plan['press_backup']}.jpg"
-        return path if path.exists() else None
-    return next((folder / n for n in ("contacts.png", "final_selection.jpg") if (folder / n).exists()), None)
+        names = (f"contacts_B{plan['press_backup']}.png", f"final_selection_B{plan['press_backup']}.jpg")
+    elif plan["kind"] == PRESS and plan.get("press_candidate"):
+        names = (f"contacts_A{plan['press_candidate']}.png",)
+    else:
+        names = ("contacts.png", "final_selection.jpg")
+    return next((folder / n for n in names if (folder / n).exists()), None)
 
 
 def sensor_fault(stage: dict | None) -> str | None:
@@ -369,6 +395,10 @@ def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
                     return episode
             return None
         options, chosen, index = tip_options(plan, contacts, args), describe(plan), 0
+        if args.open_images and plan["kind"] == PRESS and (plan.get("press_candidate") or plan.get("press_backup")):
+            image = option_image(episode, plan)  # the cascade's pick is not the contacts.png press
+            if image is not None:
+                open_image(image)
         print(f"\n[pipeline] tip attempt {len(history) + 1}/{MAX_ATTEMPTS}: {chosen} ({reason})")
         while True:
             plan = options[index]
@@ -389,7 +419,7 @@ def run_tip_cascade(node, episode: Episode, args, slides: list | None = None):
                      if contact.get("along_edge_offset") is not None else ""))
             image = option_image(episode, plan) if args.open_images else None
             if image is not None:
-                subprocess.Popen(["xdg-open", str(image)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                open_image(image)
         if history and not ready and args.auto:
             history.append(dict(attempt=plan, outcome="failed", stage=None, press_point=None,
                                 final_force=None, why=f"no usable {STEPS[kind][0]} contact on this snapshot"))

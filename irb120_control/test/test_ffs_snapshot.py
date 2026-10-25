@@ -108,8 +108,11 @@ def test_automatic_capture_runs_all_four_fresh_steps(tmp_path, monkeypatch):
     assert first['source_run'] != second['source_run']
     assert first['review_status'] == 'pending_motion_gate'
     assert not first['reviewed_unchanged']
-    assert calls == ['capture_stereo_snapshot.py', 'reconstruct_stereo_offline.py',
-                     'select_stereo_contacts.py']*2
+    # Only the episode's first perceive builds the review mesh/report/viewers.
+    assert calls == ['capture_stereo_snapshot.py', 'reconstruct_stereo_offline.py', 'report_stereo_offline.py',
+                     'select_stereo_contacts.py',
+                     'capture_stereo_snapshot.py', 'reconstruct_stereo_offline.py', 'select_stereo_contacts.py']
+    assert first['ffs_runner']['review'] and not second['ffs_runner']['review']
     # Written once, in place: no ffs_runs/, no copies of the per-camera files at the stage root.
     stage = Path(first['source_run'])
     assert stage.parent == episode.path and not (episode.path/'ffs_runs').exists()
@@ -154,7 +157,7 @@ def test_warm_worker_writes_into_the_stage(tmp_path, monkeypatch):
     assert record['ffs_runner']['total_seconds'] == 8.
     request = worker.requests[0]
     assert request['contacts'] == str(stage) and request['recon'] == str(stage/'recon')
-    assert request['logs'] == str(stage/'logs') and request['report'] is False
+    assert request['logs'] == str(stage/'logs') and request['report'] is True  # first perceive
     assert episode.load()['stages'][0]['results']['ffs_runner'] == 'warm_worker'
 
 

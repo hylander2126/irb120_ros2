@@ -203,6 +203,45 @@ def test_press_prefers_edgeward_contact_despite_flat_top_height_noise():
     assert press['along_edge_offset'] == pytest.approx(0.)
 
 
+def test_forward_tip_stays_centered_despite_off_center_top_edge_noise():
+    """tipT_c1 20261025_121001: registration noise raised the -X face's top corner off
+    centre by a few mm; the 3 mm moment band then held only off-centre points."""
+    points, normals = box()
+    back = normals[:, 0] < -0.7
+    points[back & (points[:, 1] > 0.015), 2] += 0.004
+    tip = select_contact_points(points, normals=normals, table_z=0.)['forward_tip']
+    assert tip['available']
+    assert tip['point'][1] == pytest.approx(0.)
+    assert tip['point'][2] >= 0.185
+
+
+def test_forward_tip_rejects_side_facing_neck_even_when_point_is_centered():
+    """Soda: a centred neck sample with a sideways normal still yaws the bottle."""
+    points, normals = box()
+    points = np.vstack([points, [[0.5, 0., 0.23], [0.5, 0., 0.225]]])
+    side = np.array([-0.45, -0.88, 0.15])
+    side /= np.linalg.norm(side)
+    normals = np.vstack([normals, side, [-1., 0., 0.]])
+    tip = select_contact_points(points, normals=normals, table_z=0.)['forward_tip']
+    assert tip['available']
+    np.testing.assert_allclose(tip['point'], [0.5, 0., 0.225])
+    np.testing.assert_allclose(tip['normal'], [-1., 0., 0.])
+
+
+def test_press_stays_above_pivot_when_top_overhangs_it():
+    """tipT: the top overhangs the press pivot toward the robot. The conservative press
+    is above the pivot, not at the overhang tip (tipT_c5 20261025_124315: 69 mm out)."""
+    points, normals = box()
+    grid = np.array(np.meshgrid(np.linspace(0.44, 0.495, 12), np.linspace(-0.045, 0.045, 19))).reshape(2, -1).T
+    overhang = np.c_[grid, np.full(len(grid), 0.2)]
+    points = np.vstack([points, overhang])
+    normals = np.vstack([normals, np.tile([0., 0., 1.], (len(overhang), 1))])
+    press = select_contact_points(points, normals=normals, table_z=0.)['press']
+    assert press['available']
+    np.testing.assert_allclose(press['geometry']['pivot'], [0.5, 0., 0.], atol=1e-10)
+    assert abs(press['point'][0] - 0.5) <= 0.006
+
+
 def test_press_double_scoring_favors_edge_over_noisy_interior_high_point():
     """A depth-noise bump *larger* than score_tolerance, sitting away from the
     pivot edge, must not steal the press point from the true near-edge
@@ -425,3 +464,25 @@ def test_camera_normal_orientation_handles_top_only_flat_observations():
     top = np.c_[x.ravel(), y.ravel(), np.full(x.size, .2)]
     normals = estimate_normals(top, viewpoint=np.array([.55, 0., .8]))
     np.testing.assert_allclose(normals, np.tile([0., 0., 1.], (len(top), 1)), atol=1e-10)
+
+
+def test_push_clears_a_foot_plate_in_front_of_the_contact_face():
+    # Monitor-like: a 20 mm foot plate sticks 45 mm out in front of the box's -X face.
+    points, normals = box()
+    keep = points[:, 2] > 0.02
+    points, normals = points[keep], normals[keep]
+    xs, ys = np.linspace(0.455, 0.6, 30), np.linspace(-0.05, 0.05, 21)
+    top = np.array(np.meshgrid(xs, ys)).reshape(2, -1).T
+    foot = [np.c_[top, np.full(len(top), 0.02)]]
+    foot_n = [np.tile([0., 0., 1.], (len(top), 1))]
+    yz = np.array(np.meshgrid(ys, np.linspace(0., 0.02, 5))).reshape(2, -1).T
+    foot.append(np.c_[np.full(len(yz), 0.455), yz])
+    foot_n.append(np.tile([-1., 0., 0.], (len(yz), 1)))
+    points = np.vstack([points, *foot])
+    normals = np.vstack([normals, *foot_n])
+    push = select_contact_points(points, normals=normals, table_z=0.,
+                                 push_min_ball_center_z=0.023)['planar_push']
+    assert push['available']
+    assert push['point'][0] == pytest.approx(0.5)  # the box face, not the (too low) foot
+    # The ball's underside clears the foot top (z 0.02) by the path margin.
+    assert push['ball_center'][2] - 0.01325 >= 0.02 + 0.003 - 1e-9

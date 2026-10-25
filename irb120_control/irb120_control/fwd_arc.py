@@ -5,6 +5,7 @@ ros2 run irb120_control fwd_arc OBJECT --episode last --max-angle 30
 The arc reduces face sliding; its commanded angle is not measured object tilt.
 """
 import math
+from dataclasses import replace
 import time
 import numpy as np
 from geometry_msgs.msg import Point
@@ -54,6 +55,9 @@ class ForwardArc(ForwardTip):
         super().set_targets(contacts, cloud)
         axis = self._world_from_servo @ np.asarray(contacts['forward_tip']['geometry']['axis'])
         self._nominal_arc = PivotArc(self._pivot, axis, self._ball, self._direction)
+        # max_angle is the only cap; the travel limit sits just past it so it never fires first
+        # (a fixed 80 mm was 9 deg on the monitor's 0.5 m radius, 20261025_155858).
+        self.config = replace(self.config, max_travel=self._nominal_arc.radius * self.max_angle + .01)
         self.trajectory_metadata.update(pivot_axis=self._nominal_arc.axis.tolist(),
             selected_ball=self._ball.tolist(), radius_m=self._nominal_arc.radius,
             max_angle_rad=self.max_angle)
@@ -69,8 +73,7 @@ class ForwardArc(ForwardTip):
         marker.pose.orientation.w = 1.
         marker.scale.x = .002
         marker.color.r, marker.color.g, marker.color.a = 1., .55, 1.
-        limit = min(self.max_angle, self.config.max_travel / arc.radius)
-        points = [arc.point(a) for a in np.linspace(0., limit, 101)]
+        points = [arc.point(a) for a in np.linspace(0., self.max_angle, 101)]
         marker.points = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in points]
         self._arc_pub.publish(marker)
         self.trajectory_metadata['arc_preview_world'] = [p.tolist() for p in points]

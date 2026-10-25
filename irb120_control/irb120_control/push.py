@@ -108,7 +108,7 @@ TARE_WAIT_SEC = 3.0   # netft_preprocessor accumulates TARE_SAMPLES=200 asynchro
 # Stop if no reaction is confirmed by PUSH_CONTACT_MARGIN past the predicted contact.
 PUSH_CONTACT_FORCE_N = 0.3
 PUSH_FORCE_ANGLE_DEG = 45.0
-PUSH_FORCE_LIMIT_N = 20.0
+PUSH_FORCE_LIMIT_N = 35.0
 PUSH_CONTACT_MARGIN = 0.050  # generous: the cloud has put the face ~30 mm early (orange_robot)
 PUSH_FORCE_WINDOW_SEC = 0.10
 # Servo push: the planned path is only a gut check; Servo drives it and can stop any tick.
@@ -139,6 +139,7 @@ class Push(Node):
         self._force_samples = deque(maxlen=1000)
         self._force_check = {"status": "not_checked"}
         self._motion_uncertain = False
+        self._arm_moved = False    # any approach motion was requested: home on exit, even if aborted
         self._approach_diag = {}   # MoveIt request/result of the approach, saved even on abort
         self._object_xyz = None    # detected object cloud (base_link), avoided on the approach
         self._tf_buffer         = Buffer()
@@ -285,6 +286,7 @@ class Push(Node):
     def move_to_pre_push(self, velocity_scale: float = APPROACH_VELOCITY_SCALE) -> bool:
         """Plan to a raised pre-pose, then descend slowly outside the object box."""
         high = np.asarray(self._pre_push_pos) + [0., 0., PUSH_APPROACH_LIFT]
+        self._arm_moved = True
         try:
             with object_obstacle(self, self._object_xyz):
                 ok = plan_and_execute_pose_goal(
@@ -300,6 +302,22 @@ class Push(Node):
             self.get_logger().error(str(exc))
             return False
         return self._arrived()
+
+    def _lift_after_abort(self) -> None:
+        """Before homing from an aborted approach: if the arm reached the low pre-push pose,
+        retrace the straight descent back up to the raised pre-pose (outside the object box),
+        so the joint-space plan home starts clear of the table and the object."""
+        pose = self._lookup_ee_pose()
+        if pose is None:
+            return
+        pos = np.array([pose.position.x, pose.position.y, pose.position.z])
+        pre = np.asarray(self._pre_push_pos, dtype=float)
+        if np.linalg.norm(pos[:2] - pre[:2]) > ARRIVAL_TOL_MM / 1000 or pos[2] >= pre[2] + PUSH_APPROACH_LIFT:
+            return  # not on the descent line: MoveIt plans home from wherever it is
+        self.get_logger().info("Aborted before pushing: lifting back to the raised pre-pose, then home")
+        with object_obstacle(self, self._object_xyz):
+            if not self._cartesian_move(0., RETURN_VELOCITY_SCALE, target_position=pre + [0., 0., PUSH_APPROACH_LIFT]):
+                self.get_logger().warn("Lift failed; planning home from the current pose")
 
     def _arrived(self, target_position=None) -> bool:
         """MoveIt can report a goal reached without the arm getting there (2026-10-16: a
@@ -491,6 +509,8 @@ class Push(Node):
         ok = self._servo_push(ball, travel)
         if self._force_check["status"] == "validated" and self._force_check.get("pushed_m", 0.) >= PUSH_DISTANCE:
             return True  # stopped on purpose, PUSH_DISTANCE past the felt contact
+        if self._force_check["status"] == "rejected":
+            return False  # keep the real reason (force limit, reaction angle, no contact in margin)
         if ok and self._force_check["status"] != "validated":
             self._force_check = dict(status="rejected", reason="motion ended without validated contact")
             return False
@@ -625,12 +645,17 @@ def main(args=None) -> int:
         pass
     finally:
         stop_recording(node)
-        if node._push_started and not node._motion_uncertain and rclpy.ok():
+        if node._arm_moved and not node._motion_uncertain and rclpy.ok():
             # Home, so the post-push snapshot sees the object without the arm in the way. The pushed
-            # object may have moved along the push vector: bound the swept volume.
+            # object may have moved along the push vector: bound the swept volume. An aborted
+            # (unpushed) run homes too, never leaving the arm parked low beside the object.
             try:
-                swept_xyz = np.vstack((node._object_xyz,
+                swept_xyz = node._object_xyz if not node._push_started else np.vstack((node._object_xyz,
                     node._object_xyz + PUSH_DISTANCE*node._push_direction))
+                if not node._push_started:
+                    node._lift_after_abort()
+                if node._motion_uncertain:
+                    raise RuntimeError("lift after abort ended uncertain -- not homing")
                 with object_obstacle(node, swept_xyz):
                     home_ok = plan_and_execute_joint_goal(
                         node, node._move_group_client, joint_positions=HOME_JOINT_POSITIONS,
@@ -671,7 +696,7 @@ def main(args=None) -> int:
             status = "aborted" if not node._push_started else "ok" if push_ok and return_ok else "failed"
             stage.end(status, push_ok=push_ok, return_ok=return_ok, home_ok=home_ok, pre_push=node._pre_push_pos,
                       push_direction=node._push_direction.tolist(), force_check=node._force_check)
-            if home_ok and rclpy.ok():
+            if home_ok and node._push_started and rclpy.ok():
                 take_snapshot(node, episode, label="after push")
         print(episode.summary())
         node.destroy_node()

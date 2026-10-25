@@ -161,12 +161,16 @@ def _classify_step(kind: str, results: dict | None, slip_mm: float | None = None
         return "drift", "the finger drifted off its line"
     if reversal == "travel_limit":
         return "no_tip", "pushed the full travel without the force dropping"
+    if reversal == "angle_limit":   # fwd_arc's only cap
+        return "no_tip", "swept the full arc angle without the torque dropping"
     return "failed", failure or reversal or "forward tip failed"
 
 
 def first_attempt(contacts: dict, mode: str = "auto", force_ref: float = 5.0) -> tuple:
     """(attempt, reason): choose_tip's tip, with press-pull on the conservative contact."""
     kind, reason = choose_tip(contacts, mode)
+    if kind == PRESS:  # the conservative contact, or the first approachable riskier one
+        return _next_press([], contacts, force_ref) or attempt(PRESS, 0, force_ref), reason
     return attempt(kind, 0, force_ref if kind == PRESS else None), reason
 
 
@@ -175,8 +179,14 @@ def _next_press(history: list, contacts: dict, force_ref: float):
     tried = [np.asarray(h["press_point"]) for h in history
              if h["attempt"]["kind"] == PRESS and h.get("press_point") is not None]
     alternatives = contacts.get("press_alternatives") or []
+    # Re-perception moves the conservative contact by several mm (12 mm on toy_robot), so
+    # once it has been tried, go riskier instead of retrying it as a "new" contact.
+    conservative_tried = any(h["attempt"]["kind"] == PRESS and h["attempt"].get("press_candidate") == 0
+                             and not h["attempt"].get("press_backup") for h in history)
     for k, press in [(0, contacts.get("press"))] + list(enumerate(alternatives, 1)):
-        if not (press or {}).get("available"):
+        if not (press or {}).get("available") or (k == 0 and conservative_tried):
+            continue
+        if press.get("approachable") is False:  # its pre-press is inside the object's box
             continue
         point = np.asarray(press["point"], dtype=float)
         if any(np.linalg.norm(point - other) < SAME_CONTACT_M for other in tried):

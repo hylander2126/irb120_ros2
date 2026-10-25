@@ -23,7 +23,8 @@ def method(name, **extra):
                      'PUSH_FORCE_ANGLE_DEG', 'PUSH_FORCE_LIMIT_N', 'PUSH_VELOCITY_SCALE',
                      'PUSH_SPEED', 'PUSH_CONTROL_HZ', 'PUSH_LINE_GAIN', 'PUSH_SETTLE_SEC',
                      'PUSH_TRACK_GAIN', 'PUSH_MAX_CMD_SPEED',
-                     'APPROACH_VELOCITY_SCALE', 'PUSH_APPROACH_LIFT', 'PUSH_DESCENT_SPEED'} for t in n.targets)]
+                     'APPROACH_VELOCITY_SCALE', 'PUSH_APPROACH_LIFT', 'PUSH_DESCENT_SPEED',
+                     'ARRIVAL_TOL_MM', 'RETURN_VELOCITY_SCALE'} for t in n.targets)]
     env = dict(np=np, BASE_FRAME='base_link', force_push_check=force_push_check, **extra)
     exec(compile(ast.Module(body=[*constants, fn], type_ignores=[]), str(SOURCE), 'exec'), env)
     return env[name]
@@ -181,3 +182,18 @@ def test_approach_plans_high_then_descends_slowly_and_checks_arrival():
     np.testing.assert_allclose(calls[0][1]['target_position'], pre + [0.,0.,.08])
     np.testing.assert_allclose(calls[2][1]['target_position'], pre)
     assert calls[2][1]['max_speed'] == .005
+
+
+@pytest.mark.parametrize('at,lifts', [((.55, 0., .04), True), ((.55, 0., .10), True),
+                                      ((.55, 0., .12), False), ((.40, 0., .04), False)])
+def test_aborted_approach_lifts_back_up_the_descent_line_before_homing(at, lifts):
+    from contextlib import nullcontext
+    pre = np.array([.55, 0., .04])
+    moves = []
+    node = NS(_pre_push_pos=pre, _object_xyz=np.zeros((2, 3)), get_logger=Mock(return_value=Mock()),
+              _lookup_ee_pose=lambda: NS(position=NS(x=at[0], y=at[1], z=at[2])),
+              _cartesian_move=lambda *a, **kw: moves.append(kw) or True)
+    method('_lift_after_abort', object_obstacle=lambda *a: nullcontext())(node)
+    assert bool(moves) == lifts
+    if lifts:
+        np.testing.assert_allclose(moves[0]['target_position'], pre + [0., 0., .08])
