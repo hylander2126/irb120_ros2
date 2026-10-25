@@ -1339,9 +1339,11 @@ def find_trial_logs(obj: str, workspace_root: str) -> list:
         if os.path.basename(f) != "most_recent.npz"
     )
     trials += sorted(
-        f for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, "episodes", "*",
-                                          "*_press_pull_tip", "arc_static*.npz"))
-        if os.path.basename(f) != "most_recent.npz"
+        (f for layout in ("*", os.path.join("episodes", "*"))
+         for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, layout,
+                                         "*_press_pull_tip", "arc_static*.npz"))
+         if os.path.basename(f) != "most_recent.npz"),
+        key=lambda f: (os.path.basename(os.path.dirname(os.path.dirname(f))), f)
     )
     if trials:
         return trials
@@ -1355,8 +1357,9 @@ def find_push_log(obj: str, workspace_root: str) -> str:
     path (possibly nonexistent) when there is neither, as before."""
     import glob
     legacy = os.path.join(workspace_root, "runtime_logs", obj, "push", "most_recent.npz")
-    candidates = [f for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, "episodes", "*",
-                                                    "*_push", "push_ft_pose_*.npz"))]
+    candidates = [f for layout in ("*", os.path.join("episodes", "*"))
+                  for f in glob.glob(os.path.join(workspace_root, "runtime_logs", obj, layout,
+                                                  "*_push", "push_ft_pose_*.npz"))]
     if os.path.exists(legacy):
         candidates.append(legacy)
     return max(candidates, key=os.path.getmtime) if candidates else legacy
@@ -1704,7 +1707,12 @@ def _output_dir(workspace_root: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Basic use: estimate_params <episode folder>  -- estimates every tip stage of "
+                    "that episode for the object it records, scores it against the object's "
+                    "configuration, and writes <episode folder>/estimation/.")
+    parser.add_argument("episode_dir", nargs="?", type=Path, default=None,
+                        help="An episode folder (holds episode.json). Implies --primitive episodes.")
     parser.add_argument("--primitive", choices=["press_pull", "fwd_tip", "episodes"], default="press_pull",
                         help="'press_pull' runs the arc_squash logs (default). 'fwd_tip' runs "
                              "forward-tip episodes through fwd_tip_estimation (method D).")
@@ -1751,16 +1759,28 @@ def main():
     args = parser.parse_args()
 
     workspace_root = args.workspace or _find_workspace_root()
+    if args.episode_dir is not None:
+        if not (args.episode_dir / "episode.json").is_file():
+            parser.error(f"{args.episode_dir}: no episode.json (pass the episode folder itself)")
+        args.primitive = "episodes"
     if args.primitive == "episodes":
         from irb120_control.estimation.fwd_tip_estimation import FWD_TIP_OBJECTS
-        from irb120_control.estimation.episode_estimation import main_episodes
-        objects = [args.object] if args.object else list(FWD_TIP_OBJECTS)
-        if any(obj not in FWD_TIP_OBJECTS for obj in objects):
-            parser.error(f"episodes mode requires a configured tipT reference: {FWD_TIP_OBJECTS}")
+        from irb120_control.estimation.episode_estimation import episode_object, main_episodes
+        from irb120_models.configurations import list_configurations
+        if args.episode_dir is not None:
+            root = str(args.episode_dir.expanduser().resolve())
+            objects = [episode_object(root)]
+            default_out = os.path.join(root, "estimation")
+        else:
+            root = args.logs_root or workspace_root
+            objects = [args.object] if args.object else list(FWD_TIP_OBJECTS)
+            default_out = os.path.join(root, "estimation_episodes")
+        configured = list_configurations(include_temporary=True)
+        if any(obj not in configured for obj in objects):
+            parser.error(f"no configuration (irb120_models objects/*/configurations.yaml) for {objects}")
         if args.free_com_x or args.uncertainty_budget:
             parser.error("episodes mode fits known-com_x first moments; these ablations are unsupported")
-        root = args.logs_root or workspace_root
-        main_episodes(objects, root, args.out_dir or os.path.join(root, "estimation_episodes"),
+        main_episodes(objects, root, args.out_dir or default_out,
                       selection=args.episode, tilt_source=args.tilt_source,
                       vision=args.vision, cache_dir=args.vision_cache_dir,
                       press_contact_model=args.press_contact_model,

@@ -34,7 +34,8 @@ MAIN_CUTOFF_M = .005
 
 
 def edge_free(folder, camera_id, uv):
-    depth = np.load(Path(folder) / f'cam{camera_id}_aligned_depth.npz')['depth_mm'].astype(float)
+    from irb120_perception.snapshot_layout import snapshot_file
+    depth = np.load(snapshot_file(folder, f'cam{camera_id}_aligned_depth.npz'))['depth_mm'].astype(float)
     depth[depth <= 0] = np.nan
     # Second difference: a smooth slanted surface (grazing view) passes, a discontinuity
     # between object and background (mixed pixels) does not. Missing neighbours fail.

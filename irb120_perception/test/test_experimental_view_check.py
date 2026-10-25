@@ -37,6 +37,13 @@ def test_agreement_abstention_and_direction_veto():
     assert decide({'hidden':dict(usable=False)})[0]=='uncertain'
 
 
+def test_small_top_tilt_uses_same_tolerance_as_selector():
+    # A 1.5-degree top slope is valid under the selector's existing 0.1 gate.
+    gentle = dict(usable=True, normal=[-.026, 0., .99966], normal_dot_pull=.026)
+    assert decide({'cam2': gentle}, max_normal_dot_pull=.1)[0] == 'pass'
+    assert decide({'cam2': dict(gentle, normal_dot_pull=.2)}, max_normal_dot_pull=.1)[0] == 'reject'
+
+
 def test_missing_views_veto_copy_only(tmp_path):
     baseline=dict(press=dict(available=True,point=[0,0,.5],geometry=dict(direction=[1,0,0])),
                   planar_push=dict(available=True))
@@ -148,3 +155,37 @@ def test_press_backups_are_passing_contacts_most_centered_first():
     assert [b['point'].tolist() for b in backups] == [[.62, .001, .1], [.6, -.02, .1]]
     assert backups[0]['along_edge_offset'] == pytest.approx(-.001)
     np.testing.assert_allclose(backups[0]['ball_center'], [.62, .001, .11])
+
+
+def test_cam2_press_uses_observed_coordinates_and_ignores_other_view_veto(tmp_path, monkeypatch):
+    from irb120_perception import experimental_view_check as module
+    from irb120_perception.contact_point_selector import select_contact_points
+    from test_contact_point_selector import box
+    points, normals = box()
+    points[:, 2] -= .021
+    camera_id = np.where(points[:, 0] >= .55, 2, 1)
+    np.savez(tmp_path/'object_cloud.npz', xyz=points, camera_id=camera_id)
+    baseline = select_contact_points(points, normals=normals)
+    calls = []
+    monkeypatch.setattr(module, 'estimate_table_plane', lambda *a: np.array([0., 0., -.008]))
+
+    def check(point, direction, depth, info, table_plane=None):
+        calls.append(table_plane)
+        # A side camera's positive normal must remain diagnostic for cam2 mode.
+        return dict(usable=True, normal=[0., 0., 1.], normal_dot_pull=info['dot'])
+
+    monkeypatch.setattr(module, 'check_view', check)
+    cameras = {cam: (np.ones((2, 2), dtype=np.uint16), dict(dot=dot))
+               for cam, dot in [('cam1', 1.), ('cam2', 0.)]}
+    selected, report = evaluate(tmp_path, baseline, cameras=cameras,
+                                rule='view_check_v2', press_camera='cam2',
+                                press_pivot_override=[.5, 0., -.021])
+    assert selected['press']['available']
+    assert selected['press']['point'][0] >= .55
+    assert calls and all(p is None for p in calls)
+    assert report['press_camera'] == 'cam2'
+    for mode in ('planar_push', 'forward_tip'):
+        np.testing.assert_array_equal(selected[mode]['point'], baseline[mode]['point'])
+    np.savez(tmp_path/'object_cloud.npz', xyz=points)
+    with pytest.raises(ValueError, match='provenance'):
+        evaluate(tmp_path, baseline, cameras=cameras, rule='view_check_v2', press_camera='cam2')

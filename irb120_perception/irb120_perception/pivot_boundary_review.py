@@ -260,8 +260,12 @@ def evaluate(snapshot, *, sam_images=None):
                   physics=dict(selected_pivot_base_m=baseline, support_type='cloud_fallback', confidence=0.),
                   evidence={}, candidate_status='unavailable',
                   fallback_reason='offline boundary review only; support fitting not validated')
+    # cam1_sam_color.png: older snapshots; newer ones keep only the identical cam1_color.png.
+    image_path = next((snapshot/n for n in ('cam1_sam_color.png', 'cam1_color.png') if (snapshot/n).exists()), None)
     color = (sam_images[1] if sam_images is not None else
-             cv2.imread(str(snapshot/'cam1_sam_color.png')) if (snapshot/'cam1_sam_color.png').exists() else None)
+             cv2.imread(str(image_path)) if image_path is not None else None)
+    if image_path is not None:
+        report['image'] = image_path.name
     if sam_images is not None:
         report['image'] = 'in_memory_sam_rgb'
     try:

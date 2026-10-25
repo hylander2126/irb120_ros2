@@ -1,12 +1,15 @@
 """Episodes: one folder + one summary file per pipeline run on one object.
 
-  <log root>/<object>/episodes/<YYYYmmdd_HHMMSS>/     (log root: runtime_log_dir.log_root())
+  <log root>/<object>/<YYYYmmdd_HHMMSS>/     (log root: runtime_log_dir.log_root())
     episode.json         # summary: git commit, camera extrinsics, stages, events, notes, outcome
-    00_perceive/         # perception_snapshot.take_snapshot()
+    00_perceive/         # perception_snapshot.take_snapshot(); layout in irb120_perception.snapshot_layout
     01_push/             # push.py: F/T + pose .npz, metadata .json, videos
     02_perceive/
     03_press_pull_tip/   # arc_static.py
     04_perceive/
+
+Episodes recorded before 2026-10-24 sit one level deeper, in <object>/episodes/;
+readers find both (snapshot_layout.episode_jsons).
 
 Every stage entry in episode.json has its folder, start/end time, status
 ('running' until it ends, so a crash is visible), results and file list.
@@ -27,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from irb120_control.util.runtime_log_dir import git_commit_info, load_object_params, log_root
+from irb120_perception.snapshot_layout import episode_jsons
 
 OUTCOMES = ("success", "partial", "failure", "aborted")
 CAMERA_LINKS = ("realsense_link", "realsense2_link", "realsense3_link")
@@ -43,8 +47,8 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _episodes_dir(object_name: str = "*") -> Path:
-    return log_root() / object_name / "episodes"
+def _episodes_dir(object_name: str) -> Path:
+    return log_root() / object_name
 
 
 class Stage:
@@ -110,7 +114,7 @@ class Episode:
         if spec == "new":
             return cls.create(object_name, node, allow_unconfigured_object=allow_unconfigured_object)
         if spec == "last":
-            episodes = sorted(_episodes_dir(object_name).glob("*/episode.json"))
+            episodes = episode_jsons(log_root(), object_name)
             if not episodes:
                 raise FileNotFoundError(f"no episodes for {object_name}")
             return cls(episodes[-1].parent)
@@ -223,7 +227,7 @@ def main() -> None:
     if args.episode:
         episode = Episode(args.episode)
     else:
-        episodes = sorted(_episodes_dir().glob("*/episode.json"), key=lambda f: f.stat().st_mtime)
+        episodes = sorted(episode_jsons(log_root()), key=lambda f: f.stat().st_mtime)
         if not episodes:
             raise SystemExit("no episodes yet")
         episode = Episode(episodes[-1].parent)

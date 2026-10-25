@@ -124,15 +124,14 @@ def check_view(point, direction, depth, info, table_plane=None, table_z=TABLE_Z)
     if sn @ toward_camera < 0:
         sn = -sn
     if (sv[1] <= 1e-12 or sv[0]/sv.sum() > .05
-            or sn @ n < np.cos(np.radians(20))
-            or (sn @ direction > 0) != (n @ direction > 0)):
+            or sn @ n < np.cos(np.radians(20))):
         return dict(usable=False, reason='normal unstable across 8/12 mm scales')
     return dict(usable=True, normal=n.tolist(), normal_dot_pull=float(n @ direction),
                 count=len(local), depth_residual_mm=float(residual*1000),
                 table_offset_mm=table_offset*1000)
 
 
-def decide(views):
+def decide(views, max_normal_dot_pull=0.):
     usable = [v for v in views.values() if v['usable']]
     if not usable:
         return 'uncertain', 'no usable camera view'
@@ -140,8 +139,8 @@ def decide(views):
         for b in usable[i+1:]:
             if np.dot(a['normal'], b['normal']) < np.cos(np.radians(25)):
                 return 'uncertain', 'camera normals disagree by more than 25 degrees'
-    if any(v['normal_dot_pull'] > 0 for v in usable):
-        return 'reject', 'visible normal points along proposed pull'
+    if any(v['normal_dot_pull'] > max_normal_dot_pull for v in usable):
+        return 'reject', 'visible normal exceeds allowed pull-direction tilt'
     return 'pass', 'single-view support' if len(usable) == 1 else 'multi-view agreement'
 
 
@@ -215,8 +214,12 @@ def press_backups(candidates, press, normal_at, spacing=ALTERNATIVE_SPACING_M, l
 
 
 def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
-            press_pivot_override=None, diagnostics=None):
+            press_pivot_override=None, diagnostics=None, press_camera=None, pull_normal_epsilon=.1):
     """Return an experimental contacts copy and evidence, preserving baseline.
+
+    press_camera: restrict press candidates/normals and acceptance to this camera.
+    Other views remain diagnostic; merged geometry and other modes are preserved.
+    view_check_v2 validates in the observed base frame without table-derived shifts.
 
     press_pivot_override: forwarded to select_contact_points unchanged -- moves
     only the press pivot used for moment-arm scoring/edge-centering (and the
@@ -239,7 +242,7 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
                                   connected_depth_band_mm=8, min_samples=20,
                                   max_surface_variation=.05, min_view_cosine=.3,
                                   max_normal_angle_deg=25, max_scale_angle_deg=20,
-                                  max_normal_dot_pull=0))
+                                  max_normal_dot_pull=pull_normal_epsilon))
     load_saved = cameras is None
     cameras = {} if load_saved else cameras
     for cam in (('cam1', 'cam2', 'cam3') if load_saved else ()):
@@ -258,7 +261,23 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
         for cam, plane in table_planes.items()
     }
 
-    xyz = np.load(snapshot/'object_cloud.npz')['xyz']
+    cloud = np.load(snapshot/'object_cloud.npz')
+    xyz = cloud['xyz']
+    press_candidates = None
+    press_viewpoint = None
+    if press_camera is not None:
+        if rule != 'view_check_v2' or press_camera not in ('cam1', 'cam2', 'cam3'):
+            raise ValueError('press_camera requires view_check_v2 and cam1/cam2/cam3')
+        if 'camera_id' not in cloud:
+            raise ValueError('press-camera selection requires camera_id provenance')
+        press_candidates = xyz[cloud['camera_id'] == int(press_camera[-1])]
+        if press_camera in cameras:
+            tf = cameras[press_camera][1].get('base_to_optical')
+            if tf is not None:
+                press_viewpoint = -np.asarray(tf['R']).T @ np.asarray(tf['t'])
+    report['press_camera'] = press_camera
+    report['validation_coordinates'] = ('observed base frame; no table correction'
+                                        if rule == 'view_check_v2' else 'table corrected')
     inferred_tree = None
     if rule == 'top_support_v1':
         from scipy.spatial import cKDTree
@@ -309,13 +328,14 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
                 try:
                     views[cam] = check_view(
                         point, direction, depth, info,
-                        table_plane=table_planes.get(cam))
+                        table_plane=table_planes.get(cam) if rule != 'view_check_v2' else None)
                 except (KeyError, ValueError) as exc:
                     views[cam] = dict(usable=False, reason=str(exc))
             is_inferred = bool(inferred_tree is not None and inferred_tree.query(point)[0] < 1e-8)
+            decision_views = views if press_camera is None else {press_camera: views.get(press_camera, dict(usable=False))}
             decision, reason = (assess(point, normals[tree.query(point)[1]], observed, views,
                                        require_local_support=not is_inferred)
-                                if rule == 'top_support_v1' else decide(views))
+                                if rule == 'top_support_v1' else decide(decision_views, max_normal_dot_pull=pull_normal_epsilon))
             report['candidates'].append(dict(point=point.tolist(), views=views,
                 direction=direction.tolist(), decision=decision, reason=reason,
                 inferred_horizontal_top=is_inferred))
@@ -334,10 +354,11 @@ def evaluate(snapshot, contacts, *, cameras=None, rule='top_support_v1',
     selection_normals = normals if rule == 'top_support_v1' else None
     selected = select_contact_points(selection_points, normals=selection_normals,
                                     min_ball_center_z=.06,
-                                    press_score_fraction=.05,
+                                    press_score_fraction=.05, pull_normal_epsilon=pull_normal_epsilon,
                                     experimental_press_filter=filter_candidates,
                                     press_pivot_override=press_pivot_override,
-                                    diagnostics=diagnostics)
+                                    diagnostics=diagnostics,
+                                    press_candidates=press_candidates, press_viewpoint=press_viewpoint)
     # An observed upward normal is only a hypothesis. If all observed contacts
     # fail validation, retry with inferred cap hypotheses through the SAME gates.
     if (rule == 'top_support_v1' and not selected['press']['available']

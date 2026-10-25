@@ -398,3 +398,30 @@ def test_press_pivot_override_without_cloud_support():
     np.testing.assert_allclose(press['geometry']['axis'], [0., -1., 0.])
     assert result['forward_tip']['reason'] == 'Not enough observed support points near the table'
     assert not select_contact_points(points[high], normals=normals[high], table_z=0.)['press']['available']
+
+
+def test_press_camera_subset_preserves_other_modes_and_excludes_merged_top():
+    points, normals = box()
+    baseline = select_contact_points(points, normals=normals, table_z=0.)
+    # Restrict press to the right half; the merged near-edge choice is excluded.
+    subset = points[points[:, 0] >= .55]
+    selected = select_contact_points(points, normals=normals, table_z=0.,
+                                     press_candidates=subset)
+    assert selected['press']['available']
+    assert np.any(np.all(subset == selected['press']['point'], axis=1))
+    for mode in ('planar_push', 'forward_tip'):
+        for key in ('point', 'normal', 'ball_center'):
+            np.testing.assert_array_equal(selected[mode][key], baseline[mode][key])
+    np.testing.assert_array_equal(selected['press']['geometry']['pivot'],
+                                  baseline['press']['geometry']['pivot'])
+    empty = select_contact_points(points, normals=normals, table_z=0.,
+                                  press_candidates=np.empty((0, 3)))
+    assert not empty['press']['available']
+
+
+def test_camera_normal_orientation_handles_top_only_flat_observations():
+    from irb120_perception.contact_point_selector import estimate_normals
+    x, y = np.meshgrid(np.linspace(.5, .6, 21), np.linspace(-.05, .05, 21))
+    top = np.c_[x.ravel(), y.ravel(), np.full(x.size, .2)]
+    normals = estimate_normals(top, viewpoint=np.array([.55, 0., .8]))
+    np.testing.assert_allclose(normals, np.tile([0., 0., 1.], (len(top), 1)), atol=1e-10)

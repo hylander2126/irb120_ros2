@@ -51,8 +51,9 @@ def depth_to_base(depth_mm, info, stride=2):
 def audit(snapshot, camera='cam2', table_band=(-.08, .04)):
     """table_band: base_link z range the table points are taken from."""
     snapshot=Path(snapshot)
-    saved=np.load(snapshot/f'{camera}_aligned_depth.npz')
-    info=json.loads((snapshot/f'{camera}_camera_info.json').read_text())
+    from .snapshot_layout import snapshot_file
+    saved=np.load(snapshot_file(snapshot,f'{camera}_aligned_depth.npz'))
+    info=json.loads(snapshot_file(snapshot,f'{camera}_camera_info.json').read_text())
     obj=np.load(snapshot/'object_cloud.npz')['xyz']
     obj=obj[np.isfinite(obj).all(axis=1)]
     points=depth_to_base(saved['depth_mm'],info)

@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from irb120_control.util.forward_tip_motion import TipConfig, TipMotion, tip_targets
+from irb120_control.util.forward_tip_motion import TipConfig, TipMotion, slab_boxes, tip_targets
 from irb120_control.util.push_geometry import APPROACH_CLEARANCE, BALL_RADIUS, OBJECT_PADDING
 
 
@@ -22,7 +22,7 @@ def contact(angle=0.):
 def test_oblique_edge_not_sloped_face_sets_horizontal_line_and_box_clearance(angle):
     cloud = np.array([[.3, -.1, 0.], [.6, .3, .3]])
     saved = contact(angle)
-    ball, direction, pivot, pre = tip_targets(saved, cloud)
+    ball, direction, pivot, pre = tip_targets(saved, cloud, clearance='box')
     assert direction @ saved['geometry']['axis'] == pytest.approx(0.)
     assert np.linalg.norm(direction) == pytest.approx(1.)
     assert direction[2] == 0.
@@ -32,7 +32,7 @@ def test_oblique_edge_not_sloped_face_sets_horizontal_line_and_box_clearance(ang
     assert pre @ direction <= np.where(direction >= 0, lo, hi) @ direction - BALL_RADIUS - APPROACH_CLEARANCE + 1e-12
 
 
-def test_isolated_outliers_do_not_inflate_the_pre_tip_clearance():
+def test_shared_cloud_prevents_outliers_in_both_pre_tip_and_collision_slabs():
     """A couple of stray points (sensor noise, a stereo mismatch) far from the real surface
     must not blow out the padded box the pre-tip standoff has to clear. Real surface points are
     never isolated like this -- dense grid here stands in for one, well above the robust-bounds
@@ -42,8 +42,13 @@ def test_isolated_outliers_do_not_inflate_the_pre_tip_clearance():
     outliers = np.array([[.05, .1, .2], [.08, .11, .19]])  # isolated, ~300-350 mm from the grid
     saved = contact()
     clean = tip_targets(saved, grid)[3]
-    with_outliers = tip_targets(saved, np.vstack([grid, outliers]))[3]
+    from irb120_perception.object_cloud import prepare_object_cloud
+    raw = np.vstack([grid, outliers])
+    canonical, audit = prepare_object_cloud(raw, np.full(len(raw), 3))
+    with_outliers = tip_targets(saved, canonical['xyz'])[3]
+    assert audit['removed_points'] == 2
     assert np.allclose(clean, with_outliers)
+    assert min(lo[0] for lo, hi in slab_boxes(canonical['xyz'])) > .3
     # Sanity check the outliers really would have moved it, proving the filter is load-bearing
     # here and not just inactive (e.g. the grid alone already clearing by coincidence).
     lo = outliers.min(axis=0)[0] - OBJECT_PADDING
@@ -206,3 +211,48 @@ def test_probe_backs_off_once_and_judges_by_the_force_left(held, outcome):
     else:
         assert motion.failure_reason == 'slide'
         assert motion.slide_force == pytest.approx(9.) and motion.slide_travel == pytest.approx(.010)
+
+
+def test_seek_runs_faster_than_the_tip_itself():
+    config = TipConfig()
+    assert config.seek_speed == pytest.approx(1.5 * config.speed)
+    motion = TipMotion(config, .04, 0.)
+    assert motion.step(0., .0, 0., 0.) == config.seek_speed   # free air
+    for i in range(config.stable_samples):                     # touch: load at the tip speed
+        speed = motion.step(.01 * (i + 1), .03, .4, .4)
+    assert motion.state in ('LOAD', 'TIP') and speed == config.speed
+
+
+def drill_like():
+    """Dense head at the contact height, plus a grip reaching 60 mm further back lower down."""
+    def block(x0, x1, z0, z1):
+        g = np.mgrid[x0:x1:.004, .07:.13:.004, z0:z1:.004]
+        return g.reshape(3, -1).T
+    return np.vstack([block(.405, .45, -.02, .23),    # body/head, front face just past the ball
+                      block(.345, .405, .10, .15)])   # grip, well below the ball (z .2)
+
+
+def test_slab_clearance_ignores_a_wide_part_below_the_approach():
+    cloud, saved = drill_like(), contact()
+    ball = np.array(saved['ball_center'])
+    close = tip_targets(saved, cloud, .02)[3]
+    whole = tip_targets(saved, cloud, .02, clearance='box')[3]
+    # The whole box puts the pre-tip behind the grip; the slices only behind the head.
+    assert (ball - whole)[0] > .07
+    assert (ball - close)[0] == pytest.approx(ball[0] - (.405 - OBJECT_PADDING) + BALL_RADIUS
+                                              + APPROACH_CLEARANCE, abs=.0045)
+    # The close pre-tip ball is outside every slab box its corridor crosses.
+    for lo, hi in slab_boxes(cloud):
+        if lo[2] < ball[2] + BALL_RADIUS and hi[2] > ball[2] - BALL_RADIUS:
+            assert close[0] + BALL_RADIUS <= lo[0] + 1e-9
+
+
+def test_slab_boxes_cover_the_cloud_down_to_the_table():
+    cloud = drill_like()
+    boxes = slab_boxes(cloud)
+    assert boxes[0][0][2] == pytest.approx(-.021)
+    for p in cloud[::50]:
+        assert any(np.all(p >= lo) and np.all(p <= hi) for lo, hi in boxes)
+    grip_slab = [b for b in boxes if b[0][2] < .12 < b[1][2]][0]
+    head_slab = [b for b in boxes if b[0][2] < .2 < b[1][2]][0]
+    assert grip_slab[0][0] < head_slab[0][0] - .05

@@ -23,6 +23,10 @@ The `filtered` profile and old per-camera bringup files are retired. Default
 `bringup_stack` explicitly selects `offline_stereo`. `cameras` defaults to all
 three; missing/drivers exiting report errors without terminating the other cameras.
 Never start another driver against a camera already owned by a running stack.
+FFS capture audits the live camera-link TFs against the selected calibration and
+rejects stale/conflicting static publishers. The cam2 Z compensation defaults to
++4 mm with the current calibration; reconstruction accounts for the captured
+shift so it is applied exactly once. Restart camera bringup after calibration changes.
 
 ## Calibration procedure
 

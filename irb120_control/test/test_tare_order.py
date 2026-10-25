@@ -52,7 +52,7 @@ def test_tare_order_and_failures(legacy, failure):
                run_adaptive_press=lambda *a, **k: order.append('run') or (True, 5., 1))
     # These are used only by the unchanged single-run diagnostic f-string.
     for name in ('FORCE_HARD_LIMIT_N', 'KP_FORCE', 'KI_FORCE', 'FORCE_DEADBAND_N',
-                 'FORCE_FILTER_ALPHA', 'MAX_NORMAL_SPEED', 'DESCEND_SPEED',
+                 'FORCE_FILTER_ALPHA', 'MAX_NORMAL_SPEED', 'DESCEND_SPEED', 'SQUASH_SEEK_SPEED',
                  'ARC_MAX_ANGLE_DEG', 'ARC_TANGENTIAL_RAMP_SEC',
                  'UNARC_FORCE_AUGMENT_SPEED', 'UNARC_FORCE_AUGMENT_SOFTNESS_N'):
         env[name] = 1.

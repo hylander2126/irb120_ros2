@@ -14,7 +14,7 @@ from irb120_control.util.support_cloud_recording import record_support_scene
 
 def main(roots):
     for root in roots:
-        for snap in sorted(Path(root).expanduser().resolve().glob('**/episodes/*/*_perceive')):
+        for snap in sorted(Path(root).expanduser().resolve().glob('**/*_perceive')):
             if not (snap / 'object_cloud.npz').exists() or _paths.scene_dir(snap) is not None:
                 continue
             out = _paths.DERIVED / snap.relative_to(_paths.DATA)

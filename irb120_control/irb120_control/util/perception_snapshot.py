@@ -79,31 +79,96 @@ def _run_ffs_command(node, command, log_path, timeout=900.):
                     process.wait()
 
 
+FFS_WORKER_REQUEST = '/ffs_worker/request'
+FFS_WORKER_STATUS = '/ffs_worker/status'
+FFS_WORKER_DISCOVERY_SEC = 1.5
+
+
+def _ffs_worker(node):
+    """(publisher, status messages) for the warm FFS worker, or None if none is ready.
+    The worker subscribes to the request topic only once its models are loaded."""
+    from std_msgs.msg import String
+    if getattr(node, '_ffs_worker_pub', None) is None:
+        node._ffs_worker_status = []
+        node._ffs_worker_pub = node.create_publisher(String, FFS_WORKER_REQUEST, 10)
+        node._ffs_worker_sub = node.create_subscription(
+            String, FFS_WORKER_STATUS, lambda m: node._ffs_worker_status.append(m.data), 50)
+    deadline = time.monotonic()+FFS_WORKER_DISCOVERY_SEC
+    while node._ffs_worker_pub.get_subscription_count() == 0:
+        if time.monotonic() >= deadline:
+            return None
+        rclpy.spin_once(node, timeout_sec=.05)
+    return node._ffs_worker_pub, node._ffs_worker_status
+
+
+def _run_ffs_worker(node, worker, request, timeout=900.):
+    """Send one request to the warm worker and spin until its done/error status."""
+    import uuid
+    from std_msgs.msg import String
+    publisher, statuses = worker
+    request = dict(request, id=uuid.uuid4().hex)
+    statuses.clear()
+    publisher.publish(String(data=json.dumps(request)))
+    deadline = time.monotonic()+timeout
+    seen = 0
+    while True:
+        while seen < len(statuses):
+            status = json.loads(statuses[seen])
+            seen += 1
+            if status.get('id') != request['id']:
+                continue
+            if status['event'] in ('error', 'busy'):
+                raise RuntimeError(f"FFS worker: {status.get('error', status['event'])}")
+            if status['event'] == 'done':
+                return status
+            node.get_logger().info(f"[snapshot] FFS worker: {status['event']}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"FFS worker gave no result in {timeout:.0f} s; see {request['logs']}")
+        rclpy.spin_once(node, timeout_sec=.1)
+
+
 def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
     """Fresh FFS capture -> reconstruction -> report -> contacts -> episode stage.
 
     Call only with a stationary object and the arm clear, as for the old snapshot
     API. The retained seed argument is ignored: FFS always reacquires. The existing
     primitive/operator/MoveIt gates still own motion approval.
+
+    Uses the warm FFS worker (stereo_offline_worker.py, started by bringup_stack) when it
+    is running, else one fresh subprocess per step. Either way the same steps write the
+    same files; snapshot.json records which ran (ffs_runner).
     """
-    from datetime import datetime
     from irb120_perception.stereo_offline_bridge import WORKSPACE, VENV_PYTHON
-    run = episode.path/'ffs_runs'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    run.mkdir(parents=True)
-    capture, recon, contacts = (run/name for name in ('capture', 'recon', 'contacts'))
+    # The FFS run is written straight into the stage (capture/, recon/, contact selection
+    # at the stage root; see irb120_perception.snapshot_layout), so nothing is copied.
+    stage = episode.begin_stage('perceive', backend='offline_ffs', label=label)
+    run = stage.path
+    capture, recon, logs = run/'capture', run/'recon', run/'logs'
+    logs.mkdir()
     commands = [
         ('capture', 'capture_stereo_snapshot.py', [str(capture), '--stationary-arm-clear']),
         ('reconstruct', 'reconstruct_stereo_offline.py', [str(capture), '--output', str(recon)]),
-        ('report', 'report_stereo_offline.py', [str(recon)]),
-        ('contacts', 'select_stereo_contacts.py', [str(recon), '--output', str(contacts)]),
+        ('contacts', 'select_stereo_contacts.py', [str(recon), '--output', str(run)]),
     ]
-    stage = episode.begin_stage('perceive', backend='offline_ffs', label=label)
     try:
-        for name, script, args in commands:
-            node.get_logger().info(f'[snapshot] FFS {name}: {run}')
-            _run_ffs_command(node, [str(VENV_PYTHON), str(WORKSPACE/'scripts'/script), *args],
-                             run/f'{name}.log')
-        record = _import_ffs_snapshot(episode, run, review_status='pending_motion_gate', label=label, stage=stage)
+        started = time.monotonic()
+        worker = _ffs_worker(node)
+        if worker is not None:
+            node.get_logger().info(f'[snapshot] FFS via warm worker: {run}')
+            status = _run_ffs_worker(node, worker, dict(capture=str(capture), recon=str(recon),
+                                                        contacts=str(run), logs=str(logs), report=False))
+            runner = dict(runner='warm_worker', **{k: v for k, v in status.items() if k.endswith('_seconds')})
+        else:
+            node.get_logger().warn('[snapshot] FFS worker not running (bringup_stack ffs_worker:=true '
+                                   'starts it); fresh subprocesses reload the models each step')
+            for name, script, args in commands:
+                node.get_logger().info(f'[snapshot] FFS {name}: {run}')
+                _run_ffs_command(node, [str(VENV_PYTHON), str(WORKSPACE/'scripts'/script), *args],
+                                 logs/f'{name}.log')
+            runner = dict(runner='subprocess')
+        runner['wall_seconds'] = time.monotonic()-started
+        record = _import_ffs_snapshot(episode, run, review_status='pending_motion_gate', label=label,
+                                      stage=stage, ffs_runner=runner)
         return record
     except (OSError, ValueError, KeyError, RuntimeError, TimeoutError) as exc:
         reason = str(exc)
@@ -119,7 +184,8 @@ def take_snapshot(node, episode, label: str = "", seed: bool = True) -> dict:
 
 
 def import_ffs_snapshot(episode, run_dir, *, reviewed_unchanged=False):
-    """Copy a reviewed run into an episode; caller attests the scene is unchanged.
+    """Copy a reviewed standalone run (capture/, recon/, contacts/) into a new perceive
+    stage; caller attests the scene is unchanged.
 
     This approval records review/scene continuity, not trajectory feasibility.
     No live services or robot commands are used. Reimporting a capture after
@@ -130,9 +196,12 @@ def import_ffs_snapshot(episode, run_dir, *, reviewed_unchanged=False):
     return _import_ffs_snapshot(episode, run_dir, review_status='reviewed_unchanged')
 
 
-def _import_ffs_snapshot(episode, run_dir, *, review_status, label='reviewed import', stage=None):
+def _import_ffs_snapshot(episode, run_dir, *, review_status, label='reviewed import', stage=None,
+                         ffs_runner=None):
     run = Path(run_dir).expanduser().resolve()
-    contacts_dir, recon, capture = run/'contacts', run/'recon', run/'capture'
+    recon, capture = run/'recon', run/'capture'
+    # A standalone FFS run keeps contact selection in contacts/; an episode stage at its root.
+    contacts_dir = run/'contacts' if (run/'contacts'/'handoff.json').exists() else run
     handoff = json.loads((contacts_dir/'handoff.json').read_text())
     metadata = json.loads((capture/'capture.json').read_text())
     contacts = json.loads((contacts_dir/'contacts.json').read_text())
@@ -157,9 +226,8 @@ def _import_ffs_snapshot(episode, run_dir, *, review_status, label='reviewed imp
         for suffix in ('camera_info.json', 'color.png', 'aligned_depth.npz'):
             if not (recon/f'{cam}_{suffix}').is_file():
                 raise ValueError(f'Missing calibrated view evidence: {cam}_{suffix}')
-    xyz = np.load(contacts_dir/'object_cloud.npz')['xyz']
-    if xyz.ndim != 2 or xyz.shape[1] != 3 or not len(xyz) or not np.isfinite(xyz).all():
-        raise ValueError('Invalid observed object cloud')
+    from irb120_perception.object_cloud import load_object_cloud
+    xyz = load_object_cloud(contacts_dir/'object_cloud.npz')['xyz']
     # Identity includes calibrated capture and raw observations, not just path/name.
     digest = hashlib.sha256()
     for name in ('capture.json', 'cam1.npz', 'cam2.npz', 'cam3.npz'):
@@ -178,20 +246,15 @@ def _import_ffs_snapshot(episode, run_dir, *, review_status, label='reviewed imp
     if stage is None:
         stage = episode.begin_stage('perceive', backend='offline_ffs', label=label)
     try:
-        shutil.copytree(contacts_dir, stage.path, dirs_exist_ok=True)
-        shutil.copy2(capture/'capture.json', stage.path/'capture.json')
-        for pattern in ('cam*_camera_info.json', 'cam*_color.png', 'cam*_aligned_depth.npz',
-                        'pivot_boundary_review.json', 'forward_pivot_review.json'):
-            for source in recon.glob(pattern):
-                shutil.copy2(source, stage.path/source.name)
-        for cam in ('cam1', 'cam2', 'cam3'):
-            if not (stage.path/f'{cam}_camera_info.json').exists():
-                raise ValueError(f'Missing {cam} calibration in reconstruction')
-        if (stage.path/'contacts.png').exists():
-            import cv2
-            image = cv2.imread(str(stage.path/'contacts.png'))
-            if image is None or not cv2.imwrite(str(stage.path/'final_selection.jpg'), image):
-                raise ValueError('Invalid contact review image')
+        if stage.path.resolve() != run:
+            # Reviewed import of a standalone run: bring it into the stage layout once.
+            shutil.copytree(capture, stage.path/'capture')
+            shutil.copytree(recon, stage.path/'recon')
+            shutil.copytree(contacts_dir, stage.path, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('capture', 'recon', 'contacts',
+                                                         'object_cloud.npz', 'object_cloud.json'))
+            from irb120_perception.object_cloud import publish_object_cloud
+            publish_object_cloud(stage.path/'recon', stage.path)
         from .tip_choice import choose_tip
         tip, reason = choose_tip(contacts)
         record = dict(ok=True, backend='offline_ffs', source_run=str(run), capture_id=capture_id,
@@ -199,16 +262,18 @@ def _import_ffs_snapshot(episode, run_dir, *, review_status, label='reviewed imp
                       trajectory_checked=False,
                       tip_choice={'tip': tip, 'reason': reason},
                       available={m: contacts[m]['available'] for m in ('planar_push', 'forward_tip', 'press')})
+        if ffs_runner is not None:
+            record['ffs_runner'] = ffs_runner
         write_json_atomic(stage.path/'snapshot.json', record)
         from .support_cloud_recording import record_support_scene
-        # Existing depth/FK consumers use the copied calibrated camera files.
         # Support-cloud rebuild is optional evidence, never a fabricated pass.
         try:
             record['support_scene'] = record_support_scene(stage.path)
         except (OSError, ValueError, KeyError) as exc:
             record['support_scene'] = {'status': 'unavailable', 'reason': str(exc)}
         write_json_atomic(stage.path/'snapshot.json', record)
-        stage.end('ok', backend='offline_ffs', capture_id=capture_id, points=len(xyz))
+        stage.end('ok', backend='offline_ffs', capture_id=capture_id, points=len(xyz),
+                  **({'ffs_runner': ffs_runner['runner']} if ffs_runner else {}))
         return record
     except Exception as exc:
         stage.end('failed', reason=str(exc))
@@ -226,6 +291,12 @@ def latest_contacts(episode, filename="contacts.json"):
     path = episode.path / stage["dir"] / filename
     if not path.exists():
         return None
+    # Older snapshots must be reacquired, rather than cleaned differently by each motion.
+    from irb120_perception.object_cloud import load_object_cloud
+    try:
+        load_object_cloud(path.parent/'object_cloud.npz')
+    except (OSError, ValueError, KeyError):
+        return None
     with open(path) as f:
         return json.load(f)
 
@@ -233,7 +304,8 @@ def latest_contacts(episode, filename="contacts.json"):
 def latest_object_cloud(episode) -> np.ndarray:
     """The object cloud (base_link) from the episode's most recent successful perceive stage."""
     stage = next(s for s in reversed(episode.load()["stages"]) if s["kind"] == "perceive" and s["status"] == "ok")
-    return np.load(episode.path / stage["dir"] / "object_cloud.npz")["xyz"]
+    from irb120_perception.object_cloud import load_object_cloud
+    return load_object_cloud(episode.path / stage["dir"] / "object_cloud.npz")["xyz"]
 
 
 def begin_motion_stage(node, episode, kind: str, contacts_filename="contacts.json"):

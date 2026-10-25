@@ -113,6 +113,7 @@ PUSH_CONTACT_MARGIN = 0.050  # generous: the cloud has put the face ~30 mm early
 PUSH_FORCE_WINDOW_SEC = 0.10
 # Servo push: the planned path is only a gut check; Servo drives it and can stop any tick.
 PUSH_SPEED = 0.009          # m/s along the push vector (what the old planned push actually ran)
+PUSH_SEEK_SPEED = 1.5 * PUSH_SPEED  # m/s before contact is validated; PUSH_SPEED from contact on
 PUSH_CONTROL_HZ = 50.0
 PUSH_LINE_GAIN = 1.0        # 1/s: pulls the finger back onto the push line
 # Servo on this rig moves at ~57% of the commanded speed (press-pull arcs too), so the push
@@ -342,8 +343,9 @@ class Push(Node):
             self._force_check = dict(status="rejected", reason="could not resume MoveIt Servo")
             return False
         ok = True
+        target, pushing = 0., False  # where the finger should be along the line; past contact?
         try:
-            next_tick = t0 = time.monotonic()
+            next_tick = last = time.monotonic()
             while rclpy.ok():
                 next_tick += 1. / PUSH_CONTROL_HZ
                 while time.monotonic() < next_tick:
@@ -361,8 +363,13 @@ class Push(Node):
                 if time.monotonic() > deadline:
                     self._force_check = dict(self._force_check, status="rejected", reason="servo push timed out")
                     break
-                lag = PUSH_SPEED * (time.monotonic() - t0) - along
-                speed = min(PUSH_MAX_CMD_SPEED, max(0., PUSH_SPEED + PUSH_TRACK_GAIN * lag))
+                if not pushing and self._force_check.get("status") == "validated":
+                    pushing, target = True, along  # contact: restart tracking at the push speed
+                nominal = PUSH_SPEED if pushing else PUSH_SEEK_SPEED
+                now = time.monotonic()
+                target, last = target + nominal * (now - last), now
+                lag = target - along
+                speed = min(PUSH_MAX_CMD_SPEED, max(0., nominal + PUSH_TRACK_GAIN * lag))
                 v = speed * direction - PUSH_LINE_GAIN * (offset - along * direction)
                 if not self._servo_cmd.publish_twist(*v, state="PUSH"):
                     self._force_check = dict(status="rejected", reason="servo command not accepted")

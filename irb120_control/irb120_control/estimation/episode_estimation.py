@@ -100,14 +100,22 @@ def fit_first_moments(log, track, com_x, *, pivot=None, slide_speed_limit=None):
 
 
 def episode_paths(root, obj, selection='latest'):
+    from irb120_perception.snapshot_layout import episode_jsons
     root = Path(root)
-    paths = sorted(set(root.glob(f'runtime_logs/{obj}/episodes/*/episode.json')) |
-                   set(root.glob(f'{obj}/episodes/*/episode.json')))
+    if (root/'episode.json').exists():  # one episode folder
+        return [root/'episode.json']
+    paths = sorted(set(episode_jsons(root/'runtime_logs', obj)) | set(episode_jsons(root, obj)),
+                   key=lambda p: (p.parent.name, str(p)))
     if selection == 'latest':
         return paths[-1:]
     if selection == 'all':
         return paths
     return [p for p in paths if p.parent.name == selection]
+
+
+def episode_object(path) -> str:
+    """Object name recorded in an episode folder."""
+    return json.loads((Path(path)/'episode.json').read_text())['object']
 
 
 def analyze_episode(path, reference, *, tilt_source='proprio', vision=False, cache_dir=None,
@@ -217,8 +225,8 @@ def analyze_episode(path, reference, *, tilt_source='proprio', vision=False, cac
 def main_episodes(objects, root, out_dir, *, selection='latest', tilt_source='proprio',
                   vision=False, cache_dir=None, press_contact_model='point', press_pivot_offset_x=0.,
                   forward_reference='first_contact'):
-    from irb120_models.experiment_gt import forward_tip_ground_truth
-    references = forward_tip_ground_truth()
+    from irb120_models.experiment_gt import episode_reference
+    references = {obj: episode_reference(obj) for obj in objects}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     results, table = [], []
@@ -243,7 +251,7 @@ def main_episodes(objects, root, out_dir, *, selection='latest', tilt_source='pr
                     controller_attempts=stage['controller_parameters'].get('attempts'),
                     flags=';'.join(stage['estimate']['quality_flags']))
                 table.append(row)
-                print(f"{obj} {row['episode']} {row['source']}: {row['mass_g']:.1f} g "
+                print(f"{obj} {row['episode']} {row['stage']} {row['source']}: {row['mass_g']:.1f} g "
                       f"({row['mass_error_pct']:+.1f}%), {row['height_mm']:.1f} mm "
                       f"({row['height_error_pct']:+.1f}%) {row['flags']}")
     def encode(x):

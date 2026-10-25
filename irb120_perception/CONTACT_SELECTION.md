@@ -11,9 +11,13 @@ level table is z = -0.021 m; ball radius is 13.25 mm. Camera registration and de
 quality must support the requested contact accuracy. Do not mix observations from
 before/after movement or from independent objects.
 
-`sam_shadow` segments calibrated FFS views and builds the observed cloud.
-`select_stereo_contacts.py` keeps an actual observation per 3 mm voxel, retaining
-source indices. Contacts do not come from mesh closure or averaged invented
+`sam_shadow` segments calibrated FFS views and builds the observed cloud. Its name
+is historical: it is active pipeline code, not a shadow-mode setting.
+`reconstruct_stereo_offline.py` publishes one actual observation per camera per
+3 mm voxel, retaining source indices, then removes samples with no other sample
+within 10 mm. This versioned shared cloud is used unchanged by contact selection,
+pivot fitting and motion collision geometry. `object_cloud.json` records rejected
+observations; motion primitives do not filter independently. Contacts do not come from mesh closure or averaged invented
 surfaces. TSDF mesh rendering is a review artifact; it does not establish accuracy
 of the cloud bounds used by a motion primitive.
 
@@ -26,6 +30,20 @@ camera agreement and final score/edge-centering decisions. The contact report
 shows the candidate funnel spatially and numerically.
 
 The FFS adapter calls `experimental_view_check.evaluate(..., rule='view_check_v2')`.
+The FFS handoff defaults to cam2-only observed press candidates and cam2-local
+normals oriented toward cam2. The merged cloud still supplies pivot/footprint geometry; RGB-reviewed
+pivot overrides remain active. Other modes keep the original merged-cloud
+selection. Per-camera voxel sampling preserves camera IDs. Missing cam2 evidence
+produces an unavailable press, not a merged-cloud fallback. `--press-camera merged`
+is available for offline comparison. Validation uses the same observed base frame
+as candidates; table planes are diagnostic and do not shift observations in
+`view_check_v2`. Other camera views remain diagnostic for cam2 press selection.
+Cam2 geometry uses the audited calibration and total +4 mm compensation described
+in [the FFS guide](docs/STEREO_OFFLINE.md). The per-view pull-normal gate shares the
+selector’s 0.1 dot-product tolerance (about 5.7 degrees); a harmless near-horizontal
+slope no longer fails merely because its sign points toward the pull. The 8/12 mm
+normal consistency check remains angular, rather than rejecting tiny sign changes.
+
 Each press must be supported by usable local depth-view evidence; unusable or
 conflicting views can abstain/reject. The adapter intentionally excludes inferred
 horizontal top caps from `top_support_v1`. The underlying older rule helpers remain

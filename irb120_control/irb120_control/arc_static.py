@@ -97,7 +97,8 @@ FORCE_HARD_LIMIT_N = 20.0  # was 15.0 — moveit_servo's smoothing filter (servo
 # 10N target on the monitor). 20N clears that with margin.
 CONTACT_STABLE_SAMPLES = 1
 
-DESCEND_SPEED = 0.005       # m/s
+DESCEND_SPEED = 0.005       # m/s once contact is felt, while loading to the press force
+SQUASH_SEEK_SPEED = 1.5 * DESCEND_SPEED  # m/s before contact (free air down to the object)
 ARC_TANGENTIAL_SPEED = 0.008  # m/s along the arc
 ARC_TANGENTIAL_RAMP_SEC = 2.0 # seconds to ramp tangential speed at ARC/UNARC onset
 ARC_MAX_ANGLE_DEG = -23.0     # safety cap; ARC exits earlier once fx flips sign
@@ -783,8 +784,9 @@ class ArcStatic(Node):
                     self._transition("LULL")
             else:
                 self._contact_count = 0
+                speed = DESCEND_SPEED if self._contact_felt else SQUASH_SEEK_SPEED
                 if not self._servo_cmd.publish_twist(
-                        0.0, 0.0, -DESCEND_SPEED, state=self._state, force_z=self._force_z):
+                        0.0, 0.0, -speed, state=self._state, force_z=self._force_z):
                     self._done = True
             return
 
@@ -1090,11 +1092,12 @@ def main(args=None) -> int:
         node._approach_contacts_file = str(episode.path / perceive_stage['dir'] / contacts_filename)
         import hashlib
         snapshot_dir = episode.path / perceive_stage['dir']
+        from irb120_perception.snapshot_layout import snapshot_file
         node._approach_artifact_hashes = {
-            name: hashlib.sha256((snapshot_dir / name).read_bytes()).hexdigest()
-            for name in (contacts_filename, 'final_selection.jpg', 'cam1_camera_info.json',
+            name: hashlib.sha256(snapshot_file(snapshot_dir, name).read_bytes()).hexdigest()
+            for name in (contacts_filename, 'contacts.png', 'cam1_camera_info.json',
                          'cam2_camera_info.json', 'cam3_camera_info.json')
-            if (snapshot_dir / name).exists()}
+            if snapshot_file(snapshot_dir, name).exists()}
         node._approach_diagnostic_path = stage.path / 'approach_diagnostics.jsonl'
         if not node.set_targets_from_contacts(contacts, latest_object_cloud(episode)):
             return 1
@@ -1134,7 +1137,7 @@ def main(args=None) -> int:
             f"force_deadband={FORCE_DEADBAND_N}N  "
             f"force_filter_alpha={FORCE_FILTER_ALPHA}  "
             f"max_normal_speed={MAX_NORMAL_SPEED}m/s  "
-            f"descend_speed={DESCEND_SPEED}m/s  arc_max={ARC_MAX_ANGLE_DEG}deg  "
+            f"seek_speed={SQUASH_SEEK_SPEED}m/s  descend_speed={DESCEND_SPEED}m/s  arc_max={ARC_MAX_ANGLE_DEG}deg  "
             f"static_wrist=true  radial_force_control=true  tangential_ramp={ARC_TANGENTIAL_RAMP_SEC:.1f}s  "
             f"unarc_force_augment={UNARC_FORCE_AUGMENT_SPEED:.4f}m/s softness={UNARC_FORCE_AUGMENT_SOFTNESS_N:.2f}N"
         )

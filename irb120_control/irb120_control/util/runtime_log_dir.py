@@ -266,7 +266,7 @@ def save_ft_pose_log(
     commanded_pivot: tuple | list | np.ndarray | None = None,
 ) -> str | None:
     """Save collected F/T, EE pose, and optional object pose buffers to a timestamped .npz file.
-    Also writes a 'most_recent.npz' in the same directory for easy downstream access.
+    Outside episode stages, also writes a 'most_recent.npz' copy in the same directory.
 
     ft_log: list of [timestamp_s, fx, fy, fz, tx, ty, tz] rows — bias-corrected transformed wrench;
             optional columns 7-13 are estimator-reference pose [px, py, pz, qx, qy, qz, qw];
@@ -375,9 +375,11 @@ def save_ft_pose_log(
     np.savez_compressed(npz_path, **save_kwargs)
     print(f"F/T + EE pose + object pose log written to {npz_path}")
 
-    most_recent_path = log_dir / "most_recent.npz"
-    np.savez_compressed(most_recent_path, **save_kwargs)
-    print(f"most_recent.npz updated at {most_recent_path}")
+    if not (log_dir / "episode.json").exists() and not (log_dir.parent / "episode.json").exists():
+        # Legacy flat log folders only; an episode stage's timestamped log is its only copy.
+        most_recent_path = log_dir / "most_recent.npz"
+        np.savez_compressed(most_recent_path, **save_kwargs)
+        print(f"most_recent.npz updated at {most_recent_path}")
     return ts
 
 

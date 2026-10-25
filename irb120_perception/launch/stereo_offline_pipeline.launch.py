@@ -1,5 +1,5 @@
 """Run the full offline FFS stereo pipeline for one named object:
-capture -> reconstruct -> report -> observed-only contacts. FFS only; no RealSense comparison.
+capture -> reconstruct -> observed-only contacts (review:=true adds mesh/report). FFS only; no RealSense comparison.
 
 Everything lands under runtime_logs/<object_name>/<timestamp>/ in the workspace:
   capture/   raw matched stereo IR + RGB + TF (stereo_offline capture)
@@ -41,6 +41,7 @@ def _launch_setup(context, *args, **kwargs):
     noise_min_neighbors = LaunchConfiguration('noise_min_neighbors').perform(context)
     cam2_cross_checks = LaunchConfiguration('cam2_cross_checks').perform(context).lower() == 'true'
     cam2_z_offset_mm = LaunchConfiguration('cam2_z_offset_mm').perform(context)
+    review = LaunchConfiguration('review').perform(context).lower() == 'true'
 
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_dir = WORKSPACE / 'runtime_logs' / object_name / stamp
@@ -60,7 +61,8 @@ def _launch_setup(context, *args, **kwargs):
              '--gap-guard-voxels', gap_guard_voxels,
              '--noise-radius-voxels', noise_radius_voxels,
              '--noise-min-neighbors', noise_min_neighbors,
-             '--cam2-z-offset-mm', cam2_z_offset_mm] + (['--cam2-cross-checks'] if cam2_cross_checks else []),
+             '--cam2-z-offset-mm', cam2_z_offset_mm] + (['--cam2-cross-checks'] if cam2_cross_checks else [])
+             + (['--mesh'] if review else []),
     )
     report = ExecuteProcess(
         name='stereo_offline_report', output='screen',
@@ -69,7 +71,7 @@ def _launch_setup(context, *args, **kwargs):
     contacts = ExecuteProcess(
         name='stereo_offline_contacts', output='screen',
         cmd=['ros2', 'run', 'irb120_perception', 'stereo_offline', 'contacts',
-             str(recon_dir), '--output', str(contacts_dir)],
+             str(recon_dir), '--output', str(contacts_dir)] + (['--review-mesh'] if review else []),
     )
 
     def _then(step_name, next_action):
@@ -85,16 +87,18 @@ def _launch_setup(context, *args, **kwargs):
         LogInfo(msg=f'stereo_offline_pipeline: object={object_name} run_dir={run_dir}'),
         capture,
         RegisterEventHandler(OnProcessExit(target_action=capture, on_exit=_then('capture', reconstruct))),
-        RegisterEventHandler(OnProcessExit(target_action=reconstruct, on_exit=_then('reconstruct', report))),
+        RegisterEventHandler(OnProcessExit(target_action=reconstruct, on_exit=_then('reconstruct', report if review else contacts))),
         RegisterEventHandler(OnProcessExit(target_action=report, on_exit=_then('report', contacts))),
         RegisterEventHandler(OnProcessExit(target_action=contacts, on_exit=lambda event, context: [LogInfo(msg=(
             f'stereo_offline_pipeline: done for {object_name} (contacts exit {event.returncode}). '
-            f'See {run_dir}/recon/README.md and {run_dir}/contacts/README.md'))])),
+            f'See {run_dir}/contacts/README.md'))])),
     ]
 
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument('review', default_value='false',
+                              description='Build optional meshes and reconstruction reports; MVP default is off.'),
         DeclareLaunchArgument(
             'object_name',
             description='Object label; outputs go under runtime_logs/<object_name>/<timestamp>/.',
@@ -121,9 +125,9 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            'cam2_z_offset_mm', default_value='0.0',
-            description='Extra base-Z shift (mm) for cam2 points on top of its TF; bringup_cams already '
-                        'applies its own cam2_z_offset_mm (default 6) to the TF itself.'),
+            'cam2_z_offset_mm', default_value='auto',
+            description='auto ensures total +4 mm relative to audited calibration, accounting for the captured TF; '
+                        'a number explicitly adds that many mm during reconstruction.'),
         DeclareLaunchArgument(
             'cam2_cross_checks', default_value='false',
             description='Re-enable dropping cam2 points that cam1/cam3 corroborate or conflict with.'),

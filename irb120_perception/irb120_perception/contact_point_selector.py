@@ -18,9 +18,10 @@ RELAXED_PULL_EPSILON = 0.5
 TOPMOST_BAND = 0.02  # press fallback: use points this close to the highest point
 
 
-def estimate_normals(points, radius=0.025, neighbors=24):
+def estimate_normals(points, radius=0.025, neighbors=24, viewpoint=None):
     """Local PCA normals, oriented away from the cloud median (convex assumption).
 
+    When supplied, viewpoint orients normals toward the observing camera.
     Sparse, line-like and strongly nonplanar neighborhoods get NaN normals and
     cannot be selected. The support footprint still uses their positions.
     """
@@ -37,7 +38,7 @@ def estimate_normals(points, radius=0.025, neighbors=24):
         if values[1] <= 1e-12 or values[0] / values.sum() > 0.12:
             continue
         normal = vectors[:, 0]
-        outward = normal @ (points[i] - center)
+        outward = normal @ (points[i] - center if viewpoint is None else viewpoint - points[i])
         if abs(outward) < 1e-8:
             continue
         normals[i] = normal if outward > 0 else -normal
@@ -237,8 +238,14 @@ def select_contact_points(clouds, *, normals=None,
                           forward_max_lateral=0.030,
                           experimental_press_filter=None,
                           press_pivot_override=None,
-                          diagnostics=None):
+                          diagnostics=None,
+                          press_candidates=None, press_viewpoint=None):
     """Return three independent selections and their estimated pivot geometry.
+
+    press_candidates: optional observed (N,3) subset of clouds. Only these points
+    and their local normals are used for press; pivots and other modes use clouds.
+    press_viewpoint: optional base-frame camera origin for orienting subset normals.
+    An empty subset yields no press rather than a merged-cloud fallback.
 
     clouds: an (N,3) array or list of arrays already registered in one frame.
     normals: optional outward (N,3) normals in the concatenated input order.
@@ -393,6 +400,26 @@ def select_contact_points(clouds, *, normals=None,
             geometry['tangent'] = np.array([press_pivot_override - .04*geometry['axis'],
                                             press_pivot_override + .04*geometry['axis']])
             geometry['pivot_source'] = 'rgb_sam_override'
+        if mode == 'press' and press_candidates is not None:
+            subset = np.asarray(press_candidates, dtype=float)
+            if subset.ndim != 2 or subset.shape[1] != 3 or not np.isfinite(subset).all():
+                raise ValueError('press_candidates must be finite (N,3) observations')
+            subset = np.unique(subset, axis=0)
+            if len(subset) < 6:
+                result[mode] = missing('Need at least six distinct press-camera observations')
+                continue
+            distances, subset_ids = cKDTree(points).query(subset)
+            if np.any(distances > 1e-9):
+                raise ValueError('press_candidates must be a subset of the object cloud')
+            # Keep the full observed cloud for footprint/pivot geometry. Estimate
+            # press normals from this camera alone, avoiding mixed surface layers.
+            normals = np.full_like(points, np.nan)
+            viewpoint = None if press_viewpoint is None else np.asarray(press_viewpoint, dtype=float)
+            if viewpoint is not None and (viewpoint.shape != (3,) or not np.isfinite(viewpoint).all()):
+                raise ValueError('press_viewpoint must be a finite (3,) camera origin')
+            normals[subset_ids] = estimate_normals(subset, radius=normal_radius, viewpoint=viewpoint)
+            centers = points + finger_radius * normals
+            clear = np.isfinite(normals).all(axis=1) & (centers[:, 2] >= floor)
         direction = geometry['direction']
         # Press: if nothing passes, retry once with a looser pull tolerance so a
         # rounded top (normals tilted toward the pull direction) still yields a contact.
@@ -441,6 +468,10 @@ def select_contact_points(clouds, *, normals=None,
         topmost = False
         if not len(ids) and mode == 'press' and experimental_press_filter is None:
             band = points[:, 2] >= points[:, 2].max() - TOPMOST_BAND
+            if press_candidates is not None:
+                allowed = np.zeros(len(points), dtype=bool)
+                allowed[subset_ids] = True
+                band &= allowed
             # Only with evidence of a cap (some known upward-leaning normal up there); NaN
             # normals among them are then tolerated, clearly vertical ones (a side wall) are not.
             cap = band & (normals[:, 2] >= 0.3)

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import numpy as np
 
+from irb120_perception.snapshot_layout import snapshot_file
+
 
 def reconstruct_view(depth_mm, info, xy_bounds, z_bounds):
     depth = np.asarray(depth_mm, dtype=float) / 1000.
@@ -57,7 +59,7 @@ def record_support_scene(folder, *, xy_padding=.04, table_z=-.021, out_dir=None)
     z_bounds = [table_z-.02, max(float(obj[:, 2].max())+.02, table_z+.02)]
     points, pixels, ids, views = [], [], [], []
     for number, cam in enumerate(('cam1', 'cam2', 'cam3'), start=1):
-        info_path, depth_path = folder/f'{cam}_camera_info.json', folder/f'{cam}_aligned_depth.npz'
+        info_path, depth_path = snapshot_file(folder, f'{cam}_camera_info.json'), snapshot_file(folder, f'{cam}_aligned_depth.npz')
         view = dict(camera=cam, camera_id=number, depth_file=depth_path.name, calibration_file=info_path.name)
         try:
             info = json.loads(info_path.read_text())

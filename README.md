@@ -84,7 +84,7 @@ Optionally add those two lines to `~/.bashrc`.
 |---|---|
 | T1: RWS, once per session | `ros2 launch irb120_control abb_rws.launch.py` |
 | T2: hardware/controller stack, once per session | `ros2 launch irb120_control abb_control.launch.py` |
-| T3: MoveIt, Servo, cameras and recording | `ros2 launch irb120_control bringup_stack.launch.py` |
+| T3: MoveIt, Servo, cameras, recording and the warm FFS worker | `ros2 launch irb120_control bringup_stack.launch.py` |
 | Perception or interaction | `ros2 run irb120_control episode snapshot OBJECT` or `ros2 run irb120_control run_pipeline OBJECT` |
 
 Keep T1/T2 running when restarting T3. For calibration, use

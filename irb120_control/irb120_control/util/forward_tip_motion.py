@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from irb120_control.util.push_geometry import (
     APPROACH_CLEARANCE, BALL_RADIUS, OBJECT_PADDING,
@@ -13,38 +12,43 @@ from irb120_control.util.push_geometry import (
 
 TIP_STANDOFF = .02  # ball-centre standoff; tip_targets raises it if needed to clear the padded box
 
-# A handful of isolated stray points (sensor noise, a stereo mismatch) can otherwise blow the
-# padded box out by hundreds of mm, forcing a needlessly (sometimes absurdly) distant pre-tip
-# approach. Genuine object surface is never isolated -- it has many nearby neighbors, since it's
-# a surface, not speckle -- so a point only counts toward the box if it isn't alone. This can
-# only make the computed box smaller/tighter, never larger, so it can only reduce a clearance
-# that was inflated by noise; it never invents clearance the (dense, real) geometry doesn't ask
-# for in the first place.
-_ROBUST_BOUNDS_RADIUS_M = .01     # neighbor search radius: well under real surfaces' point spacing
-_ROBUST_BOUNDS_MIN_NEIGHBORS = 2  # including itself; isolated noise measured at 1, real surface >=4
-                                   # at this radius on an actual capture -- wide, clean separation
+SLAB_M = .02          # height of each slice of the object collision geometry
+TABLE_Z = -.021       # table top in base_link (object_obstacle.TABLE_Z)
 
 
-def _robust_bounds(cloud):
-    """(min, max) of `cloud` ignoring points with fewer than _ROBUST_BOUNDS_MIN_NEIGHBORS other
-    points within _ROBUST_BOUNDS_RADIUS_M -- see the module comment above. Falls back to the
-    plain min/max when there are too few points to tell noise from signal (also keeps this a
-    no-op on small/synthetic clouds, e.g. in tests)."""
-    if len(cloud) < _ROBUST_BOUNDS_MIN_NEIGHBORS * 4:
-        return cloud.min(axis=0), cloud.max(axis=0)
-    counts = cKDTree(cloud).query_ball_point(cloud, _ROBUST_BOUNDS_RADIUS_M, return_length=True)
-    dense = cloud[counts >= _ROBUST_BOUNDS_MIN_NEIGHBORS]
-    if not len(dense):
-        return cloud.min(axis=0), cloud.max(axis=0)
-    return dense.min(axis=0), dense.max(axis=0)
+def slab_boxes(cloud, slab=SLAB_M, padding=OBJECT_PADDING, table_z=TABLE_Z):
+    """The object as a stack of padded boxes, one per `slab`-high slice of its (dense) cloud:
+    [(lo, hi), ...] in base_link. Each box is padded by `padding` on every side (into the
+    neighbouring slices too) and the lowest reaches the table. Unlike one bounding box, a
+    narrow top over a wide base (a drill's head over its grip) stays narrow."""
+    cloud = np.asarray(cloud, dtype=float)
+    z0 = min(float(cloud[:, 2].min()), table_z)
+    edges = np.arange(z0, float(cloud[:, 2].max()) + slab, slab)
+    boxes = []
+    for zlo, zhi in zip(edges[:-1], edges[1:]):
+        part = cloud[(cloud[:, 2] >= zlo) & (cloud[:, 2] < zhi)]
+        if not len(part):
+            continue
+        lo, hi = part.min(axis=0) - padding, part.max(axis=0) + padding
+        lo[2], hi[2] = max(zlo - padding, table_z), zhi + padding
+        boxes.append((lo, hi))
+    boxes[0][0][2] = table_z
+    return boxes
 
 
-def tip_targets(contact, xyz, standoff=0.04):
-    """Return ball, edge-normal direction, pivot and a box-clearing pre-tip point.
+def tip_targets(contact, xyz, standoff=0.04, clearance='slabs'):
+    """Return ball, edge-normal direction, pivot and a pre-tip point.
 
     All inputs/outputs are in base_link, metres. The saved geometry direction
     chooses the sign of the horizontal normal to the pivot axis, not the local
-    face normal (which may be sloped). Clear the entire padded approach box.
+    face normal (which may be sloped).
+
+    clearance='slabs' (default): the pre-tip ball clears the padded slab_boxes() the
+    straight approach at the ball's height actually passes through; the approach then
+    plans against those same boxes (object_obstacle(..., slabs=True)), so MoveIt still
+    checks the rest of the tool at that pose. clearance='box': clear the object's whole
+    padded bounding box (the fallback when that plan fails), e.g. a drill's grip far
+    below a contact on its head puts the pre-tip ~90 mm back instead of ~30 mm.
     """
     if not contact.get('available'):
         raise ValueError(f"No forward-tip contact: {contact.get('reason')}")
@@ -78,20 +82,36 @@ def tip_targets(contact, xyz, standoff=0.04):
         raise ValueError('Edge-normal motion does not push into the selected face')
     if (pivot - ball) @ direction <= 0:
         raise ValueError('Forward-tip contact must be behind its tipping edge')
-    lo, hi = _robust_bounds(cloud)
-    lo = lo - OBJECT_PADDING
-    hi = hi + OBJECT_PADDING
-    # Minimum projection of the actual axis-aligned collision box, not just
-    # the cloud. This also handles diagonally oriented tipping edges.
-    box_min = np.where(direction >= 0, lo, hi) @ direction
-    clearance = (ball @ direction - box_min) + BALL_RADIUS + APPROACH_CLEARANCE
-    pre = ball - max(standoff, float(clearance)) * direction
+    if clearance == 'box':
+        lo, hi = cloud.min(axis=0), cloud.max(axis=0)
+        boxes = [(lo - OBJECT_PADDING, hi + OBJECT_PADDING)]
+    elif clearance == 'slabs':
+        # Only boxes the ball's approach corridor (its radius plus clearance, at the
+        # ball's height and lateral position) passes through.
+        reach = BALL_RADIUS + APPROACH_CLEARANCE
+        lateral = np.cross([0., 0., 1.], direction)
+        boxes = []
+        for lo, hi in slab_boxes(cloud):
+            corners = np.array([[x, y, 0.] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])])
+            side = corners @ lateral
+            if (lo[2] < ball[2] + reach and hi[2] > ball[2] - reach
+                    and side.min() < ball @ lateral + reach and side.max() > ball @ lateral - reach):
+                boxes.append((lo, hi))
+    else:
+        raise ValueError(f'Unknown pre-tip clearance {clearance!r}')
+    # Minimum projection of each axis-aligned collision box, not just the cloud.
+    # This also handles diagonally oriented tipping edges.
+    box_min = min((np.where(direction >= 0, lo, hi) @ direction for lo, hi in boxes),
+                  default=ball @ direction)
+    needed = (ball @ direction - box_min) + BALL_RADIUS + APPROACH_CLEARANCE
+    pre = ball - max(standoff, float(needed)) * direction
     return ball, direction, pivot, pre
 
 
 @dataclass(frozen=True)
 class TipConfig:
-    speed: float = .005
+    speed: float = .005            # LOAD/TIP/PROBE/RETURN
+    seek_speed: float = .0075      # SEEK only: 1.5x speed, free air until the first touch
     max_travel: float = .080       # from first confirmed contact
     reverse_fraction: float = .10
     force_limit: float = 20.
@@ -108,7 +128,7 @@ class TipConfig:
     follow_fraction: float = .30  # a tilted object keeps this much of its force on the finger backing off
 
     def __post_init__(self):
-        values = (self.speed, self.max_travel, self.force_limit, self.contact_force,
+        values = (self.speed, self.seek_speed, self.max_travel, self.force_limit, self.contact_force,
                   self.tip_force, self.load_travel, self.min_tip_travel, self.contact_overrun,
                   self.position_tolerance, self.phase_timeout, self.probe_travel,
                   self.probe_distance)
@@ -281,4 +301,4 @@ class TipMotion:
             self.slide_travel = p['start'] - self.contact_progress
             self.reverse(now, 'slide')
             return 0.
-        return c.speed
+        return c.seek_speed if self.state == 'SEEK' else c.speed

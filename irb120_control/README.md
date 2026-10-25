@@ -25,7 +25,12 @@ The pipeline's `--tip auto|press|forward`, `--order tip-push|push-tip`,
 `--force-ref`, `--quality`, `--trials`, and `--auto` options remain available.
 `--auto` skips interaction gates, so use it only under the existing reviewed
 experiment protocol. FFS adds capture/reconstruction latency; each perceive is
-fresh rather than a fast DBSCAN registration update.
+fresh rather than a fast DBSCAN registration update. The MVP runs capture,
+reconstruction and contacts, without routine meshes, HTML reconstruction reports
+or press candidate diagnostics. One cleaned, versioned object cloud is shared by
+contacts and all motion primitives. Older unvalidated snapshots trigger fresh
+perception; unchanged-scene planning retries reuse a valid snapshot. Restart the
+warm FFS worker after updating its reconstruction code.
 
 A reviewed standalone FFS run can be imported without recapture:
 
@@ -41,14 +46,20 @@ used before an episode motion cannot be imported again after that motion.
 Import is not MoveIt or hardware-execution approval.
 
 ```
-<log root>/<object>/episodes/<timestamp>/
+<log root>/<object>/<timestamp>/
   episode.json               source revision, stages, events, outcomes
-  ffs_runs/<timestamp>/      raw capture, reconstruction, contact report, step logs
-  00_perceive/               contacts.json, object_cloud.npz, snapshot.json,
-                             calibrated images/depth, review graphics, source identity
+  00_perceive/               contacts.json, object_cloud.npz, snapshot.json, review graphics
+    capture/                 raw stereo + RGB (camN.npz), capture.json (source identity)
+    recon/                   FFS reconstruction: shared cloud, calibrated depth/images, masks
+    logs/                    one log per FFS step
   01_press_pull_tip/         wrench/pose NPZ, metadata, videos and frame stamps
   02_perceive/               fresh FFS measurement after motion
 ```
+
+Every file is written once (2026-10-24): the FFS run is written into its perceive
+stage, not copied there, and motion stages keep no `most_recent.npz`. Episodes
+recorded earlier sit in `<object>/episodes/<timestamp>/` with copies at the stage
+root; readers find both (`irb120_perception.snapshot_layout`).
 
 Contact geometry is invalid after motion, including failed motion that may have
 moved the object. Failed snapshots remain failed and cannot authorize a new
@@ -90,7 +101,15 @@ The official root defaults to `$IRB120_OFFICIAL_ROOT` or
 condensing documentation or replaying reconstruction.
 
 `episode note`, `episode outcome`, and `episode show` maintain episode annotations.
-Estimation is available through `estimate_params`; paper/result workflows live in
+Estimate one episode's tip stages (object read from `episode.json`, scored against its
+`irb120_models` configuration; output in `<episode>/estimation/`):
+
+```bash
+ros2 run irb120_control estimate_params runtime_logs/drill/20261024_180728
+```
+
+Add `--vision` for the camera tilt cross-check. Other modes (`--primitive`) remain for
+batch suites. Paper/result workflows live in
 [analysis](../analysis/README.md). Ground-truth/reference definitions belong to
 [irb120_models](../irb120_models/README.md), controller settings to
 `config/object_control.yaml`, and active F/T calibration to `config/ft_calibration.json`.

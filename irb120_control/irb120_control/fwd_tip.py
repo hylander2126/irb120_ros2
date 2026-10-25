@@ -184,13 +184,19 @@ class ForwardTip(Node):
             self._ft_log.append([self._now_s(), *logged, *ft_pose, stamp, tf_stamp])
 
     def set_targets(self, contacts, cloud):
-        ball, direction, pivot, pre = tip_targets(contacts.get('forward_tip') or {}, cloud, STANDOFF_M)
+        contact = contacts.get('forward_tip') or {}
+        ball, direction, pivot, pre = tip_targets(contact, cloud, STANDOFF_M)
+        # Fallback pre-pose clearing the whole bounding box, if the close one does not plan.
+        box_pre = tip_targets(contact, cloud, STANDOFF_M, clearance='box')[3]
         transform = lookup(self, BASE_FRAME, SERVO_FRAME, timeout_sec=10.)
         if transform is None:
             raise ValueError('No world <- base_link transform')
         rotation, translation = transform
         self._world_from_servo = rotation
-        self._ball, self._pivot, self._pre = [rotation @ p + translation for p in (ball, pivot, pre)]
+        self._ball, self._pivot, self._pre, self._box_pre = [
+            rotation @ p + translation for p in (ball, pivot, pre, box_pre)]
+        self.pre_clearance = 'slabs'
+
         self._direction = rotation @ direction
         if abs(self._direction[2]) > 1e-3:
             raise ValueError('Tipping-edge normal is not horizontal in world')
@@ -211,6 +217,23 @@ class ForwardTip(Node):
         return result is not None and result.success
 
     def approach(self):
+        """To the close pre-pose against the sliced object; if that does not plan (e.g. the
+        F/T sensor would sit in a lower, wider slice), to the whole-box pre-pose against the
+        whole box, as before."""
+        diagnostics = {}
+        with object_obstacle(self, self._object_xyz, slabs=True):
+            if plan_and_execute_pose_goal(
+                    self, self._move_group_client, base_frame=BASE_FRAME, ee_link=EE_LINK,
+                    target_position=self._pre.tolist(), target_orientation=TIP_ORIENTATION,
+                    velocity_scale=.1, acceleration_scale=.1, diagnostics=diagnostics):
+                return True
+        # Only a plan that failed falls back; a move that was attempted and failed does not.
+        if 'execution_success' in diagnostics or np.linalg.norm(self._box_pre - self._pre) < 1e-4:
+            return False
+        self.get_logger().warn(
+            f'Close pre-tip {self._pre.round(4)} did not plan; using the whole-box pre-tip '
+            f'{self._box_pre.round(4)} ({1000 * np.linalg.norm(self._box_pre - self._ball):.0f} mm back)')
+        self._pre, self.pre_clearance = self._box_pre, 'box'
         with object_obstacle(self, self._object_xyz):
             return plan_and_execute_pose_goal(
                 self, self._move_group_client, base_frame=BASE_FRAME, ee_link=EE_LINK,
@@ -357,7 +380,7 @@ def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
     parser.add_argument('object', help='Object/episode label; no ground-truth parameters required')
     parser.add_argument('--episode', default='new', help='new, last, or episode path')
     parser.add_argument('--quality', choices=['h264', 'lossless'], default='h264')
-    parser.add_argument('--speed', type=float, default=.005, help='Forward/return speed in m/s')
+    parser.add_argument('--speed', type=float, default=.005, help='Load/tip/return speed in m/s; the contact seek runs at 1.5x')
     parser.add_argument('--max-travel', type=float, default=.080, help='Travel cap after contact, metres')
     parser.add_argument('--reverse-fraction', type=float, default=.10, help='Fraction of peak pivot torque' if primitive == 'fwd_arc' else 'Fraction of peak axial force')
     parser.add_argument('--force-limit', type=float, default=20., help='Resultant force stop limit, N')
@@ -369,7 +392,7 @@ def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
     if primitive == 'fwd_arc' and (not math.isfinite(parsed.max_angle) or not 0 < parsed.max_angle <= 90):
         parser.error('--max-angle must be in (0, 90] degrees')
     try:
-        config = TipConfig(speed=parsed.speed, max_travel=parsed.max_travel,
+        config = TipConfig(speed=parsed.speed, seek_speed=1.5 * parsed.speed, max_travel=parsed.max_travel,
                            reverse_fraction=parsed.reverse_fraction, force_limit=parsed.force_limit,
                            tip_force=parsed.tip_force)
     except ValueError as exc:
@@ -432,7 +455,8 @@ def main(args=None, *, node_type=ForwardTip, primitive="fwd_tip"):
                     slide_force_n=node.motion.slide_force if node.motion else None,
                     slide_travel_m=node.motion.slide_travel if node.motion else None,
                     slide_probe=node.motion.probe if node.motion else None,
-                    pre_tip=vector(node._pre), direction=vector(node._direction),
+                    pre_tip=vector(node._pre), pre_tip_clearance=getattr(node, 'pre_clearance', None),
+                    direction=vector(node._direction),
                     commanded_pivot=vector(node._pivot),
                     home_verification=getattr(node, '_last_joint_goal_verification', None))
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')

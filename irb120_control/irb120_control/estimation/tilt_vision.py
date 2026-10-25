@@ -76,8 +76,9 @@ def find_assets(log: TipLog, camera: str) -> dict | None:
     if not perceive:
         return None
     pd = perceive[-1]
-    info_p, depth_p, cloud_p = (pd / f"{camera}_camera_info.json", pd / f"{camera}_aligned_depth.npz",
-                                pd / "object_cloud.npz")
+    from irb120_perception.snapshot_layout import snapshot_file
+    info_p, depth_p, cloud_p = (snapshot_file(pd, f"{camera}_camera_info.json"),
+                                snapshot_file(pd, f"{camera}_aligned_depth.npz"), pd / "object_cloud.npz")
     tag = "" if camera == "cam1" else f"_{camera}"
     videos = sorted(tip_dir.glob(f"camera_hull_overlay{tag}_2*.mp4")) + sorted(
         tip_dir.glob(f"camera_hull_overlay{tag}_2*.avi"))

@@ -120,7 +120,7 @@ def main():
         vision_dir = out / 'vision_cache'; vision_dir.mkdir(exist_ok=True)
         n_vision = seed_vision_cache(vision_dir)
     root = _paths.DEV_DATA
-    episodes = [e for s in SETS for e in sorted((root / s).glob('**/episodes/*/episode.json'))]
+    episodes = [e for s in SETS for e in sorted((root / s).glob('**/episode.json'))]
     sig_reg = mp.pooled_registration(mp.scene_folders(episodes))
     rows, endpoints, failures = [], [], []
     for ep_file in episodes:

@@ -61,24 +61,37 @@ configurations:
     mesh: meshes/teal_cylinder.gltf  # bottle: r 45 mm to z 85, shoulder to r 25 at z 110, neck to 135; origin bottom centre
     mass: 0.203
     # CoM on the axis (Steven, 2026-10-21). Height not measured: uniform solid 54.4 mm, uniform shell 57.3 mm.
-    com_obj: [0.0450, 0.0000, null]
+    com_obj: [0.045, 0.000, null]
     base_w: 0.0900
     support_distances: {press_pull: 0.0450, forward: 0.0450}
     uncertainty:
       support_distances: {press_pull: null, forward: null}
       com_obj: [null, null, null]
-    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/teal_cylinder/episodes/20261020_183954/00_perceive --name teal_cylinder --com 44 0 nan"
+    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/teal_cylinder/20261020_183954/00_perceive --name teal_cylinder --com 44 0 nan"
     source: null
+  
   orange_robot:
     placement: "TODO: which face points at the robot (marked on the object)"
     mass: 0.226
-    com_obj: [0.0350, 0.0050, null]
+    com_obj: [0.035, 0.0050, null]
     base_w: null  # cloud footprint here: 113 mm; use calipers
     support_distances: {press_pull: 0.0350, forward: null}
     uncertainty:
       support_distances: {press_pull: null, forward: null}
       com_obj: [null, null, null]
-    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/orange_robot/episodes/20261020_192830/00_perceive --name orange_robot --com 35 5 nan"
+    measurement: "frame checked with: object_models frame /home/hylander/Documents/irb120_ws/runtime_logs/orange_robot/20261020_192830/00_perceive --name orange_robot --com 35 5 nan"
+    source: null
+
+  drill:
+    placement: "TODO: which face points at the robot (marked on the object)"
+    mass: 1.490
+    com_obj: [0.039, 0.000, null]
+    base_w: 0.078  # cloud footprint here: 84 mm; use calipers
+    support_distances: {press_pull: 0.0390, forward: null}
+    uncertainty:
+      support_distances: {press_pull: null, forward: null}
+      com_obj: [null, null, null]
+    measurement: "frame checked with: irb120_models frame ___drill most recent perceive00 ___"
     source: null
 
   flashlight:
@@ -94,6 +107,7 @@ configurations:
       com_obj: [null, null, null]
     measurement: "previous paper, measured against the tip edge"
     source: "objects/flashlight/flashlight.yaml (recorded), migrated from object_params.json 2026-10-09"
+  
   monitor:
     placement: "screen faces the robot; forward tip about the far base edge (previous paper's tip edge)"
     mass: 5.04

@@ -1,4 +1,7 @@
-"""ROS-free SAM-first snapshot analysis. No production publishers or control calls.
+"""ROS-free SAM segmentation and cloud fusion used by the active FFS pipeline.
+
+The historical module name predates production integration; it is not a runtime
+shadow-mode switch. This module has no publishers or direct control calls.
 
 Single stationary target in the workspace, arm clear (or explicit robot masks).
 Joint mode selects one prompt-consistent RGB mask; legacy automatic/guided modes
@@ -219,7 +222,7 @@ def _keep_dense(points, radius, min_neighbors):
     """Boolean mask: True for a point with >= min_neighbors other `points` (including itself)
     within `radius` of it. Correlated depth noise rarely forms as dense a neighborhood as real,
     densely-sampled surface -- same reasoning as irb120_control's
-    forward_tip_motion._robust_bounds. min_neighbors<=0 or an empty input keeps everything."""
+    object_cloud.prepare_object_cloud. min_neighbors<=0 or an empty input keeps everything."""
     if min_neighbors <= 0 or not len(points):
         return np.ones(len(points), bool)
     counts = cKDTree(points).query_ball_point(points, radius, return_length=True)
@@ -256,6 +259,7 @@ def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_
         normals[v.camera] = n
     xyz, source = [], []
     noise_filtered = {}
+    result_masks = {key: value.copy() for key, value in masks.items()}
     points = geometry['cam2'][masks['cam2']]
     ns = normals['cam2'][masks['cam2']]
     suppressed = np.zeros(len(points), bool)
@@ -265,6 +269,7 @@ def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_
             continue
         preferred = geometry[v.camera][masks[v.camera]]
         dense = _keep_dense(preferred, noise_radius_m, noise_min_neighbors)
+        result_masks[v.camera][masks[v.camera]] = dense
         noise_filtered[v.camera] = int((~dense).sum())
         preferred = preferred[dense]
         xyz.append(preferred); source.append(np.full(len(preferred), int(v.camera[-1]), np.uint8))
@@ -288,7 +293,6 @@ def priority_merge(views, masks, tolerance=.004, noise_radius_m=.009, noise_min_
     noise_filtered['cam2'] = int((~dense_cam2).sum())
     keep[np.flatnonzero(keep)[~dense_cam2]] = False
     xyz.append(points[keep]); source.append(np.full(keep.sum(), 2, np.uint8))
-    result_masks = {key: value.copy() for key, value in masks.items()}
     result_masks['cam2'][masks['cam2']] = keep
     return np.concatenate(xyz), np.concatenate(source), result_masks, dict(
         corroborating_cam2=int(suppressed.sum()), conflicting_cam2=int(conflicts.sum()),
@@ -357,7 +361,7 @@ def protected_meshes(views, masks, output, voxel=.003, gap_guard_voxels=6,
     pixel survives only if it has at least noise_min_neighbors other surviving pixels of the SAME
     camera within noise_radius_voxels*voxel (see _keep_dense/_drop_isolated_depth; same reasoning
     as priority_merge's copy of this filter and irb120_control's
-    forward_tip_motion._robust_bounds). This is strictly per-camera -- it never compares across
+    object_cloud.prepare_object_cloud). This is strictly per-camera -- it never compares across
     cameras, so it never interacts with the cross-camera gap guard above -- but it does mean
     cam1/cam3 ("preferred") no longer pass through completely untouched: a correlated-noise clump
     that cam1 or cam3 themselves measured is now dropped before it's ever trusted, same as cam2's.

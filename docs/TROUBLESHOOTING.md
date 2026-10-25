@@ -30,7 +30,7 @@ and ChArUco model; production retains the +/-60 degree joint-6 cable window.
 
 ## Perception failure
 
-FFS snapshots leave a failed perceive stage and per-step logs under `ffs_runs/`.
+FFS snapshots leave a failed perceive stage with per-step logs in its `logs/` folder.
 Check camera stream/profile, interpreter/checkpoint availability, native stereo
 pair timestamps, and reconstruction/contact errors. There is no DBSCAN fallback.
 Do not reuse a pre-motion capture to work around a failed fresh snapshot.

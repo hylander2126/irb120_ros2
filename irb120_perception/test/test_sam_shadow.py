@@ -21,11 +21,13 @@ def test_workspace_clips_pixels_and_removes_robot():
 def test_exact_preferred_samples_and_cam2_corroboration():
     views = [view('cam1'), view('cam2'), view('cam3')]
     masks = {v.camera: np.ones((9, 9), bool) for v in views}
-    points, ids, _, report = priority_merge(views, masks)
+    points, ids, retained, report = priority_merge(views, masks)
     assert report['corroborating_cam2'] == 49  # edges have unreliable normals
     for v in (views[0], views[2]):
         np.testing.assert_array_equal(points[ids == int(v.camera[-1])], v.geometry().reshape(-1, 3))
     assert masks['cam2'].all()  # input not mutated
+    for cam in ('cam1', 'cam2', 'cam3'):
+        assert retained[cam].sum() == (ids == int(cam[-1])).sum()
 
 
 def test_occluded_cam2_is_not_rejected():
@@ -65,8 +67,10 @@ def test_priority_merge_drops_isolated_cam1_cam3_noise():
     masks = {v.camera: np.ones((9, 9), bool) for v in views}
     outlier_xyz = views[0].geometry()[0, 0].copy()
     views[0].depth[0, 0] = 5.  # one pixel far from the rest of cam1's dense flat plane
-    points, ids, _, report = priority_merge(views, masks)
+    points, ids, retained, report = priority_merge(views, masks)
     assert report['noise_filtered'] == {'cam1': 1, 'cam3': 0, 'cam2': 0}
+    assert not retained['cam1'][0, 0]
+    assert retained['cam1'].sum() == (ids == 1).sum()
     cam1_points = points[ids == 1]
     assert len(cam1_points) == 9*9 - 1
     assert not np.any(np.all(np.isclose(cam1_points, outlier_xyz), axis=1))

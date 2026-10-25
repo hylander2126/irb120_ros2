@@ -4,6 +4,21 @@ import pytest
 from irb120_control.util.push_geometry import push_approach, BALL_RADIUS, OBJECT_PADDING
 
 
+def test_shared_cloud_prevents_stray_point_from_distorting_push():
+    from irb120_perception.object_cloud import prepare_object_cloud
+    surface = np.array([[.602, 0., .002], [.605, 0., .002],
+                            [.687, 0., .20], [.693, 0., .20]])
+    raw = np.vstack((surface, [.17933206, -.0742159, .1351504]))
+    cloud, audit = prepare_object_cloud(raw, np.full(len(raw), 3))
+    clean = cloud['xyz']
+    assert audit['removed_points'] == 1
+    ball = np.array([.59290537, 0., .00229086])
+    pre, travel = push_approach(ball, clean, .04, .10)
+    assert pre[0] == pytest.approx(ball[0] - .04)
+    assert travel == pytest.approx(.10)
+    assert pre[0] + BALL_RADIUS + .01 <= clean[:, 0].min() - OBJECT_PADDING
+
+
 def test_recessed_contact_clears_box_preserving_endpoint():
     ball = np.array([0.649025147, 0.01433493, 0.06046466])
     xyz = np.array([[0.63262463, -0.043, -0.009], [0.70468605, 0.014, 0.177]])

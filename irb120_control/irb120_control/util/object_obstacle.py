@@ -8,7 +8,9 @@ collisions and would stop at the box. Use it as
         ok = plan_and_execute_pose_goal(...)
 
 The box is the cloud's axis-aligned bounds in base_link, grown by PADDING and
-extended down to the table. The push approach clears the full box by 10 mm beyond the ball radius.
+extended down to the table. slabs=True instead adds one padded box per 20 mm slice
+(forward_tip_motion.slab_boxes), so the forward-tip pre-pose can sit beside a narrow
+part above a wide one while MoveIt still checks the whole arm against the object. The push approach clears the full box by 10 mm beyond the ball radius.
 The press approach uses SQUASH_STANDOFF above its selected contact.
 
 After a push the object is somewhere between where it was and PUSH_DISTANCE
@@ -55,22 +57,32 @@ def box_bounds(xyz, extend_x: float = 0.0):
 
 
 @contextmanager
-def object_obstacle(node, xyz, extend_x: float = 0.0):
-    """Add the object's padded bounding box (optionally stretched by extend_x in +X)
-    to the planning scene for the duration of the block."""
-    lo, hi = box_bounds(xyz, extend_x)
+def object_obstacle(node, xyz, extend_x: float = 0.0, slabs: bool = False):
+    """Add the object's padded bounding box (optionally stretched by extend_x in +X), or
+    with slabs=True its stack of per-slice boxes, to the planning scene for the block."""
+    if slabs:
+        from irb120_control.util.forward_tip_motion import slab_boxes
+        boxes = slab_boxes(np.asarray(xyz, dtype=float))
+        if extend_x:
+            for _, hi in boxes:
+                hi[0] += extend_x
+    else:
+        boxes = [box_bounds(xyz, extend_x)]
     obj = CollisionObject()
     obj.header.frame_id = FRAME
     obj.id = OBJECT_ID
     obj.operation = CollisionObject.ADD
-    obj.primitives = [SolidPrimitive(type=SolidPrimitive.BOX, dimensions=(hi - lo).tolist())]
-    pose = Pose()
-    pose.position.x, pose.position.y, pose.position.z = ((lo + hi) / 2).tolist()
-    pose.orientation.w = 1.0
-    obj.primitive_poses = [pose]
+    for lo, hi in boxes:
+        obj.primitives.append(SolidPrimitive(type=SolidPrimitive.BOX, dimensions=(hi - lo).tolist()))
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = ((lo + hi) / 2).tolist()
+        pose.orientation.w = 1.0
+        obj.primitive_poses.append(pose)
     if not _apply(node, obj):
         raise RuntimeError("could not add the object to the planning scene -- not moving")
-    node.get_logger().info(f"Object collision box {np.round(lo, 3)} .. {np.round(hi, 3)}")
+    lo, hi = np.min([b[0] for b in boxes], axis=0), np.max([b[1] for b in boxes], axis=0)
+    node.get_logger().info(f"Object collision {'slabs' if slabs else 'box'} ({len(boxes)}) "
+                           f"{np.round(lo, 3)} .. {np.round(hi, 3)}")
     try:
         yield
     finally:

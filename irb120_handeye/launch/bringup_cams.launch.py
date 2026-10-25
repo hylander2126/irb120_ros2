@@ -139,9 +139,9 @@ def generate_launch_description() -> LaunchDescription:
             "clip_distance", default_value="1.4",
             description="Maximum depth in metres; a negative value disables this software cutoff."),
         DeclareLaunchArgument(
-            "cam2_z_offset_mm", default_value="6.0",
-            description="Raises cam2's static TF in base Z (mm). cam2's FFS depth reads about 6 mm deep "
-                        "at typical object-top height (drill_test3-6); 0 publishes the raw calibration."),
+            "cam2_z_offset_mm", default_value="4.0",
+            description="Raises cam2's static TF in base Z (mm). cam2's FFS depth reads about 4 mm deep with the current calibration "
+                        "at tested object-top heights; 0 publishes the raw calibration. Capture audits the actual TF."),
         DeclareLaunchArgument(
             "device_timeout", default_value="20.0",
             description="Seconds a driver waits for its camera before exiting with an error; "

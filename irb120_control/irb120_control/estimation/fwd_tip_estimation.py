@@ -68,8 +68,9 @@ FWD_TIP_OBJECTS = tuple(FWD_TIP_GROUND_TRUTH)
 # ==========================================================================================
 def find_fwd_tip_logs(obj: str, root: str) -> list:
     """Forward-tip logs for `obj`, oldest first, under runtime_logs/ or a copied suite dir."""
-    pats = [os.path.join(root, prefix, obj, "episodes", "*", stage, filename)
+    pats = [os.path.join(root, prefix, obj, layout, stage, filename)
             for prefix in ("runtime_logs", "")
+            for layout in ("*", os.path.join("episodes", "*"))
             for stage, filename in (("*_forward_tip", "fwd_tip_2*.npz"),
                                     ("*_forward_arc", "fwd_arc_2*.npz"))]
     return sorted({f for p in pats for f in glob.glob(p)})

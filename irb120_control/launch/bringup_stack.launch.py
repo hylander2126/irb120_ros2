@@ -214,6 +214,16 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_servo')),
     )
 
+    # Warm FFS+SAM worker: loads the models once so each pipeline perceive skips the reload
+    # (perception_snapshot.take_snapshot uses it when running, else falls back to subprocesses).
+    ffs_worker_node = Node(
+        package='irb120_perception',
+        executable='stereo_offline',
+        arguments=['worker'],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('ffs_worker')),
+    )
+
     # Declare the launch arguments
 
     cameras_arg = DeclareLaunchArgument(
@@ -237,12 +247,18 @@ def generate_launch_description():
             'Arrow keys: ↑/↓ = +Z/-Z,  ←/→ = -X/+X.'
         ),
     )
+    ffs_worker_arg = DeclareLaunchArgument(
+        'ffs_worker',
+        default_value='true',
+        description='Start the warm FFS+SAM worker the pipeline uses for perceive steps (needs the GPU).',
+    )
     return LaunchDescription([
         DeclareLaunchArgument("ft_calibration_file", default_value="",
                               description="Reviewed F/T calibration JSON; empty uses config/ft_calibration.json"),
         cameras_arg,
         camera_profile_arg,
         start_servo_arg,
+        ffs_worker_arg,
 
         egm_launch,
 
@@ -257,4 +273,5 @@ def generate_launch_description():
         # viz_netft_delayed,
         servo_node,
         servo_set_twist_mode,
+        ffs_worker_node,
     ])

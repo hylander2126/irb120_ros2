@@ -174,3 +174,17 @@ def test_everyday_family_record_with_table_edge_distances(tmp_path, monkeypatch)
     assert record['initial_support_distances'] == {'press_pull': 0.041, 'forward': 0.0415}
     assert abs(configurations.support_closure(record) - 0.0005) < 1e-12
     assert 'mug_test' in configurations.list_configurations('everyday')
+
+
+def test_episode_reference_keeps_unknowns_unknown():
+    import numpy as np
+    from irb120_models.configurations import load_configuration
+    from irb120_models.experiment_gt import episode_reference
+    record, ref = load_configuration('drill'), episode_reference('drill')
+    near = record['initial_support_distances']['press_pull']
+    assert ref['mass'] == record['mass'] and ref['com_obj'][0] == near
+    # No measured forward distance: base_w - press_pull, and recorded as such.
+    assert record['initial_support_distances']['forward'] is None
+    assert ref['forward_distance_source'] == 'base_w_minus_press_pull'
+    assert abs(ref['com'][0] - (record['base_w'] - near)) < 1e-12
+    assert np.isnan(ref['com'][2]) and np.isnan(ref['theta_deg'])

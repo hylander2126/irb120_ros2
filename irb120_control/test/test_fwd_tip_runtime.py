@@ -57,7 +57,8 @@ def test_tick_commands_edge_normal_with_zero_height_and_rotation():
     node = fake_node()
     methods()['_tick'](node)
     args = node._servo_cmd.publish_twist.call_args.args
-    np.testing.assert_allclose(args, [.003, .004, 0.])
+    # Still seeking contact: the faster seek speed along the edge normal.
+    np.testing.assert_allclose(args, np.r_[node.config.seek_speed * node._direction[:2], 0.])
     assert 'wy' not in node._servo_cmd.publish_twist.call_args.kwargs
     node._stop.assert_not_called()
 
@@ -176,3 +177,60 @@ def test_joint_and_controller_tracking_is_tagged_with_phase_and_state():
     assert joints['source'] == 'joint_states' and joints['phase'] == 'tip'
     assert joints['state'] == node.motion.state and joints['positions'] == [.1]
     assert controller['source'] == 'controller_state' and controller['feedback']['positions'] == [.1]
+
+
+def approach_method(plan):
+    """ForwardTip.approach with fake MoveIt planning and planning-scene obstacles."""
+    from contextlib import contextmanager
+    tree = ast.parse(SOURCE.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'ForwardTip')
+    keep = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'approach']
+    scenes = []
+
+    @contextmanager
+    def object_obstacle(node, xyz, slabs=False):
+        scenes.append('slabs' if slabs else 'box')
+        yield
+    env = dict(np=np, object_obstacle=object_obstacle, plan_and_execute_pose_goal=plan,
+               BASE_FRAME='world', EE_LINK='finger_ball_center', TIP_ORIENTATION=(0., 0., 0., 1.))
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(SOURCE), 'exec'), env)
+    return env['approach'], scenes
+
+
+def approach_node():
+    node = Mock()
+    node._pre, node._box_pre, node._ball = np.array([.57, 0., .2]), np.array([.51, 0., .2]), np.array([.6, 0., .2])
+    node.pre_clearance = 'slabs'
+    return node
+
+
+def test_close_pre_tip_plans_against_slabs_first():
+    plan = Mock(return_value=True)
+    approach, scenes = approach_method(plan)
+    node = approach_node()
+    assert approach(node)
+    assert scenes == ['slabs'] and node.pre_clearance == 'slabs'
+    assert plan.call_args.kwargs['target_position'] == [.57, 0., .2]
+
+
+def test_unplannable_close_pre_tip_falls_back_to_the_whole_box():
+    targets = []
+
+    def plan(*args, diagnostics=None, target_position=None, **kw):
+        targets.append(target_position)
+        return len(targets) == 2   # first (close) plan fails before executing anything
+    approach, scenes = approach_method(plan)
+    node = approach_node()
+    assert approach(node)
+    assert scenes == ['slabs', 'box'] and node.pre_clearance == 'box'
+    assert targets == [[.57, 0., .2], [.51, 0., .2]]
+    assert np.allclose(node._pre, [.51, 0., .2])
+
+
+def test_failed_execution_does_not_retry():
+    def plan(*args, diagnostics=None, **kw):
+        diagnostics['execution_success'] = False   # planned, moved, then failed
+        return False
+    approach, scenes = approach_method(plan)
+    assert not approach(approach_node())
+    assert scenes == ['slabs']

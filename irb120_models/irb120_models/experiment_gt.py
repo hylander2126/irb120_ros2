@@ -18,6 +18,30 @@ def forward_tip_ground_truth(*, include_temporary=False):
     return result
 
 
+def episode_reference(name):
+    """Scoring reference for any configured object (tipT: forward_tip_ground_truth).
+
+    com[0] is the CoM distance from the forward (far) support, com_obj[0] from the
+    press-pull (near) support, z the CoM height. Unknown values are NaN, never guessed:
+    an estimate needing one is skipped, a score needing one is NaN. Without a measured
+    forward distance it is base_w - press_pull (recorded in forward_distance_source).
+    """
+    if name in list_configurations('tipT', include_temporary=True):
+        return forward_tip_ground_truth(include_temporary=True)[name]
+    record = load_configuration(name)
+    gt = dict(record)
+    d = record['initial_support_distances']
+    near, far, source = d['press_pull'], d['forward'], 'measured'
+    if far is None and near is not None and record.get('base_w') is not None:
+        far, source = record['base_w'] - near, 'base_w_minus_press_pull'
+    nan = lambda v: np.nan if v is None else float(v)  # noqa: E731
+    z = nan(planar_com(record)[1])
+    gt.update(mass=nan(record.get('mass')), com_obj=[nan(near), z], com=np.array([nan(far), 0.0, z]),
+              forward_distance_source=source if far is not None else None,
+              theta_deg=float(np.degrees(np.arctan2(nan(far), z))))
+    return gt
+
+
 def cylinder_sweep_references():
     """Analysis adapter: read canonical SI YAML, omit unknown measurements.
 

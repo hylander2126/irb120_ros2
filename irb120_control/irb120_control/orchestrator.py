@@ -207,7 +207,7 @@ def show_snapshot(episode: Episode, open_images: bool) -> dict | None:
     else:
         print(f"  planar_push  NONE: {push.get('reason')}")
 
-    image = next((folder / n for n in ("final_selection.png", "final_selection.jpg", "cam1_overlay.png") if (folder / n).exists()), None)
+    image = next((folder / n for n in ("contacts.png", "final_selection.png", "final_selection.jpg", "cam1_overlay.png") if (folder / n).exists()), None)
     if image is not None:
         print(f"    image: {image}")
         if open_images:
@@ -239,9 +239,11 @@ def option_image(episode: Episode, plan: dict) -> Path | None:
     stage = _latest_perceive(episode)
     if stage is None:
         return None
-    name = f"final_selection_B{plan['press_backup']}.jpg" if plan.get("press_backup") else "final_selection.jpg"
-    path = episode.path / stage["dir"] / name
-    return path if path.exists() else None
+    folder = episode.path / stage["dir"]
+    if plan.get("press_backup"):
+        path = folder / f"final_selection_B{plan['press_backup']}.jpg"
+        return path if path.exists() else None
+    return next((folder / n for n in ("contacts.png", "final_selection.jpg") if (folder / n).exists()), None)
 
 
 def sensor_fault(stage: dict | None) -> str | None:

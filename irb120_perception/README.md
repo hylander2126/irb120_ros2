@@ -24,7 +24,8 @@ ros2 launch irb120_perception stereo_offline_pipeline.launch.py object_name:=fla
 The robot's `bringup_stack.launch.py` also starts this camera profile by default;
 do not start a second camera driver session. Results are written beneath
 `runtime_logs/<object>/<timestamp>/{capture,recon,contacts}/`. Review the embedded
-images and mesh viewers in `recon/README.md` and `contacts/README.md`.
+the contact image in `contacts/README.md`. Meshes and reconstruction HTML
+reports are optional (`review:=true`); routine press diagnostics are disabled.
 
 The `stereo_offline` CLI also supports individual `capture`, `reconstruct`,
 `report`, `contacts`, and `worker` steps. [The workflow guide](docs/STEREO_OFFLINE.md)
@@ -35,8 +36,8 @@ covers commands, requirements, checkpoint settings and diagnostics.
 `episode snapshot OBJECT` and the motion pipeline now capture fresh FFS runs
 automatically. They retain `snapshot.json`, `contacts.json`, `object_cloud.npz`,
 calibrated image evidence, selection graphics and source capture identity in each
-perceive stage. Raw capture/reconstruction and step logs remain under the episode's
-`ffs_runs/`. No DBSCAN node or perception activation service is needed.
+perceive stage, with the raw capture, reconstruction and step logs in its `capture/`,
+`recon/` and `logs/` subfolders (written in place, never copied). No DBSCAN node or perception activation service is needed.
 
 A snapshot does not command motion. Motion primitives still apply their existing
 contact checks, MoveIt approach/collision checks and operator gates. Frozen contact

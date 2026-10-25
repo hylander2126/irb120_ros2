@@ -245,7 +245,7 @@ def process_episode(ep_file, data_root, sig_reg, vision_dir, label=None):
             row = dict(stage=stage['dir'], kind=stage['kind'], status='analysis crashed', results={})
             failures.append(dict(episode=str(ep_file), stage=stage['dir'], traceback=traceback.format_exc()))
         row.update(object=label, recorded_label=ep['object'], episode=Path(ep_file).parent.name,
-                   set=str(Path(ep_file).parent.parent.parent.relative_to(data_root)),
+                   set=str(_object_dir(ep_file).parent.relative_to(data_root)),
                    episode_outcome=(ep.get('outcome') or {}).get('result', 'unfinished'),
                    git_commit=ep.get('git_commit'), git_dirty=ep.get('git_dirty'), official='official' in ep,
                    tier=ref['tier'] if ref else 2, reference_source=ref['source'] if ref else None)
@@ -254,6 +254,12 @@ def process_episode(ep_file, data_root, sig_reg, vision_dir, label=None):
         score(rows, ref)
     done = [r for r in rows if r.get('status') == 'processed']
     return rows, (done[-1] if done else None), failures
+
+
+def _object_dir(ep_file):
+    """<object>/ holding this episode: <object>/<stamp>/ or the older <object>/episodes/<stamp>/."""
+    d = Path(ep_file).parent.parent
+    return d.parent if d.name == 'episodes' else d
 
 
 def scene_folders(episodes):
@@ -374,7 +380,7 @@ def main():
     vision_dir = (out / 'vision_cache') if a.vision else None
     if vision_dir:
         vision_dir.mkdir(exist_ok=True)
-    episodes = sorted(root.glob('**/episodes/*/episode.json'))[:a.limit]
+    episodes = sorted(root.glob('**/episode.json'))[:a.limit]
     sig_reg = pooled_registration(scene_folders(episodes))
     print(f'{len(episodes)} episodes under {root}; pooled registration sigma {sig_reg}')
     rows, endpoints, failures = [], [], []
